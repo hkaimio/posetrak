@@ -1,7 +1,127 @@
 # Marker-based mocap — status
 
+- **2026-09-14** (person+prop coupling A/B test, plus three real findings
+  it led to, latest) — Tried the person+pen/pad coupled tracking run
+  Phase 3 flagged as unexercised (previous entry): `--person ec1b3e2f...
+  119a24b5... b0eff656...` (Nelli + pen + pad) via `MultiPersonTracker`.
+  It ran without crashing, and a direct C++ source trace (not just
+  behavioral testing) confirmed `update_contact_pairs()`/
+  `build_cross_person_anchors()` are genuinely wired into every subject's
+  per-step update, contradicting the CLI's own stale `--person` help text
+  ("No cross-person coupling yet (Stage 1)"). Both configs used had
+  `cross_person_max_world_mm=400` (not disabled).
+
+  **A/B result (coupled vs. `cross_person_max_world_mm=0` on Nelli's own
+  config): coupling does not help, and introduces localized jitter.**
+  Wrist-to-pen distance is essentially unchanged (median 17.60cm coupled
+  vs. 17.00cm without -- no measurable improvement in hand/prop
+  agreement). Frame-to-frame wrist jitter in one specific window (frames
+  1218-1224) is 3-4x higher *with* coupling (e.g. 1.10-1.28cm/frame vs.
+  0.15-0.44cm/frame) while the *overall* jitter distribution across the
+  whole run is nearly identical between the two runs -- consistent with
+  a contact pair activating/deactivating right around there and
+  perturbing the fit transiently, not a general problem. **Open
+  question, not yet root-caused**: why does that specific window trigger
+  a transient contact-pair change, and can the anchor noise floor/gating
+  be tuned to avoid the perturbation without losing whatever benefit
+  coupling is meant to provide elsewhere.
+
+  **Real finding #1 -- root-caused a reported tracking artifact**: Harri
+  reported the left shin "turns upward" around frames 1015-1020 in the
+  no-coupling run specifically (not visible in the coupled run). Checked
+  first against raw per-camera 2D hand-keypoint detections around the
+  *hand* jitter window (a different, unrelated hypothesis Harri floated
+  about the pen's ArUco marker confusing the hand-keypoint detector on
+  gopro13_02) -- all 5 cameras' real 2D detections there are smooth and
+  continuous, ruling that out directly. The shin issue itself traces to
+  something else entirely: **`ankle_lat_L` and `ankle_med_L` both have a
+  genuine 2-frame detection gap at frames 1018-1019, then reacquire on
+  the same cameras at wildly discontinuous pixel positions** (e.g.
+  camera 1's `ankle_lat_L` jumps from a stable ~(2100,1870) to
+  (2315,1297) the instant it resumes) -- every marker in the shin/foot
+  group (ankle, heel, toe) swings together by up to ~70cm in Z while the
+  knee markers barely move, confirming the error is localized at/below
+  the ankle joint, not a whole-leg problem. This is the exact
+  reacquire-onto-the-wrong-candidate-after-occlusion failure mode this
+  session already characterized and fixed for the pen's reflective bands
+  (`prototype_pen_band_tracking.py`'s bootstrap+gate design) -- it just
+  hadn't been noticed in the production leg-dot path before. Matches
+  Harri's own recollection that the same class of problem existed in
+  markerless-only runs and was fixed by adding leg markers -- this
+  particular occurrence is that same underlying gap resurfacing when
+  reacquisition itself briefly fails, not a general regression. **Open
+  idea for a real fix**: apply the same tracking-gate discipline (never
+  reseed from a bad guess after a gap, verify consistency before
+  trusting a resumed detection) to leg dot-marker reacquisition
+  specifically, not just prop-dot tracking.
+
+  **Real finding #2 -- reducing measurement noise makes jitter *worse*,
+  not better**: Harri's hypothesis was that the configured noise values
+  (`calib_noise_std`=25px, `pose_noise_std`=13px -- confirmed via direct
+  code trace: DB column `measurement_noise_std` legacy-maps to
+  `calib_noise_std`; `session_reader.cpp` line ~255) are too large given
+  this capture's actual (small) calibration error, and that tightening
+  them should reduce hand-tracking jitter. Tested directly (new config,
+  `measurement_noise_std`=10, `pose_noise_std`=6, full single-person
+  rerun): **median wrist jitter went from ~0.51-0.52cm to 1.27cm (p95
+  1.90-1.95cm -> 9.49cm, max ~17cm -> 38.6cm)** -- 2-5x worse, the
+  opposite of the hypothesis, despite the tighter-noise run reporting
+  *better* numerical conditioning (0 PSD-eigensolver fixes vs. 18-21 in
+  the looser-noise runs). Kalman-filter-theoretic explanation: telling
+  the filter the sensor is more precise than it really is makes it trust
+  *every* observation more strongly, amplifying the effect of any single
+  bad/outlier detection into a larger state correction instead of
+  damping it -- the original 13/25px values are very plausibly providing
+  real, load-bearing robustness against exactly the kind of bad
+  reacquisition found in finding #1, not simply padding out an
+  overcautious noise budget. **Open implication**: the real fix for hand
+  jitter is very likely at the *detection/gating* layer (reject or gate
+  bad observations before they reach the filter), not the noise-trust
+  knob -- tightening noise without first fixing the underlying bad-data
+  problem looks actively counterproductive on this evidence.
+
+  **Real finding #3 -- a third instance of the mode-ambiguity export
+  bug**: investigating Harri's separate question ("is head-marker
+  [nose/ear] reprojection error big because of a skeleton-scaling
+  issue?") via `marker_projections.csv` surfaced a real bug in that
+  export, not (yet) a skeleton-scaling answer: many markers --
+  `MRK-wrist.*`, `MRK-Ankle.*`, `MRK-heel.*`, `MRK-*Toe.*`,
+  `MRK-elbow.*`, `MRK-knee.*`, plus the hand/finger set -- show median
+  "reprojection error" of **1800-2600px**, physically nonsensical for a
+  run that tracked 100%. Root cause: the export subtracts `obs_x/y` from
+  `proj_x/y` unconditionally, without checking measurement mode first --
+  for any observation using `PAIR_DIFF` (relative, child-minus-parent)
+  encoding, `obs_x/y` is a small relative offset, not an absolute pixel
+  position, so comparing it against an absolute `proj_x/y` produces a
+  huge, meaningless "error". This is the exact same mode-ambiguity bug
+  class `docs/roadmap/features/observation-results-semantics.md` already
+  documents as having caused two real bugs before -- a third instance,
+  in the CSV diagnostic export this time. **Not yet fixed** (next up).
+  After manually filtering out the obviously-corrupted rows, a
+  preliminary (still bug-tainted) look shows `MRK-nose` (49px) and
+  `MRK-ear.R` (46px) moderately -- not dramatically -- higher than
+  `MRK-hip.L/R` (32-38px) and `MRK-shoulder.R` (29px), a real but modest
+  signal partially supporting the skeleton-scaling hypothesis. Harri's
+  own reaction: the hip/shoulder numbers themselves look higher than
+  they should be too -- needs the export bug fixed and a clean re-pull
+  before trusting any of these numbers, head or otherwise.
+
+  **Open idea -- a better jitter metric**: raw frame-to-frame Euclidean
+  distance (used throughout this investigation so far) doesn't
+  distinguish real fast movement from noise. Literature-standard
+  alternative: an acceleration-based smoothness metric (mean magnitude
+  of the 2nd derivative of joint position -- reported as "Accel" in
+  VIBE and similar pose-estimation-smoothness literature; grounded in
+  the biomechanics finding that real voluntary human movement is
+  empirically jerk-minimizing, Flash & Hogan 1985, so elevated
+  acceleration/jerk flags non-physiological noise specifically). Harri's
+  own "distance to a 5-frame median/mean" idea is in the same family;
+  a Savitzky-Golay-smoothed local polynomial fit would refine it further
+  by not penalizing genuine acceleration/deceleration the way a flat
+  windowed mean or median would. Not yet implemented.
+
 - **2026-09-13** (validated the production tracker on the pen+pad
-  objects end-to-end, latest) — Phase 3's own "validate the mechanical
+  objects end-to-end) — Phase 3's own "validate the mechanical
   path first" item (`marker-mocap-productization-plan.md` §4): registered
   the pen and pad as real `capture_objects` and ran the actual
   `posetrak-tracker` UKF pipeline against them, not a standalone script.

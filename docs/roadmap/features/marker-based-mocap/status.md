@@ -1,8 +1,97 @@
 # Marker-based mocap — status
 
+- **2026-09-14** (shoulder-width skeleton fix confirmed on the full trial,
+  but reintroduced an old ankle-lateral-offset regression; root-caused
+  and fixed via skeleton lineage, latest) — Ran the full ~97s trial
+  (11588 steps, not the ~1799-step windows used for the earlier A/B
+  tests) with "Nelli scale attempt 2026-09-14" (shoulder width corrected
+  from the default female skeleton's 35cm to the measured 30.4cm; see
+  the previous entry's re-examination of the head-marker asymmetry for
+  why this was suspected). Comparing the same step range (0-1798) against
+  the pre-fix skeleton's own run, torso markers genuinely improved
+  (`MRK-hip.L` 33.8px&rarr;27.3px median, `MRK-hip.R` 38.4px&rarr;21.5px,
+  `MRK-shoulder.L` 23.9px&rarr;20.7px, `MRK-shoulder.R` 27.2px&rarr;19.6px)
+  while the head markers did not improve on this same slice
+  (`MRK-nose` 44.9px&rarr;53.0px, `MRK-ear.L` 24.9px&rarr;34.3px,
+  `MRK-ear.R` 44.7px&rarr;36.7px) -- consistent with Harri's own visual
+  read (torso clearly better, head markers "still too high" and jittery)
+  and with the previous entry's finding that the head-marker error isn't
+  simple skeleton scaling. No true full-trial baseline exists at the
+  pre-fix skeleton to compare against directly (the pre-fix runs are all
+  ~1799-2399 step diagnostic windows), so this comparison is scoped to
+  the overlapping step range only, not the whole trial.
+
+  **Regression found on review**: Harri noticed `ankle_lat_L`'s lateral
+  offset was wrong again in the shoulder-fix skeleton -- a problem
+  already fixed once earlier this project (leg markers, 2026-09-0x).
+  Root-caused via skeleton lineage (`skeletons.parent_id` chain, not by
+  re-diagnosing the marker calibration itself): "Nelli scale attempt
+  2026-09-14" descended from a *stale* pre-ankle-fix base
+  (`leg.calibrated.2026-09-06-kare-tests`, created 07:59 that day), while
+  every other skeleton in active use descended from the correct
+  post-fix base (`v3, fully refit single-camera`, created 16:08 the same
+  day -- the shoulder-fix scaling pass had simply been run from an old
+  working copy). Fixed by diffing the shoulder-fix skeleton's joint
+  offsets against its own (wrong) base to isolate exactly what the
+  scaling pass itself changed (12 joints: spine1, spine2, shoulder.L/R,
+  upper_arm.L/R, forearm.L/R, hand.L/R, foot.L/R; confirmed zero other
+  marker-level diffs, so no unrelated regressions), then reapplying that
+  same set of offset deltas onto the *correct* base -- producing a new
+  combined-fix skeleton with both the shoulder-width correction and the
+  ankle fix intact. Verified directly: `ankle_lat_L`'s marker offset is
+  now `[0.0411, 0.3868, 0.0061]`, matching the correct base, not the
+  wrong skeleton's `[0.1341, 0.2975, -0.0391]`. A full-trial run with
+  this combined-fix skeleton is in progress; results to follow in a
+  later entry.
+
+- **2026-09-14** (confidence-vs-head-orientation analysis validates a
+  generic confidence-threshold fix for head-marker jitter; per-camera
+  hand-detection quality gap does not trace to pipeline stage or noise
+  model) — Two follow-up investigations from Harri's head-marker/finger-
+  quality observations, both requested with an explicit preference for a
+  generic fix over head-orientation-specific tracker logic.
+
+  **Head marker occlusion**: built a "visibility proxy" per (frame,
+  camera, marker) -- `dot(normalize(marker_3d - head_center),
+  normalize(camera_world_pos - head_center))`, where `head_center` is the
+  per-frame mean of nose+ear.L+ear.R 3D positions (from
+  `tracking_results.csv`) and `camera_world_pos = -R^T @ t` from the
+  camera's own extrinsics -- and correlated it against ViTPose's raw
+  (uncalibrated, not [0,1]) confidence score from `observations.csv`.
+  Found a real positive correlation for all three head markers (Pearson
+  r=0.55-0.62): binned confidence sits around 2.8-3.9 when the proxy says
+  the marker is on the occluded/back side of the head (visibility &lt;
+  -0.2), plateauing at 4.4-4.7 once the marker faces the camera
+  (visibility &gt; 0). This confirms Harri's hypothesis (occlusion
+  measurably lowers detector confidence) without needing any head-
+  orientation-specific exclusion logic in the tracker, matching his
+  stated preference -- **recommended fix: raise the confidence threshold
+  for `nose`/`ear.L`/`ear.R` to roughly 3.5-4.0** (not yet implemented;
+  needs checking against the rest of the confidence distribution for
+  false-reject risk before picking a final number).
+
+  **Per-camera hand-detection quality**: Harri observed gopro13_02 and
+  insta_ace2_pro fingers were visibly jitterier/less plausible than
+  gopro-11_mini_01 and oneplus9pro-01's. Checked whether all 6 cameras
+  actually ran the dedicated hand-keypoint pass rather than falling back
+  to full-body ViTPose for fingers: confirmed via `pose_observations`
+  grouped by camera + source that every camera has substantial
+  `hand_l`/`hand_r` row counts (6259-10227 range) -- no camera is
+  missing the dedicated pass. Checked two plausible pipeline-level
+  explanations and rejected both: mean `noise_scale` (crop_scale) for
+  gopro13_02 (0.859) and insta_ace2_pro (0.811) is actually *lower*
+  (better) than gopro-11_mini_01 (1.321) and oneplus9pro-01 (1.197), the
+  opposite of what would explain worse detections; and mean/median raw
+  confidence shows no such pattern either (insta_ace2_pro has the
+  *highest* mean confidence, 1.972, despite being visually the worse of
+  the two). Conclusion: the quality gap is most likely a genuine
+  per-camera 2D detection/viewing-angle/lens characteristic, not
+  something explainable (or fixable) at the noise-model or pipeline-
+  stage level.
+
 - **2026-09-14** (fixed the `marker_projections.csv` mode-ambiguity bug;
   head-marker reprojection error is real but asymmetric, not simple
-  skeleton scaling, latest) — Follow-up to the previous entry's finding
+  skeleton scaling) — Follow-up to the previous entry's finding
   #3. Fixed `TrackingExporter::write_frame()` (`cpp/src/io/
   tracking_export.cpp`): the per-(marker,camera) loop now checks
   `obs.mode` before building the exported "error" -- `VELOCITY`
@@ -442,7 +531,7 @@
   every tracking run in this project, marker-augmented or not, so this
   benefits markerless tracking too, not just today's leg-module work.
 
-- **2026-09-13** (closed the frame-time accounting, latest) — Harri
+- **2026-09-13** (closed the frame-time accounting) — Harri
   caught a real error in the previous entry's own numbers: "if update()
   is 61ms and predict_marker_slots() is 4.13 it does not add up" against
   the ~180ms/frame real total. Correct: `u_kalman_ms` (61ms) is a
@@ -489,7 +578,7 @@
   side, and its fix would help every tracking run, not just marker-
   augmented ones. Not investigated further this pass.
 
-- **2026-09-13** (batched dot-slot prediction across cameras, latest) —
+- **2026-09-13** (batched dot-slot prediction across cameras) —
   Harri's direct question ("why don't we batch all cameras for marker
   slot matching -- rerunning FK 6 times sounds self-evident") had no
   real answer beyond "not built yet": the per-camera API shape
@@ -531,7 +620,7 @@
   (inside the shared body+hand update, not the dot-specific path),
   not started here.
 
-- **2026-09-13** (parallelized `predict_marker_slots()`, latest) —
+- **2026-09-13** (parallelized `predict_marker_slots()`) —
   Harri's own question after the profiling entry below ("we already
   parallelize FK for markerless keypoints -- why not for marker slots
   too?") was right: `update()`'s equivalent per-sigma-point loop
@@ -785,7 +874,7 @@
   is worth the larger API change to `Tracker::predict_dot_slot_
   predictions()`'s per-camera signature.
 
-- **2026-09-12** (first real end-to-end dot-augmented tracking run, latest)
+- **2026-09-12** (first real end-to-end dot-augmented tracking run)
   — Completed the 3-step plan from the previous entry (build the
   articulated `MarkerPrediction` UKF path, convert the calibrated
   attachment set into a real skeleton, run it end-to-end and compare
@@ -911,6 +1000,1550 @@
   defaults to radial-perpendicular rather than being fit against real
   camera visibility; no BVH/visual review of the resulting dot-driven
   joint angles has been done yet.
+
+- **2026-09-12** (reconciliation + re-calibration) — Built
+  `reconcile_conflict_review.py`: folds the conflict-review pass's
+  resolved assignments back into the main
+  `tracklet_group_assignments_full_v2.json`.
+
+  **Real bug found and fixed before trusting the output**: a naive
+  first version (remove every resolved member from wherever it was,
+  re-add each resolved conflict-review group as a new one) tore apart
+  the `gopro-11_mini_01#66` + `gopro13_02#79` pairing fixed by hand the
+  same day -- `#66` also correctly appeared (via "keep own slot") in an
+  unrelated conflict chain, and blindly rebuilding its grouping from
+  that chain's own narrow view split the pair back into two single-
+  camera groups, silently re-introducing the exact `ankle_lat_L`
+  coverage gap this whole thread started from. Fixed by only touching a
+  member when its resolution is a *real* correction (different slot/
+  rejection than what the main file already has, checked at the exact
+  key) -- 119 of 134 resolved members turned out to be genuine no-ops
+  (the conflict review confirmed an already-correct slot) and were left
+  completely alone; only 15 real corrections were applied. Range-
+  overlap matching (not exact-key) still correctly handles a whole
+  main-file tracklet superseded by conflict-review split fragments
+  (`oneplus9pro-01#1235`, split into two at frame 10560 during review).
+  Verified thoroughly before replacing the main file: all 134 resolved
+  members' final status matches expectation, zero cross-group overlaps.
+  Original pre-reconciliation file kept as `tracklet_group_assignments_
+  full_v2.pre-reconcile.bak.json`.
+
+  **Re-ran B4** on the reconciled data: `ankle_lat_L` now gets real
+  cross-camera samples (n=28, residual median 0.7cm -- confirms the
+  original coverage-gap diagnosis was right and is now genuinely fixed).
+  Honest caveat, not hidden: re-validating against GT found `ankle_lat_L`'s
+  own purity actually *dipped slightly* (0.62 -> 0.56, still confused
+  with `ankle_med_L`) -- its lateral offset (13.4cm) is implausibly
+  large next to its own right-side counterpart (4.1cm) and every other
+  ankle slot (3-4cm), most likely because n=28 from a single pair over a
+  limited time window isn't enough data to average out whatever local
+  tracking bias exists there, unlike the thousands of samples backing
+  every other slot. The *coverage* problem (zero data at all) is solved;
+  the *confidence* of this one slot's fit is not yet, and needs more
+  assigned cross-camera groups for it in a future capture before it's
+  trustworthy. Every other slot's purity held steady or improved
+  slightly from the 15 real corrections.
+
+- **2026-09-12** (conflict review complete + marker rendering fix,
+  latest) — Harri finished the conflict review pass ("checked all") --
+  most groups' slots were already correct, some real misclassifications
+  fixed via the new accept-hint action and manual review together.
+
+  UI feedback for next time: the green cross drawn over each marked dot
+  covered exactly the pixel content (real dot vs. noise/misdetection) a
+  reviewer needs to see there. Fixed in `_bgr_to_qpixmap()`: dropped
+  `cv2.drawMarker`'s cross, kept only the circle (an outline ring, which
+  doesn't cover the center). Confirmed visually on a real frame before
+  and after.
+
+  Cleared the 302MB on-disk thumbnail cache (`scratch/dot_ground_truth/
+  thumb_cache/`) -- it holds pre-rendered PNGs from before this fix, so
+  anything already viewed would otherwise keep showing the old
+  cross-obscured version until re-decoded anyway. Revisiting previously-
+  seen frames will re-decode from video once more (the ~190x cache
+  speedup resets), acceptable now that both review passes are done and
+  future use should be spot-checks, not another full sweep.
+
+- **2026-09-12** (accept-hint action) — "The 'was: xxx' comment
+  is quite often correct -- can I just select the correct ones and keep
+  that slot for those?" Added "Keep checked members' own 'was: ...'
+  slot" to `label_tracklet_groups_gui.py`: unlike "Assign checked as new
+  group" (one Slot combo value applied to every checked member), this
+  finalizes each checked member *individually* to whatever its own hint
+  says -- necessary because a conflict group's checked members
+  routinely have *different* correct previous slots (confirmed: of a
+  17-member chain's members, 3 shared `ankle_lat_L` while others had
+  their own distinct hints). Members sharing the same hinted slot are
+  still consolidated into one new group together, not one singleton
+  group each.
+
+  Refactored `_finalize_checked` to share a new `_finalize_members`
+  helper (takes an explicit member list instead of always reading the
+  checkboxes) so the batch action can make several such mutations before
+  a single `_save()`/`_populate_list()` refresh, not one per member.
+
+  Verified against the real conflict-review data: accepting 2 members
+  with different hints assigns each to its own correct slot; accepting
+  3 members sharing one hint consolidates them into a single new group
+  (not three); checking a member with no hint warns and mutates
+  nothing (verified by patching `QMessageBox.warning` -- the real
+  modal dialog blocks headless test automation the same way it would
+  wait for a real click, not a bug, just untestable un-patched).
+  Full crash sweep re-run clean on the original 24-group dataset too
+  (no regression from the `_finalize_checked` refactor).
+
+- **2026-09-12** (conflict review workflow) — "How can we review
+  it?" -- rather than build a new review UI, converted the audit's
+  output into `build_tracklet_groups.py`'s own group-file shape
+  (`prepare_conflict_review.py`, new): every conflict chain and
+  high-confidence mismatch becomes one synthetic "group" (already
+  flagged contradiction+ambiguous), reviewable with the *exact* existing
+  `label_tracklet_groups_gui.py` -- same thumbnails, suggestions,
+  Assign/Split/Discard/scrub-split, zero new UI code. Added one small,
+  additive enhancement to that GUI: an optional `member_hints` block in
+  the groups file (`"label#tid": "was: <slot>"`) shown alongside each
+  member's checkbox, so a conflict between two previously-different
+  slot assignments is visible at a glance without cross-referencing
+  `cross_slot_conflicts.json` separately. Low-confidence pairs excluded
+  by default (`--include-low-confidence` to add them).
+
+  Verified against the real data: 30 conflict groups generated (21
+  chains + 9 high-confidence mismatches), all render cleanly in a
+  headless smoke test, hints display correctly (e.g. `gopro-11_mini_01
+  #1423` shows "was: toe_R").
+
+  Review with:
+  ```
+  python python/tools/label_tracklet_groups_gui.py \
+      --groups scratch/dot_ground_truth/tracklet_groups_conflicts.json \
+      --output scratch/dot_ground_truth/tracklet_group_assignments_conflicts.json
+  ```
+  Not yet built: folding the corrected assignments back into the main
+  `tracklet_group_assignments_full_v2.json` once this review pass is
+  done (a real, needed follow-up step, deliberately not built ahead of
+  having real corrected data to reconcile against).
+
+- **2026-09-12** (cross-slot consistency audit) — Harri checked
+  the raw video and confirmed `ankle_lat_L` definitely has good
+  multi-camera coverage (40-45s, visible in both `gopro-11_mini_01` and
+  `gopro13_02`) -- contradicting B4's "single-camera-only" finding for
+  that slot. Root-caused, not a coverage gap: `gopro-11_mini_01#66`
+  (assigned `ankle_lat_L`) and `gopro13_02#79` (assigned `toe_L`)
+  triangulate together at **median 0.14px** (about as perfect as this
+  data gets) -- the same physical marker, split into two different B3
+  groups from the same original contaminated B2 component
+  (`group_108`, 12 members, `[CONTRADICTION][ambiguous]`) and assigned
+  *different* slots because the splitting process (necessarily, per
+  finding #3) loses the "these were originally linked" information once
+  pieces are pulled apart. Fixed directly: merged the `toe_L` entry into
+  the `ankle_lat_L` one in `tracklet_group_assignments_full_v2.json`.
+
+  **Generalized into a systematic audit**, since this is exactly finding
+  #3's proposed mechanism in action: for every pair of *differently*
+  -slotted tracklets that came from the same original B2 component,
+  re-ran the real `pairwise_stats()` reprojection check. Result: **124 of
+  744 checked pairs (17%)** show strong agreement (<3px median, <6px
+  p90) despite disagreeing final slots. Not all real errors -- many
+  (~89) are low-sample or anatomically implausible pairs (e.g.
+  `hip_L`/`toe_R`), most likely 2-camera epipolar-line coincidences
+  over a short window, not real mixups. Filtered to **35 high-confidence
+  cases** (n>=30, median<2px, anatomically adjacent same-side pair --
+  lat/med, knee variants, heel/ankle/toe -- or a same-slot left/right
+  swap) as the actionable subset.
+
+  Found at least one genuine 3-way conflict needing visual judgment, not
+  just automated merging: in `group_1`, `oneplus9pro-01#15312` (n=1771,
+  very strong evidence either way) triangulates consistently with *both*
+  `gopro13_02#2803` (labelled `ankle_med_L`) and `gopro-11_mini_01#2693`
+  (labelled `ankle_lat_R`) -- at least two of the three labels on this
+  one real physical marker are wrong, but geometry alone can't say which
+  is *right* (lat vs. med, or which leg) without looking at the image.
+  Deliberately did not auto-apply the other 34 high-confidence fixes for
+  this reason -- flagged to Harri to work through rather than guessed.
+
+  **Formalized into `audit_cross_slot_consistency.py`**, per Harri's
+  request. Real improvement over the ad hoc version: connected-
+  components clustering over every accepted cross-camera edge within
+  an original B2 component (not just isolated pairwise checks), and
+  properly includes split-range (4-element) members this time, not
+  only whole tracklets. Re-running the clustered version on the full
+  dataset changed the picture substantially: most of what looked like
+  simple 2-way mismatches turned out to be fragments of larger tangles.
+  Final, accurate result: **9 simple (2-tracklet, 2-slot) high-
+  confidence mismatches** (cleanly actionable without a visual check)
+  and **21 conflict chains** (3-17 tracklets each, 2-6 distinct slots)
+  that genuinely need a human to look at the actual images -- geometry
+  proves several labels in each chain are wrong but not which one(s)
+  are right. Two chains stand out in size: `group_43` (17 tracklets, 6
+  slots) and `group_6` (13 tracklets, 3 slots -- mostly a toe_L/toe_R
+  tangle). Full results (including every chain's own members and
+  pairwise stats, not just what's printed) written to
+  `scratch/dot_ground_truth/cross_slot_conflicts.json` for reference
+  while working through them.
+
+  Not yet done: applying the 9 high-confidence fixes or working through
+  the 21 chains (needs Harri's visual judgment, not automation) --
+  B4 should be re-run once real corrections land, given `toe_L`/`toe_R`
+  (already the two worst-residual slots) are implicated in several of
+  the largest chains.
+
+- **2026-09-12** (B5 output) — Completed B4's output to match the
+  redesign doc §1.9 file shape exactly (`module`, `skeleton_topology`,
+  `requires_joints` headers, alongside the `calibration:` block and
+  per-marker fields already produced by B4): `skeleton_topology` pulled
+  from the skeleton YAML's own top-level `name` (`reallusion-no-waist` --
+  distinct from the DB row's per-person instance name, "Default female");
+  `requires_joints` derived from the parent joints actually used
+  (`foot, shin, thigh`), not assumed; added `date` and `unfit_slots`
+  (explicit, e.g. `ankle_lat_L`) to the `calibration:` block so a
+  consumer sees the coverage gap without re-deriving it.
+
+  Written to the real project tree for the first time, not scratch:
+  `catalog/leg.calibrated.2026-09-06-kare-tests.yaml` -- the project's
+  first calibrated (or nominal) marker catalog file. Re-verified the
+  finished file loads and validates identically to B4's own numbers
+  (same purities, same residuals) -- the header additions don't disturb
+  anything `_load_attachment_set()`/`eval_fk_prediction.py` reads.
+
+  P-B (B1-B5) is now a complete, working pipeline end to end: per-camera
+  motion-gated tracklet linking -> cross-camera grouping -> manual
+  slot assignment -> calibration fit -> a real, validated marker
+  attachment set ready for FK-based prediction. Not yet wired into the
+  production tracker config (a separate integration step) or into
+  `posetrak-tracker`'s own marker-observation pipeline.
+
+- **2026-09-12** (B4 calibration fit) — Built
+  `fit_calibrated_attachment_set.py` per the redesign doc §4's own B4
+  design: for each assigned group, per-frame `offset_local = T(t)^T @
+  (p(t) - T(t)_translation)` against the parent joint's FK transform,
+  median over every frame of every group assigned to that slot (not just
+  one group -- robust to a last-frame outlier or a single bad group).
+  Parent-joint mapping matches `_RIGHT_TRIAL`'s established convention
+  (hip->thigh, knee_*/ankle_*->shin, heel/toe->foot); confirmed both
+  sides' local +Y is down-bone for this skeleton, so local X/Z read
+  directly as lateral/anterior with no extra axis-building. Fits both
+  sides independently from real data (not mirror-generated) -- a
+  calibrated set should reflect whatever real (a)symmetry the session
+  shows, not force symmetry.
+
+  Run against the completed 2026-09-12 B3 review (395 entries, 294
+  assigned): 109 usable groups (many assigned groups turned out
+  single-camera-only -- no simultaneous 2-different-camera view to
+  triangulate from, a real finding in its own right, e.g. 28/34 `toe_L`
+  groups and 20/29 `toe_R` groups contributed nothing, consistent with
+  finding #1 below) across 15 of 16 slots. `ankle_lat_L` got zero
+  samples (all 9 of its assigned groups were single-camera-only) --
+  surfaced as an explicit warning in the tool's own output, not silently
+  dropped; a real data gap needing better multi-camera coverage of that
+  slot in a future capture, not a bug.
+
+  Fitted values pass a clean anatomical sanity check on their own: lat/
+  med offsets are opposite-signed on the same leg and mirrored between
+  legs (fully self-consistent); along-bone fractions land exactly where
+  expected (hip ~0.02-0.04 near the hip joint, knee_* ~0.00-0.02 near
+  the knee, ankle_* ~0.81-0.84 near the distal shin, toe ~0.80-0.81 near
+  the foot's far end, heel *negative* ~(-0.32)-(-0.41), i.e. behind the
+  ankle -- opposite direction from the toe along the same bone, correct).
+  Residuals (predicted vs. actual, using the fitted offset) median
+  1.2-4.4cm, p90 2.3-9.1cm -- plausible given tracking + triangulation
+  noise, per the design doc's own expectation.
+
+  **Validated exactly per the design doc's own plan**: added
+  `--attachment-set` to `eval_fk_prediction.py` (was hard-coded to P-A's
+  exploratory `_DEFAULT_TRIAL` probes) and re-ran the same GT metric.
+  Every single slot's purity improved, several by 30-50 points (e.g.
+  ankle_med_R 0.35->0.88, knee_front_L 0.32->0.72, knee_front_R
+  0.41->0.85, toe_L 0.50->0.85, toe_R 0.49->0.96, knee_lat_R
+  0.42->0.83, knee_med_L 0.71->1.00) -- and every probe now maps to
+  *itself* by name, not a shared generic anchor, directly confirming
+  the 2026-09-11/12 lat/med-confusion diagnosis was a catalog-
+  completeness problem (no distinct offset per real slot), not a
+  missing-normals problem. `ankle_lat_L` stayed weak (0.62, confused
+  with `ankle_med_L`) exactly as predicted by its own zero-sample
+  warning above -- consistent, not a surprise.
+
+  Not done in this pass (matches the design doc's own explicit scope
+  cut): normal direction still defaults to the offset's own radial
+  perpendicular, not fitted against observed camera visibility --
+  revisit only if the visibility prior needs more accuracy than that
+  gives. `ankle_lat_L`'s data gap needs either better multi-camera
+  coverage in a future capture or a single-camera-only fitting
+  fallback (not built).
+
+- **2026-09-12** (B3 review complete) — **All 156 B2 groups
+  reviewed and assigned** (`tracklet_group_assignments_full_v2.json`:
+  395 final entries after splits, 294 assigned to a real slot, 101
+  rejected -- 91 noise, 10 other-subject/prop, using the reject-reason
+  distinction added 2026-09-11). Slot distribution ranges 9-34 groups
+  per slot; a real, complete labeled dataset now exists for B4.
+
+  Three concluding findings from the full pass:
+
+  1. **"Most common misdetection: non-existing dots in the foot near the
+     toes."** Confirmed quantitatively, not just impression: `toe_L`
+     (34) and `toe_R` (29) together account for 63 of the 294 assigned
+     groups -- 2-3x a typical slot's count (9-27 elsewhere). Consistent
+     with phantom/false dot detections near the feet (likely ground
+     reflection or shoe highlights passing the brightness+shape gate)
+     fragmenting into many separate tracklet groups needing individual
+     review. A detection-tuning target (per-camera or per-region
+     threshold near the foot/ground), not investigated further tonight --
+     a separate track of work from the linker/grouping issues above.
+
+  2. **"Normal-based culling for initial candidates would have saved a
+     lot of time."** Confirms and extends 2026-09-11's lat/med finding --
+     not just ankle lat/med (literally position-indistinguishable today)
+     but suggestions generally would benefit from normal-direction
+     filtering, not just position-distance ranking. Reinforces that B4
+     (a real per-slot marker catalog with distinct offsets *and*
+     normals, replacing the exploratory `_DEFAULT_TRIAL` probes) is the
+     right next investment, not a smaller patch.
+
+  3. **"Very large groups were confusing -- hard to tell what
+     commonality caused tracklets to end up together. Need tighter
+     grouping criteria: covered time ranges should overlap *enough*, and
+     during that overlap the dots should triangulate consistently near
+     the slot's own predicted position."** A concrete design proposal
+     for the 2026-09-11 "B2/linker tension" problem (more numerous
+     fragments from the fixed linker give B2's pairwise reprojection
+     test more chances to chain a wrong link into a large blob). Two
+     specific, actionable criteria: (a) a *relative* overlap requirement
+     (overlap duration relative to each tracklet's own span, not just an
+     absolute `min-shared-frames` count -- a tiny sliver of overlap
+     between two long, otherwise-unrelated tracklets is currently
+     sufficient "evidence"), and (b) fold the FK-slot-consistency check
+     directly into the *grouping* decision itself (today it only ranks
+     suggestions after grouping, so a pairwise link can be accepted even
+     if the resulting 3D trajectory doesn't correspond to any real
+     slot's predicted position at all). Not built yet -- a real,
+     scoped follow-up to design properly, not a quick patch.
+
+  **Open decision, not yet made**: whether to re-run full-capture
+  detection with 2026-09-12's `accel_std_px=2` fix now that the review
+  is complete -- doing so would invalidate every completed group_id
+  (fresh tracklet ids again, same as the 2026-09-11 re-run did), forcing
+  a full B3 re-review on top of the one just finished. Leaning toward
+  *not* redoing it now (the fix matters most for future captures, which
+  already get it via the changed default) and instead proceeding to B4
+  with today's completed data -- but this is Harri's call, not decided
+  unilaterally.
+
+- **2026-09-12** (accel_std_px fix) — Harri's evening feedback on
+  the full-capture B3 review (paused for the night, resuming tomorrow):
+  "much better than earlier"; but "quite many tracklets that are
+  otherwise OK but last frame is clearly outlier"; and a design question
+  -- "should normals be in use? There are lot of cases where e.g.
+  lat/med is wrong."
+
+  **Last-frame-outlier pattern, diagnosed and fixed.** Confirmed real and
+  systematic (not a fluke) by scanning every reviewed member's own
+  frame-to-frame step sizes: e.g. `oneplus9pro-01#3645`, 153 frames of
+  near-zero motion (median step 0.10px), then a 137px jump on its very
+  last recorded frame. Mechanism: even after the 2026-09-11 coasting-bug
+  fix (so `dt` is correctly 1 per real elapsed frame, no compounding),
+  the Kalman process noise Q still grows with `dt**4` *per accumulated
+  missed frame* -- three consecutive misses (our `max_missed=3`) alone
+  grow the position std to ~30px (95% radius ~60px) even from a
+  converged, confident steady state. Since that's the gate's widest
+  point in a track's whole life, and it occurs on exactly the frame
+  before `max_missed` would kill the track anyway, a track that's about
+  to legitimately die is also the one most likely to snap onto a stray
+  candidate right then -- becoming its erroneous last point before
+  actually dying.
+
+  First tried capping the Kalman noise-growth's own `dt` directly
+  (`max_noise_dt`, new optional parameter) -- added, tested, found to be
+  a no-op on real data: `dt` passed to `_predict()` is already always 1
+  per call for every actual detection run so far (frame_step=1), so
+  capping it at >=1 changes nothing. Kept in `dot_tracklet.py` as a
+  real, general (if currently inert) parameter -- would matter for a
+  frame_step > 1 run -- clearly documented as such, not removed.
+
+  The actual lever: `accel_std_px` itself (10 was simply too generous
+  once compounded). Swept 1/2/3/5/7/10 against every mid-tracklet split
+  Harri had made in today's full-capture review (17 real cases by
+  evening): monotonic, 10 -> 0/17, 7 -> 9/17, 5 -> 12/17, 3 -> 14/17,
+  2 -> 17/17, 1 -> 17/17 (2 has better purity than 1: 396/429 vs
+  390/429 clean tracklets >= 0.90 purity). Also re-checked the
+  2026-09-11 B2 cross-camera precision issue at the same settings:
+  0.39 -> 0.44 on the 42-48s GT window -- a real but partial
+  improvement, the larger B2/linker tension from that entry is not
+  resolved by this alone. **Set `accel_std_px=2.0` as the new default**
+  in `dot_tracklet.py` (was 10.0) and in both validation tools'
+  own CLI defaults. All 66 detection/marker-pipeline tests still pass.
+
+  **Not yet run**: a fresh full-capture detection with this new default
+  -- needs Harri's go-ahead (each of today's two re-detection runs was
+  done only after his explicit confirmation; holding to that same
+  pattern overnight). Once confirmed: new detection run (append-only,
+  `75cbf678` untouched), fresh full-capture B2, and Harri's review
+  continues on that data instead.
+
+  **Normals question, answered, no code change**: confirmed via
+  `_SLOT_TO_PROBE` directly that `ankle_lat_{L,R}` and `ankle_med_{L,R}`
+  map to the *exact same* FK probe -- literally position-indistinguishable
+  in the current suggestion mechanism (knee lat/med already use
+  different, if crude, probes -- a separate, subtler mis-mapping issue,
+  not a missing-feature one). Normals (marker-catalog redesign doc
+  §1.6) are the right long-term answer, but not the immediate fix:
+  `_DEFAULT_TRIAL` is still P-A's exploratory probe catalog, never a
+  real per-slot marker catalog, and simply has no distinct offset for
+  ankle lat vs. med to begin with -- there's nothing for a normal
+  comparison to disambiguate yet. Right sequence: give every one of the
+  16 real slots its own distinct offset first (B4's job per the redesign
+  doc, not built yet -- likely fixes most lat/med confusion on its own,
+  since B3 compares the fused *3D* position, and real markers are
+  physically separated by a few cm even where single-camera 2D
+  projections look close), *then* add normal-direction scoring for
+  whatever's still ambiguous after that. Flagged as a real, bounded
+  follow-up task (even a quick per-slot offset fit from the existing GT
+  labels would likely help) -- not started, deferred to Harri's own
+  scoping call rather than built unilaterally overnight.
+
+- **2026-09-11** (B2/linker tension found) — Re-ran full-capture
+  detection with the fixed linker + `max_missed=3`
+  (`detection_run_id 75cbf678`, 47m40s -- faster than the buggy run's
+  59m12s, plausibly because shorter-lived tracks shrink the Hungarian
+  cost matrix on noisy cameras). Ran full-capture B2 on it
+  (`tracklet_groups_full_v2.json`): **156 groups, 44 flagged
+  contradiction (28.2%), 44 ambiguous (28.2%)** -- measurably *worse*
+  than the buggy run's 143/27(18.9%)/42(29.4%), and with new,
+  much-larger contaminated groups (top sizes 42/33/28/21 vs. the buggy
+  run's 28/17/12/11). Investigated the 42-member outlier directly:
+  confirmed via frame-range overlap (two same-camera tracklets active
+  *simultaneously*) that it's a real B2 transitivity-chaining mistake --
+  several genuinely different real markers wrongly linked into one blob
+  -- not simply "one marker fragmented a lot," so this is a real, not
+  cosmetic, regression.
+
+  Confirmed with real GT on the 42-48s window: recall improved (0.47 ->
+  0.65) but **precision collapsed 0.61 -> 0.39** (23 false groupings vs.
+  9). Re-tuning B2's own thresholds against this population
+  (`min-shared-frames` up to 20, tighter `median`/`p90-thresh-px` down to
+  1.5/3px) recovered at best 0.56 -- still below the old baseline, and
+  only by giving up most of the recall gain.
+
+  Built `sweep_linker_and_b2.py` (re-links raw candidates in-memory for
+  an arbitrary `MotionGatedLinker` config and feeds the result directly
+  into B2's own prefilter/build_groups/validate, bypassing the DB --
+  turns an N x M linker-param x B2-param sweep into N re-link passes
+  instead of N x M full detection runs) to sweep `max_missed` at the
+  *group* level without new detection runs each time. Cross-checked
+  against the real CLI-measured number for `max_missed=3` first
+  (precision matched exactly: 0.39, 15/38, 23 false) to trust the
+  harness, then swept `max_missed` in {2,3,4,5,6,8,10,15}: **precision
+  never recovers past 0.50 at any value** (best case), nowhere near the
+  buggy linker's 0.61 -- so this is not a `max_missed` tuning question at
+  all. Even `max_missed=6` (the *same* setting the buggy run used, only
+  with the coasting bug now fixed) gives precision 0.41, still well
+  below the buggy run's 0.61.
+
+  **Working explanation, not yet further verified**: the buggy linker's
+  runaway gate greedily vacuumed many real detections into *fewer,
+  longer* (internally contaminated) tracklet IDs. B2's cross-camera
+  pairwise test only gets a chance to err once per *pair of tracklet
+  fragments* it examines -- fewer, bigger fragments mechanically means
+  fewer pairs, hence fewer chances for B2 itself to make a wrong link,
+  even though each fragment is individually worse. The fix produces
+  more, shorter, individually *purer* fragments (validated, wanted), but
+  that gives B2's own pairwise reprojection test more opportunities to
+  slip up, and no linker parameter or B2 threshold tested closes that
+  gap. This reframes the problem: it's a real tension between
+  per-tracklet purity (now fixed) and B2's own grouping algorithm's
+  robustness to a more-fragmented population, not a tuning question --
+  likely needs a change to B2's own matching logic (e.g. requiring
+  consistency across more than one pairwise test before accepting a
+  link, or being more conservative about chaining through a low-evidence
+  edge), a larger task than today's fixes.
+
+  **Decision (Harri)**: review anyway with the current tools rather than
+  build B2 improvements first -- the flagged-contradiction/ambiguous
+  groups (even the 42-member outlier) ARE still correctly flagged, and
+  this session's split/merge/scrub/assign-as-new-group tooling should
+  handle them; the "big jump within one tracklet" failure that stopped
+  the previous review pass should now be gone, even if it's replaced by
+  "more groups need splitting." B2's own grouping-robustness improvement
+  stays a real, identified follow-up, not started. Resuming B3 review on
+  `tracklet_groups_full_v2.json` (a fresh output file, e.g.
+  `tracklet_group_assignments_full_v2.json` -- the previous partial
+  review in `tracklet_group_assignments_full.json` was built against the
+  old, buggy-linker tracklet population and doesn't correspond to this
+  run's tracklet ids, so it can't be reused or merged in).
+
+- **2026-09-11** (max_missed tuning) — Harri's diagnosis of the
+  remaining failure pattern: most wrong-identity jumps happen when a
+  marker is briefly occluded by another body part while a *different*
+  marker's trajectory crosses nearby, so coasting through the whole
+  occlusion risks the crossing marker looking like the better match once
+  real detections resume -- proposed cutting tracklets more aggressively
+  on occlusion instead of trying to coast through it.
+
+  Swept `max_missed` (1/2/3/4/6) against the same real full-capture
+  human-split regression + purity sets. Result: **3 is the actual
+  measured optimum**, not just "lower is more aggressive" -- it wins on
+  *both* metrics simultaneously (12/12 real cuts correctly separated, up
+  from 11/12 at the old default of 6 -- notably, this also fixes the one
+  previously-unresolved case, `pixel9#201 @ 14425`, the accelerating-
+  marker-through-a-long-gap case: cutting sooner means the track dies
+  before the gap gets long enough for the coast to run out of road, a
+  different mechanism than the earlier compounding-dt bug fix but the
+  same practical effect; best purity in the sweep too, 25/40 >= 0.90
+  vs. 22/40 at the old default). Set as the new default
+  (`max_missed=3`, both in production `dot_tracklet.py` and the
+  prototype's own CLI default). Full detection/marker-pipeline test
+  suite (66 tests) still passes.
+
+  Re-running full-capture detection with the fixed linker + this tuning
+  now; see the next entry for the result.
+
+- **2026-09-11** (linker bug fix) — Harri stopped the full-capture
+  B3 review: still too many splits needed, often from "really big
+  jumps" -- and correctly guessed this needed fixing before continuing,
+  offering the splits already made as test material. Asked how the
+  algorithm works, which led straight to the real cause.
+
+  **Found a genuine implementation bug, not a tuning problem** (Harri's
+  own guess was tuning -- it wasn't): in `MotionGatedLinker.link_frame()`,
+  `tr.last_frame` was only ever updated on a real match, never during a
+  coast (missed-frame) step. So the *next* predict() computed `dt` as
+  time-since-last-*match* and reapplied it on top of state that had
+  already been advanced by the previous coast -- the position/covariance
+  compounds quadratically across consecutive missed frames instead of
+  linearly. Quantified numerically: a marker at a steady 10px/frame,
+  occluded 6 frames, should predict to ~160px with a ~85px gate std-dev;
+  the buggy version predicted **310px with a ~957px std-dev** -- a gate
+  wide enough after just a handful of missed frames to accept nearly any
+  nearby candidate, including a distant, unrelated real marker. Exactly
+  the "big jump" symptom. Fixed with a one-line change (advance
+  `last_frame` on every coast step too); added
+  `test_coasting_does_not_compound_across_multiple_missed_frames`, first
+  confirmed it actually fails against the pre-fix logic (assigns the far
+  distractor the real tracklet's id, the true continuation a new one),
+  then confirmed it passes with the fix. All 10 `test_dot_tracklet.py`
+  tests and all 66 detection/marker-pipeline tests pass.
+
+  **Re-validated using Harri's own full-capture splits as the test
+  material**, per his suggestion: extracted 12 real human-determined cut
+  points from the partially-completed `tracklet_group_assignments_full.
+  json` (up from the original 11-cut small-window set) and re-ran them
+  through the *fixed* linker directly against the existing `98d59082`
+  run's raw candidates (no new detection run needed -- the bug is
+  linking-only, raw per-frame positions are unaffected by it). Result:
+  **11/12 correctly separated** -- a dramatic improvement consistent with
+  what was driving Harri to stop reviewing. The one miss
+  (`pixel9#201 @ 14425`) is a different, genuinely harder case: a real
+  7-frame occlusion gap right after the marker was visibly *accelerating*
+  (velocity climbing 1.1->2.7px/frame in the preceding 8 frames) -- a
+  constant-velocity coast can't extrapolate real acceleration through a
+  blind spot that long, and the re-observed position is consistent with
+  continued acceleration, not a different marker (not visually confirmed
+  either way). A constant-acceleration model or particle filter (Harri's
+  own original suggestion) would likely help this specific residual case;
+  not fixed now, flagged as a possible follow-up, not blocking.
+
+  **Next**: re-run full-capture detection with the fixed linker (a fresh
+  `detection_runs` row -- append-only, `98d59082` untouched), then
+  full-capture B2, then resume the B3 review Harri paused.
+
+- **2026-09-11** (B3) — Four more real fixes from Harri's
+  full-capture (143-group) review:
+
+  1. **"Assign a single tracklet without split-then-reselect-then-assign
+     as three steps"**: added "Assign checked as new group" -- cuts the
+     checked members into their own group (or, if every member in the
+     current group is checked, just finalizes the current group directly
+     -- no pointless split) and immediately applies the Slot combo's
+     current selection, in one click.
+
+  2. **"The view jumps to another group after discard/split, re-sorting
+     makes it hard to keep working on one group"**: `_populate_list()`
+     now takes a `keep_group_id` and re-selects that exact group after
+     rebuilding the (re-sorted) list, instead of leaving selection at
+     whatever numeric row it lands on. Applied to every action that
+     changes the current group's own state (Assign, Reject, Discard,
+     Split, and the new Assign-as-new-group) -- the view now always
+     stays on the group being worked on, showing it with the acted-on
+     members already gone, until the operator explicitly picks another
+     row. Merge is the one exception by design: it advances to the
+     *target* group, since that's the group the operator just asked to
+     see the merged result of.
+
+  3. **"Filter to show only unassigned groups"**: added a "Show only
+     unassigned" checkbox above the list. Interacts correctly with fix
+     #2's `keep_group_id`: assigning/rejecting the current group while
+     the filter is on makes it drop out of view (it's no longer
+     unassigned) and the view auto-advances to another unassigned one --
+     confirmed via a scripted test, not just visually.
+
+  4. **"Noise vs. a valid marker on another subject/prop -- worth
+     distinguishing?"**: yes -- added `reject: noise` and `reject: other
+     subject / prop` as two pseudo-entries in the Slot combo, recorded as
+     `reject_reason` in the output JSON (`tracklet_group_assignments.json`'s
+     schema extended accordingly). Also fixed a real, pre-existing gap
+     this surfaced: "Discard checked (noise)" previously just deleted the
+     members with *no record at all*; it now goes through the same
+     finalize-with-reason mechanism as everything else, so every
+     rejection -- noise or other-subject -- leaves a real audit trail
+     instead of silently vanishing. The plain "Reject" button (whole
+     group, no reason) stays available for the genuinely-unclear case,
+     relabelled "Reject (unspecified)" to make that distinction visible
+     in the UI itself.
+
+  All four verified via scripted headless tests against the real
+  42-48s/5-camera review data (not just read -- actually exercised: check
+  a member, click the new button, assert the resulting `self.groups` /
+  `self.assignments` state and that the view didn't jump) plus a full
+  24-group open-every-row sweep against the real saved assignments file,
+  confirming no regressions.
+
+- **2026-09-11** (linker port) — Ported the validated
+  `MotionGatedLinker` prototype into production, per Harri's explicit
+  go-ahead. `posetrak/detection/dot_tracklet.py`'s `DotTrackletLinker`
+  replaced outright by `MotionGatedLinker` (Kalman-filter motion gating +
+  per-frame disambiguation margin, `accel_std_px=10`,
+  `disambiguation_margin=2.0` as the validated defaults); `link_frame()`
+  now takes an explicit `video_frame` (needed for a real `dt` in the
+  Kalman predict step -- `marker_pipeline.py`'s call site updated to pass
+  it, confirmed every call site already has the real frame index
+  available). `prototype_motion_gated_linker.py` now imports the real
+  production class instead of keeping a parallel copy, so its
+  regression/purity checks double as a standing validation harness for
+  any future gate-tuning, not just this one-off port.
+
+  One real bug found by writing the new unit tests before trusting the
+  port: the per-frame disambiguation margin was rejecting a *brand-new*
+  track's second observation whenever another track happened to be born
+  nearby, since a birth-phase row's raw pixel-distance costs are on the
+  same small scale as genuine ambiguity and tripped the margin check
+  even with zero real motion evidence yet. Fixed by only applying the
+  disambiguation check to motion-established tracks (`n_obs >= 2`,
+  Mahalanobis-gated) -- caught by
+  `test_two_close_simultaneous_tracks_do_not_swap_identity` before it
+  ever reached real data. Re-ran the prototype's own validation against
+  the real 42-48s ground truth with the actual ported class: 11/11 real
+  cuts still correctly separated, confirming the port behaves as
+  designed, not just the standalone copy.
+
+  Rewrote `tests/detection/test_dot_tracklet.py` for the new class (9
+  tests, including two new ones for the two failure modes this linker
+  specifically targets: coasting past a stale distractor during
+  occlusion, and not swapping identity between two close simultaneous
+  tracks). Full `pytest python/tests/` run (2156 tests): all detection/
+  marker-pipeline tests affected by this change pass (65/65); two
+  pre-existing, unrelated failures found elsewhere (a Windows-path-
+  absoluteness test and an unrelated observation-edits test, neither
+  touching detection code) and two Qt GUI test files
+  (`test_page_sync_led.py`, `test_pair_scrubber.py`) crash the interpreter
+  in this environment regardless of this change -- confirmed pre-existing
+  by reproducing the same crash point before touching any detection code;
+  out of scope for this change, not investigated further here.
+
+  **Launched a fresh full-capture detection run** (append-only, new
+  `detection_runs` row, `6abcba67` untouched) reproducing `6abcba67`'s
+  exact recorded `config_json` (dictionary DICT_4X4_50, marker ids 0 1 2
+  3 16 17 34 37, all 6 cameras dot-enabled, same per-camera threshold/
+  max-saturation/blacklist-frac overrides, same 33.62-130.185s range,
+  `run_parallel()`) with only the linker swapped -- the only variable
+  changed is `MotionGatedLinker` vs. the old fixed-radius linker, so any
+  difference in the new run's tracklet quality is attributable to that
+  change alone.
+
+  **Result** (`detection_run_id 98d59082`): complete, 69,486 frames --
+  same total as `6abcba67`. **Real, measured perf regression**: 59m12s
+  vs. the old run's 35m19s (~1.7x). Diagnosed live while it ran (Harri
+  flagged unusually low CPU/disk I/O partway through): 5/6 cameras
+  finished promptly, but `gopro13_01` -- the one camera with
+  `blacklist_frac=0.95` (its glare veto almost fully disabled, so a much
+  higher per-frame candidate count than any other camera) -- ran solo for
+  a long tail after the rest finished, at a measured ~10 fps. Consistent
+  with `MotionGatedLinker`'s Hungarian-assignment cost matrix (built via
+  a nested Python loop over every open track x every candidate, then a
+  scipy `linear_sum_assignment` call) costing meaningfully more per frame
+  than the old greedy nearest-neighbor once candidate counts are large --
+  not investigated further now (Harri's explicit call: detector/linker
+  performance work is real and high priority, but after the tracking
+  pipeline itself is further along, not blocking it now). Worth revisiting
+  before this linker is asked to run on a noisier or longer capture --
+  likely fixes: cap simultaneously-open tracks, vectorize the cost-matrix
+  build, or a cheap pre-filter before the full Hungarian solve.
+
+  **Full-capture B2 run** (`tracklet_groups_full.json`, 4 cameras
+  excluding gopro13_01 as before, 33.62-130.185s): 143 groups, 27
+  flagged contradiction (18.9%), 42 ambiguous (29.4%) -- plus ~27% more
+  raw/pre-filtered tracklets per camera than an identical run against the
+  *old* linker's candidates (`tracklet_groups_full_oldlinker.json`, same
+  detector output, `6abcba67`, only the linker differs: 141 groups, 33
+  contradiction (23.4%), 37 ambiguous (26.2%)). The B2-internal
+  contradiction/ambiguous rate alone reads as roughly a wash (down on
+  contradiction, up on ambiguous, "either" rate ~unchanged) -- more
+  tracklet fragments from the new linker apparently gives B2's
+  cross-camera pairing more chances to find an ambiguous partial match,
+  partially offsetting the per-tracklet cleanliness gain.
+
+  **Re-validated against real GT** (Harri's call, given that wash) on
+  the same 42-48s window that has labelled ground truth, sweeping
+  `min-lifetime`, `min-shared-frames`, `disambiguation-margin`, and the
+  reprojection thresholds against the new linker's tracklets: zero
+  sensitivity to the first three (the bottleneck isn't the prefilter or
+  the per-camera-pair disambiguation stage), and loosening the
+  reprojection threshold reproduces the exact same "knee of the curve"
+  collapse found tuning the old linker (loosening median 3->5px:
+  recall 0.47->0.53 but precision 0.61->0.34). **Conclusion: the existing
+  defaults (3px/6px median/p90, min-lifetime=15, min-shared-frames=5,
+  disambiguation-margin=1.5) are already the right operating point for
+  the new linker too -- no retuning needed.** And by the metric that
+  actually matters (recall/precision against real GT, not the cruder
+  internal flags), the new linker vs. the old at the same window and
+  thresholds: precision 0.61 vs. 0.56 (+0.05), recall 0.47 vs. 0.52
+  (-0.05) -- a real, modest trade exactly in the intended direction
+  (favor low false-link rate).
+
+  Next: full B3 review of the 143 groups in `tracklet_groups_full.json`
+  (already generated with the confirmed-best default thresholds -- no
+  need to regenerate).
+
+- **2026-09-11** (linker prototype) — All 24 B2 groups in the
+  42-48s/5-camera test window reviewed and assigned (25 final entries,
+  12/16 real slots covered in this window). Generic observation from the
+  review: ~14/25 final members needed a manual mid-tracklet split, and
+  Harri asked for a next step given how common this was, with a specific
+  proposal (motion-consistency penalty -- Kalman/particle filter) and
+  offered the splits made during review as a ready-made test set. Agreed
+  path (Harri's choice over running full-capture B2 immediately):
+  prototype and validate a fix before touching production or spending a
+  full-capture detection run on it.
+
+  Built `prototype_motion_gated_linker.py` (Python-only, no production/
+  detection changes): `MotionGatedLinker`, a per-tracklet constant-
+  velocity Kalman filter replacing `DotTrackletLinker`'s fixed 60px
+  nearest-neighbor gate. Gates on Mahalanobis distance of the KF
+  innovation instead of raw pixel distance, so an occluded track *coasts*
+  forward on its own last known velocity rather than freezing at its last
+  seen pixel -- directly targeting the diagnosed mechanism (a different
+  real marker later drifting near that frozen, stale point gets adopted).
+
+  Validated against real, human-produced ground truth -- exactly the test
+  set Harri suggested: every 4-element (sub-range) member in
+  `tracklet_group_assignments.json` records a real human-determined
+  identity-switch frame. Extracting both bounds of every such fragment
+  gave **11 real cut points** across 4 cameras.
+
+  Result: **11/11 correctly separated** -- the new linker independently
+  recovers every single manual split Harri made, with zero manual input,
+  using only the raw already-detected candidate positions. A purity
+  check on the 31 *clean* (non-split) tracklets found the default
+  process-noise setting too tight for a smooth deceleration (a real
+  foot-plant, not an occlusion -- confirmed by hand-tracing
+  `gopro13_02#275`'s own frame-by-frame positions: no gap, just slowing
+  motion the constant-velocity model's default noise couldn't track
+  without accumulating bias); loosening `accel_std_px` 6->10 fixed it
+  with no cost to the 11/11 result (loosening further, 15+, started
+  losing real separations -- not worth it for a purity gain elsewhere).
+
+  A second, different failure mode surfaced and was investigated by
+  hand: `gopro13_02#283` showed near-frame-by-frame flip-flopping between
+  two output ids -- not an occlusion artifact but two *simultaneously
+  visible*, closely-spaced real markers (almost certainly adjacent
+  knee/ankle markers) both sitting inside one track's gate every frame,
+  with the Hungarian solver's global-optimum pick flipping which one
+  "wins" on tiny cost differences. This is the same close-marker-
+  projection ambiguity that originally motivated the whole marker-catalog
+  -and-assignment redesign (§0) -- a motion-only gate doesn't fully solve
+  it on its own. Added a per-frame disambiguation margin (B2's own
+  "runner-up must be clearly worse" idea, applied per frame: refuse to
+  commit a match when the best and second-best candidates are near-tied,
+  coast instead of risking a wrong pick) -- fixed `#283` dramatically
+  (0.59 -> 0.99 purity) with the 11/11 regression result unaffected, at
+  the cost of mild new fragmentation on a couple of already-marginal
+  short tracklets. Not fully solved for every close-marker case, and not
+  expected to be by a single-camera 2D fix alone -- this is exactly what
+  B2's cross-camera reprojection test (and, failing that, a human via the
+  now-fast scrub tool) exists to catch.
+
+  **Recommendation, not yet actioned**: port `MotionGatedLinker` (with
+  the disambiguation margin) into production `dot_tracklet.py`
+  (`accel_std_px=10`, `disambiguation_margin=2.0` as the validated
+  starting point), re-run detection on the full capture, then proceed to
+  the full-capture B2/B3 pass -- on data needing substantially less
+  manual identity-switch cleanup than an unmodified linker would produce.
+
+- **2026-09-11** (B3) — Replaced the blind typed-frame-number split
+  dialog with a real scrub UI, per Harri's feedback after using it: the
+  main grid shows timestamps, not frame numbers, and there was no way to
+  actually *look* at the candidate frames before committing to a split
+  point. Added `_ScrubSplitDialog`: steps one at a time through a
+  member's own real frames (not the grid's handful of coarse sample-time
+  columns), rendering the actual cropped/marked image at each step via a
+  new `GroupAnalyzer.frame_image()` (a direct specific-frame render,
+  factored out of `sample_image()`, reused so scrub steps hit the same
+  disk cache) plus a slider and ±1/±10 step buttons, showing both the
+  video_frame index and the real time at every position. "Split checked
+  member's tracklet (scrub)..." opens it seeded at the auto-suggested
+  transition frame; right-clicking any thumbnail now offers "Scrub &
+  split near here..." (seeded at that exact frame) alongside the existing
+  immediate "Split before this frame". Verified against `gopro13_02#287`:
+  dialog opens at the suggested frame 6948 with a real decoded image,
+  scrub steps render correctly, and the returned cut frame is always one
+  the tracklet actually has. Full `_on_select` render sweep (the exact
+  code path building the new thumbnail widgets) re-run clean across all
+  24 groups.
+
+- **2026-09-11** (B3) — Four more fixes from Harri's continued
+  review of the 24-group test run:
+
+  1. **"No frame shown, can't evaluate" + "how are time columns chosen"**:
+     the old sample-instant selection only ever picked instants where 2+
+     members' triangulation succeeded -- a member with no such overlap
+     (e.g. only briefly co-visible with the rest) could go through every
+     rendered column with nothing to show, indistinguishable from a bug.
+     Redesigned `GroupAnalyzer.analyze()`'s selection: one instant at
+     *every* member's own median real time (guarantees each is shown at
+     least once) plus an even 5-point spread across the group's whole
+     real time span, merged/deduped and capped at 8 columns. Verified on
+     `group_4`: went from 3 fixed columns to 8 spanning 42.0-48.0s, with
+     every member's own median time represented.
+
+  2. **Root cause confirmed for a within-tracklet identity drift**: Harri
+     spotted `gopro13_02#287` showing `heel_L` at t=44.74/46.18 but
+     `heel_R` at t=48.00 -- one *single* tracklet silently switching which
+     real marker it's tracking partway through -- and correctly diagnosed
+     the cause before I checked: `DotTrackletLinker`
+     (`posetrak/detection/dot_tracklet.py`) links purely by a fixed
+     60px nearest-neighbor gate (`max_link_px`) with **no
+     appearance/identity check at all**, so it can hop from one real dot
+     onto a different nearby one (e.g. during a foot-crossing moment) and
+     never know it happened. Confirmed exactly as described, filed as a
+     real production-pipeline follow-up (tightening/adding an identity
+     check to the linker, or a confidence-based gate) -- not fixed today,
+     since it needs a full re-detection run to validate, out of scope for
+     this B3 review pass.
+     For the immediate, practical need ("how do I split this, and how do
+     I know the timestamp"): added `GroupAnalyzer.classify_member_frames`
+     (per-frame, single-camera nearest-real-slot classification via the
+     FK-predicted 2D projection -- coarse and known-approximate, since 2D
+     proximity is exactly the ambiguity source this whole redesign exists
+     to move away from, but good enough to localize *where* a tracklet
+     destabilizes) plus `_suggest_split_frame` (best two-segment
+     identity-change point). New GUI action "Split checked member's
+     tracklet at frame..." (dialog, pre-filled with the suggestion) and a
+     right-click "Split before this frame" on any shown thumbnail cut one
+     member's own tracklet into two frame-range-restricted fragments of
+     the same tracklet_id, which can then be routed to different groups
+     via the existing "Split checked into new group" action. Verified end
+     -to-end on `gopro13_02#287`: suggested cut at frame 6948 (t=46.11s)
+     lands right at the boundary between a long stable classification run
+     and an unstable multi-slot-confusion run -- matching Harri's own
+     visually-identified transition window -- and the split action itself
+     cleanly produces 164 + 227 frame fragments from the original 391.
+     Member JSON format extended: a 4-element
+     `[camera_label, tracklet_id, frame_lo, frame_hi]` entry alongside the
+     existing 2-element (whole-tracklet) form.
+
+  3. **"Switching between groups is slow"**: `sample_image()` re-decoded
+     a video seek from scratch on every single thumbnail, every group
+     render, every time. Added an on-disk crop cache (PNG files under
+     `<groups-file-dir>/thumb_cache/<svid>/<tracklet_id>_<frame>.png`,
+     keyed on exactly what determines a rendered crop) -- measured ~190x
+     speedup on a cache hit (0.48s cold decode vs. 0.0025s cached) on a
+     real frame from this run. Persists across GUI relaunches on the same
+     groups file, not just within one session.
+
+  Verified individually against the real 24-group run: `group_4`'s
+  sample-time spread, the `gopro13_02#287` split (164+227 frames from
+  391), and cache hit/miss both returning identical correct pixmaps. A
+  full 24-group re-render sweep (every group, every member, every
+  sample-time column) came back clean: 0 exceptions.
+
+- **2026-09-11** (B3) — **Fixed a column-misalignment bug** found by
+  Harri on his first pass with the reworked grid UI: `group_4`
+  (`gopro13_02#287`, `pixel9#443`, `pixel9#1313`, `gopro-11_mini_01#360`,
+  `gopro-11_mini_01#427` -- a flagged-contradiction group) showed, for a
+  single "t=..." column, two `gopro-11_mini_01` images (#360 and #427)
+  that were visibly different real moments (right-foot vs. left-foot
+  stance).
+
+  Confirmed against real data: `#360` and `#427` are temporally disjoint
+  fragments (frames 8127-8330 -> t=44.65-46.35s, and frames 8375-8645 ->
+  t=46.72-48.97s -- a real gap, not an off-by-one). `GroupAnalyzer.
+  sample_image()`'s "nearest frame this tracklet actually has" fallback
+  had no bound on how far away that nearest frame could be, so for a
+  column whose real time fell inside `#360`'s span, `#427`'s row still
+  rendered its own single nearest frame (up to ~2s away) as if it were at
+  that instant.
+
+  Fixed by rejecting the fallback when the candidate frame's own real
+  time (via `sync_table.frame_to_global_time`) is more than
+  `_MAX_SAMPLE_GAP_S` (0.15s) from the column's requested instant --
+  shows `(no frame here, ±Ns away)` instead of a mismatched frame.
+  Verified against `group_4` directly: `#427` and `pixel9#1313` (whose
+  spans likewise don't cover this window) now correctly return no image
+  with the real gap (0.6-2.3s) at each of the group's three sample
+  times, where they previously would have rendered a stale frame.
+
+  This is a UI-honesty fix, not a grouping fix -- `group_4` staying
+  flagged `[CONTRADICTION]` is still the right call for Harri to resolve
+  via split, same workflow as before.
+
+- **2026-09-11** (B3) — **Built** `label_tracklet_groups_gui.py`
+  (PySide6): consumes B2's `tracklet_groups.json`, independently
+  re-derives per group (not stored in B2's own small JSON) a fused 3D
+  trajectory (N-view triangulation at shared instants), ranked real-slot
+  suggestions (mean 3D distance to each slot's FK-predicted trajectory),
+  and a few sample frames per member camera with the tracklet's own dot
+  circled. Group list (sorted by size) on the left; selecting one shows
+  thumbnails + a ranked-suggestion table; Assign / Reject / Remove-member
+  (split) / Merge-into (target group_id) actions; saves incrementally to
+  `tracklet_group_assignments.json`.
+
+  Also extended `build_tracklet_groups.py`'s `--output` with a `meta`
+  block (session/shot/tracking-run/detection-run/time-window) and stable
+  `group_id`s, so B3 doesn't need those repeated on its own command line.
+
+  Two real bugs found and fixed via a headless PySide6 smoke test before
+  handing it off: (1) some groups (the flagged contaminated/ambiguous
+  ones) have *multiple tracklets from the same camera* -- the anchor-vs-
+  other-member comparison only checked `camera_id`, not the full
+  `(camera_id, tracklet_id)` pair, so a same-camera sibling tracklet got
+  mistaken for the anchor itself and crashed on a `KeyError`. (2) the
+  suggestion mechanism compared the fused trajectory against
+  `_DEFAULT_TRIAL`'s own probe names (`a_hip_R`, `k_Xp_R`, ... -- P-A's
+  unlabelled exploratory offsets), not the real anatomical slot names the
+  assignment combo box uses, so a suggestion could never actually be
+  picked. Fixed by adding `_SLOT_TO_PROBE`, the empirical mapping
+  `eval_fk_prediction.py` already derived (real slot -> best-matching
+  probe) -- several real slots still share one probe (the trial catalog
+  doesn't yet cleanly separate every same-joint offset), an honest
+  reflection of that known limitation, not a new bug.
+
+  Smoke-tested (offscreen QPA) against the validated 5-camera, 42-48s
+  run: loads 24 groups; a clean 2-member group shows a confident
+  suggestion (`toe_L` at 5.7cm, runner-up 19cm); the flagged 6-member
+  contaminated group's suggestions all bunch around ~50cm -- itself a
+  useful signal to a reviewer that something's off before they even look
+  at the images. Remove-member and Reject both verified to save correctly
+  and leave the tool in a consistent state after.
+
+  **Reworked after Harri's first real try** -- two real usability gaps,
+  not just polish: (1) sample frames were a single long strip with no
+  structure, hard to compare across cameras -- changed to a grid, one
+  row per (camera, tracklet), one column per shared timestamp, so the
+  same instant lines up across cameras. (2) a concrete real case (one
+  flagged-contradiction group actually contained *three* different
+  physical markers -- hip_L, ankle_lat_L, ankle_lat_R -- chained together
+  by transitivity) exposed that "Remove member" only discarded one
+  member with nowhere to go -- no way to actually *form the correct
+  group* from what's removed. Replaced with checkboxes per member row +
+  "Discard checked" (noise, belongs nowhere) / "Split checked into new
+  group" (this subset is a different real marker -- creates a proper new
+  group_id from just those members). Verified on Harri's exact example:
+  checking the pixel9+oneplus pair and splitting produced a clean new
+  group whose top suggestion is `ankle_lat_R` at 4.8cm -- matching what
+  he'd identified visually.
+
+  Next: Harri reviews the 24 groups from the 42-48s run interactively
+  with the reworked UI; then a full-capture B2 run (33.62-130.185s) for
+  real calibration input.
+
+- **2026-09-11** (B2) — **Built and validated** `build_tracklet_
+  groups.py`, the redesign doc §4 algorithm (pre-filter by lifetime + FK
+  proximity, pairwise reprojection consistency over shared frames,
+  disambiguation margin over the runner-up, connected components,
+  contradiction flagging), plus `--validate-against-gt` (matches
+  labelled GT points back to their real `tracklet_id` -- free
+  cross-camera tracklet-group ground truth, no extra labeling).
+
+  Two real bugs in the *validation*, not the algorithm, found and fixed
+  before trusting any number: (1) GT tracklet identity was derived from
+  the full 40-60s labelled set but tested against a narrower window --
+  most GT tracklet_ids for a slot simply don't exist in the shorter
+  window (the same physical marker gets a fresh id after every
+  occlusion), so recall's denominator was wrong (0.02 -> meaningless).
+  Fixed by restricting to nodes whose tracklet actually exists in the
+  tested window. (2) Even fixed, many "same-slot GT pairs" are
+  *temporally non-overlapping fragments* of one physical marker (zero
+  shared frames) -- not something a simultaneous-reprojection test can
+  ever link, a different problem (fragment-stitching) entirely out of
+  B2's scope. Fixed by only counting a GT pair in the recall denominator
+  if it actually has >= min-shared-frames -- confirmed both fixes by
+  hand-tracing one real pair (gopro-11#125 / gopro13_02#88, ankle_med_R):
+  median reprojection error 0.94px, correctly grouped.
+
+  **Validated baseline** (42-48s, 4 cameras excluding the noise-flooded
+  gopro13_01 -- see below): recall 0.52, precision 0.56 (median<=3px,
+  p90<=6px thresholds). Looked at every miss/false-positive by hand: on
+  the two clean cameras (gopro-11, gopro13_02) matches are excellent
+  (0.9-2.5px) except `hip_L`, sitting at a genuine 4.3-4.6px near-miss;
+  weak-camera pairs (gopro13_01, oneplus, one pixel9 tracklet) show real
+  inconsistency, sometimes matching beautifully, sometimes wildly wrong
+  (40-200px) -- looks like genuine tracklet-quality noise on those
+  cameras, not an algorithm bug. Tried loosening to median<=5px/p90<=8px
+  to catch `hip_L`: recall rose to 0.63 but **precision collapsed to
+  0.23** -- 3px/6px is close to the right knee of the curve, not too
+  tight; a global threshold bump trades away far more than it buys.
+  Reverted to 3px/6px.
+
+  `gopro13_01` alone produced **14,204 raw tracklets in this 6s window**
+  (vs 300-2300 for other cameras) -- its near-disabled glare veto
+  (P-D's frac=0.95) floods it with short, noisy tracklets that poisoned
+  early grouping runs with spurious chance-agreement links; excluded
+  from validation via a new `--camera-label` filter. A real,
+  not-yet-solved question for using gopro13_01 in B2 at all: does its
+  genuine marker keep a stable tracklet_id under that much candidate
+  density, or does the linker itself hop between the real dot and
+  nearby glare? Worth checking before including it in a real B3 pass.
+
+  Accepted, not chased further this pass: B2 doesn't need to be perfect
+  -- it feeds B3's manual review, where a person confirms, splits, or
+  merges. A near-miss like `hip_L` still surfaces as a top-ranked
+  suggestion for its own ungrouped tracklet; the remaining gap is B3's
+  job, not a reason to keep tuning B2 in isolation.
+
+  **Follow-up, same day**: checked whether gopro13_01 (failing ring
+  light, per Harri, same as insta_ace2_pro) could be recovered rather
+  than excluded. Its *individual* tracklets turned out genuinely stable
+  once locked on (median 0.25-0.31px frame-to-frame jitter over 500+
+  frames on three checked examples) -- the earlier 40-200px reprojection
+  "failures" involving it were traced to the free GT-derivation trick
+  itself: the sparse 25-timepoints-over-20s GT set can't resolve fast
+  real inter-sample motion, so its majority vote sometimes attributes
+  one slot name to several different, simultaneously-active real
+  tracklets. So gopro13_01's *tracklets* are trustworthy; its *raw
+  detection* is the noisy part (14,204 tracklets in this 6s window vs
+  300-2300 elsewhere, from P-D's near-disabled glare veto). The existing
+  FK-proximity pre-filter alone brings that down to 81 -- in line with
+  other cameras -- so tried including it in the full B2 run: **recall
+  and precision both got strictly worse** (0.52/0.56 -> 0.40/0.38), with
+  the *same* 14 true positives either time -- it added zero genuine new
+  links, only false ones, and chained 5-6 of its tracklets into single
+  contaminated groups via transitivity. Tried tightening the pre-filter
+  to require 60% of a tracklet's own frames near a prediction (not just
+  one) -- **no change at all**, identical numbers: its false-linking
+  tracklets are near a prediction persistently, not by a lucky single
+  frame, so this filter axis doesn't discriminate them. Concluded:
+  excluding gopro13_01 from B2/B3 is the right call for now -- two
+  reasonable attempts to recover it both made things strictly worse.
+  Not pursued further (identifying what those specific tracklets
+  actually are would need real visual investigation, for a
+  hardware-limited camera -- diminishing returns unless this capture
+  specifically needs the coverage later).
+
+  Next: build B3 (manual tracklet-group -> slot assignment GUI, on the
+  5 cameras excluding gopro13_01), or run B2 across the full capture
+  range for real calibration input first.
+
+- **2026-09-10** (P-C annotation tooling) — First tried extending
+  the cv2 `label_dot_ground_truth.py` with a `--slots` mode +
+  `--seed-detection-run`; Harri found it too clunky (no context menus,
+  every left-click adds a point, `unlabeled` text clutter). Replaced with
+  **`label_marker_slots_gui.py`** (PySide6): frame opens with the
+  detector's candidates pre-placed (grey, no clutter); **right-click a
+  dot → menu → pick slot** / `unlabeled` / Delete; **Ctrl+left-click
+  empty → add a missed dot**; left-click selects, `1`-`9`/`0` set the
+  selected dot's slot, Delete removes. Previous same-camera frame's
+  tagged dots show as ghosts; "Carry from prev" snaps each to the
+  nearest untagged current dot. **Track id derived** (`= slot_palette
+  .index(slot)`, one physical marker per slot) rather than entered.
+  Output JSON identical shape (`points` + parallel `point_meta`
+  `{slot,track}`), so `refine_dot_ground_truth.py` /
+  `validate_dot_detector.py` are untouched. Added
+  `build_gt_frame_manifest.py` (global time -> per-camera video_frame via
+  the sync table). Built a tiny 3-time x 3-good-camera manifest
+  (`scratch/dot_ground_truth/pc_tiny_manifest.json`, 9 frame-views) to
+  prove the tool -> metric loop before scaling to the full 25 x 6.
+
+  **Tool -> metric loop proven end to end.** Harri labelled the 9-frame
+  tiny set (`scratch/dot_ground_truth/pc_labels.json`), adding a few
+  detector misses by hand. First metric script `eval_dot_detection.py`
+  (Stage A, redesign doc §2.2 -- per-camera recall/precision via
+  Hungarian match at a radius gate) against detection run `01c2e3c1`:
+
+  | camera | GT slot-dots | recall | precision | precision* | #det |
+  |---|---|---|---|---|---|
+  | gopro-11_mini_01 | 18 | 1.00 | 0.43 | 1.00 | 42 |
+  | gopro13_02 | 19 | 1.00 | 0.49 | 1.00 | 39 |
+  | pixel9 | 14 | 0.64 | 0.53 | 1.00 | 17 |
+
+  `precision*` (detection matched *any* real GT dot incl. `unlabeled`)
+  = 1.00 everywhere -> blacklist-mode detector produces no junk; ~half
+  its detections are real reflective things that just aren't leg markers
+  (prop dots, the other person, glare). Recall 1.0 on the two 4K
+  GoPro-family cameras; **pixel9 0.64** -- misses `hip_R` in all three
+  frames plus `ankle_lat_R`/`toe_L` once (1080p, dimmer/smaller
+  markers). No `knee_front_*` labelled in any frame (check whether those
+  markers were placed).
+
+  **Fixed `refine_dot_ground_truth.py`**: it snapped GT points to
+  *subtract-mode residual* centroids, but the production detector uses
+  *blacklist-mode raw-brightness* centroids -- so refining pulled GT
+  points a few px *off* the detector's own centroids (`precision*`
+  1.00->0.7 after refine, spurious misses). Added `--centroid-mode`
+  (default `blacklist`, matches production: raw-threshold at
+  `--blacklist-threshold`, contour-moments centroid; `subtract-ladder`
+  keeps the original for subtract-mode captures). Blacklist mode needs
+  no background decode -> 7 s instead of 5+ min. Re-refined; metric at
+  radius **4 px** now clean: gopro-11 / gopro13_02 recall 1.00,
+  precision* 1.00, median match distance 0.0 px; pixel9 recall 0.64,
+  precision* 0.88 (2 faint top-of-frame `unlabeled` points refine
+  couldn't place well). Loop **label -> refine -> metric** is solid.
+
+  **Full 25 x 6 GT labelled** (`pc_labels.json`, 126 frame entries).
+  `insta_ace2_pro` left entirely unlabelled -- its ring light was
+  failing during the take, markers look too different to be worth
+  extending bright-dot detection to (a capture-hardware issue, not a
+  tuning one). Stage A metric on the full refined GT (blacklist run
+  `01c2e3c1`, threshold 200, radius 4 px):
+
+  | camera | GT markers | recall | precision | precision* |
+  |---|---|---|---|---|
+  | gopro-11_mini_01 | 133 | 0.98 | 0.48 | 1.00 |
+  | gopro13_02 | 140 | 0.96 | 0.59 | 1.00 |
+  | pixel9 | 82 | 0.70 | 0.48 | 0.91 |
+  | gopro13_01 | 80 | **0.12** | 0.09 | 1.00 |
+  | oneplus9pro-01 | 103 | **0.01** | 0.02 | 1.00 |
+
+  gopro13_01 detects plenty (113 candidates) but they're prop/glare, not
+  markers (precision* 1.0, recall 0.12) -- its markers sit at brightness
+  ~200 / saturation 50-80, clipped by threshold 200 and rejected by
+  max_saturation 45. oneplus threshold 200 far above its tone-mapped
+  marker brightness. `precision` ~0.5 on the good cameras is expected
+  (half the detections are real non-body dots -> assignment's problem).
+
+  **P-D underway** -- `sweep_dot_detection.py` (new): runs `detect_blobs`
+  directly on the labelled frames over a threshold x max_saturation
+  grid, per camera. First sweep (blacklist veto, short-span background)
+  was misleading -- the background was subject-contaminated so the veto
+  over-killed dim markers. Re-run with `--no-blacklist` (pure
+  threshold/saturation/shape) is clear:
+
+  | camera | marker brightness peak | recall @ prod (thr200/sat45) | best no-veto recall |
+  |---|---|---|---|
+  | gopro-11_mini_01 | >210 | 0.97 | 0.97 (thr>=170) |
+  | gopro13_01 | **~130** | 0.12 | **0.72** (thr 120, sat 90) |
+  | oneplus9pro-01 | **~175** | 0.01 | **0.77** (thr 170, sat 45) |
+  | pixel9 | ~200 | 0.70 | **0.89** (thr 180-190, sat 120) |
+
+  gopro13_01's markers are genuinely dim (~130) -- threshold 200 clips
+  them all; ~120 recovers 72%. oneplus markers sit right at ~175 (170
+  recovers 77%, collapses again at 190). pixel9 gains from a lower
+  threshold *and* a looser `max_saturation` (its and gopro13_01's
+  markers are ~50-90 saturated). No-veto precision is ~0 (all glare
+  passes) -- the definitive per-camera numbers need the veto with a
+  *subject-free* background; that sweep is running (45k-frame bg span).
+  **Done**: added `dot_max_saturation_by_camera` and
+  `dot_blacklist_frac_by_camera` to `MarkerDetectionPipeline` /
+  `load_pipeline_for_capture_object` (same `.get(camera_instance_id,
+  scalar_default)` pattern as the existing `dot_threshold_by_camera`),
+  wired `_process_camera_core` to use both, and matching
+  `--dot-max-saturation-by-camera` / `--dot-blacklist-frac-by-camera` CLI
+  flags on `run_standalone_marker_detection.py`. New test
+  (`test_pipeline_passes_per_camera_max_saturation_and_blacklist_frac`)
+  confirms the plumbing at the `detect_blobs()` call site. All 26
+  `test_marker_pipeline.py` tests pass.
+
+  Also re-ran the veto-frac sweep (§ above found frac=0.7 too tight):
+  0.85 recovers gopro-11's veto-lost recall (0.92->0.98) at a modest
+  precision cost; gopro13_01 needs 0.95 to get anywhere (0.45->0.63 at
+  thr 130). **Launched a fresh full-capture detection run** (append-only,
+  new `detection_runs` row, `01c2e3c1` untouched) with: global
+  threshold=200/max_saturation=45/blacklist_frac=0.85, per-camera
+  overrides gopro13_01={130,90,0.95}, oneplus9pro-01={150,45,0.85},
+  pixel9={180,90,0.85} (gopro-11_mini_01/gopro13_02 keep the global
+  defaults; insta_ace2_pro still included at defaults despite its known
+  ring-light failure, for a uniform run). `run_parallel()`, same
+  33.62-130.185s range as `01c2e3c1`.
+
+  **Confirmed on the real run** (`detection_run_id 6abcba67`, 69,486
+  frames): recall gopro13_01 0.12->**0.65**, oneplus 0.01->**0.62**,
+  pixel9 0.70->**0.80** (gopro-11/gopro13_02 unchanged at 0.98/0.96, as
+  expected -- their settings didn't change). Real cost, as expected from
+  "recall first, let downstream filter": precision on gopro13_01 fell to
+  **0.01** (frac 0.95 nearly disables its glare veto, ~4270 detections
+  for ~80 real markers) and dropped somewhat on gopro-11/gopro13_02 too
+  (the global frac 0.7->0.85 bump). Accepted -- a missed detection is
+  unrecoverable, a false one is the assignment layer's problem.
+
+- **2026-09-11** (later) — The real **P-A metric**: FK-predicted marker
+  position vs. the actual slot-labelled GT (not "nearest raw detection",
+  P-A's original proxy before GT existed). New
+  `eval_fk_prediction.py`; also finds each GT slot's empirical best-
+  matching probe from `prototype_fk_marker_prediction.py`'s `_DEFAULT_
+  TRIAL` (majority vote), resolving what P-A left open (which
+  unlabelled `k_Xp`/`k_Zm`/etc. probe direction is which real
+  anatomical slot).
+
+  First run surfaced a real bug, not noise: left-side GT slots showed
+  60-200px "error" against right-side slots' 11-40px. `_DEFAULT_TRIAL`
+  only ever had **right-leg** entries -- left-leg GT was being compared
+  against right-leg predictions. Confirmed the fix empirically against
+  the skeleton's own *rest pose* (zero joint angles -- true bind-pose
+  symmetry, not confounded by the current animated pose putting each leg
+  somewhere different): thigh.L/shin.L/foot.L's local axes are
+  thigh.R/shin.R/foot.R's under reflection across the sagittal plane
+  composed with a per-side local-frame correction -- net rule, a local
+  offset/normal (x,y,z) on the right mirrors to (-x,y,z) on the left
+  (only the medial/lateral local-X component flips; down-bone Y and Z
+  unchanged). Implemented as `_mirror_to_left()`; `_DEFAULT_TRIAL` is now
+  `_RIGHT_TRIAL` + its mirror, 32 entries total.
+
+  **Re-run, clean**: median prediction error 10-40px across all 16
+  slots, consistent between left and right (e.g. knee_lat_L 12.7px /
+  knee_lat_R 14.0px; heel_L 12.9px / heel_R 14.0px) -- confirms the P-A
+  keystone premise with a real number against real ground truth, not
+  just "looks about right" from the earlier probe video. Side finding
+  for the next catalog-authoring pass: `ankle_lat_R` and `ankle_med_R`
+  both pick the plain joint-center anchor as their closest probe, not
+  any of the offset probes -- the generic +-4.5cm ring doesn't actually
+  bracket where the real ankle markers sit; needs real tuned offsets,
+  not guessed ones.
+
+  Next: author real named medial/lateral/anterior offsets (replacing the
+  unlabelled probes) using this diagnostic, or move to P-B (cross-camera
+  tracklet grouping + manual tracklet->slot assignment).
+
+- **2026-09-11** (later) — Wrote the detailed **P-B design** (redesign
+  doc §4, replacing its earlier sketch): B1 per-camera tracklets (no new
+  code, `DotTrackletLinker`'s existing id); B2 cross-camera tracklet
+  grouping (`build_tracklet_groups.py` -- pre-filter by lifetime + FK
+  proximity, pairwise reprojection-consistency test over *shared frames*
+  -- the real difference from per-frame fusion, a sustained agreement not
+  one lucky frame -- disambiguation margin over the runner-up, connected
+  components, contradictory triples flagged not forced); B3 manual
+  tracklet-group -> slot assignment GUI (`label_tracklet_groups_gui.py`,
+  new tool sharing `label_marker_slots_gui.py`'s image helpers -- group
+  list + trajectory view, not a frame canvas, different enough to want
+  its own tool); B4 calibration fit (closed-form least squares per slot
+  from the group's fused 3D path vs. the parent joint's FK transform,
+  scale-robust `along`/`lateral`/`anterior`, `normal` defaulted to the
+  radial direction, residuals reported); B5 output (calibrated
+  attachment set, same file shape as the nominal catalog + a
+  `calibration:` provenance block). Validation: extend
+  `eval_fk_prediction.py` with `--attachment-set` to check the fitted set
+  against GT (purity should jump, error should drop toward tracking-noise
+  level) -- directly tests whether the `ankle_lat_R`/`ankle_med_R`
+  "closer to the plain anchor" finding was a probe-placement problem.
+  Real, cheap validation for B2 itself noted: the existing slot-labelled
+  GT's own detections can be matched back to their `tracklet_id`,
+  yielding real cross-camera tracklet-group ground truth for free to tune
+  B2's thresholds against, rather than guessing them. Not yet
+  implemented -- design only.
+
+- **2026-09-10** (P-A) — Ran the keystone experiment (redesign
+  doc §8): `python/tools/prototype_fk_marker_prediction.py` reads the
+  existing markerless `tracking_results` (smoothed state) + skeleton
+  YAML, does FK via `posetrak.db.skeleton_layout.SkeletonLayout`,
+  resolves a hand-authored trial right-leg attachment set (real skeleton
+  anchors + `±X`/`±Z` probe markers around the shin) to world position +
+  FK-carried normal, projects into all 6 cameras, computes the facing
+  prior, and renders a 6-camera grid video
+  (`scratch/dot_ground_truth/fk_prediction.mp4`).
+  **Result: the premise holds.** On the 3 cameras that calibrate well
+  *and* detect the leg dots (gopro13_02, gopro-11_mini_01, pixel9),
+  nominal FK prediction lands median ~10-40 px (~2-4 cm) from a real
+  detection, on the right body part -- inside a usable clustering radius
+  (gopro13_02: 90-98% of frames matched within 60 px). Extrinsics are
+  fine on all 6 (a tracker-trusted FK 3D knee reprojected vs the vitpose
+  knee = ~15-30 px on every camera); the earlier "3 cameras 200-1500 px
+  off" was a metric artefact of measuring "distance to nearest
+  *detected* dot" on cameras that detect almost none. So **Stage A
+  per-camera detection (P-D) is the binding constraint**, not prediction:
+  gopro13_01 / insta_ace2_pro / oneplus9pro-01 match 0-15% of predictions
+  purely from under-detection. The FK-carried normal / facing prior works
+  (paired probes show consistent opposite facing signs; filled-vs-hollow
+  rendering separates front/back correctly). D6 resolved: leg joints'
+  `bone_tip_offset = [0,+L,0]` is usable as `e_long`. Follow-ups: author
+  a real medial/lateral/anterior leg set (this pass used unlabelled
+  probes to find the local-axis mapping); consider running P-D before
+  P-B.
+
+- **2026-09-10** (later) — Harri review of the fusion rewrite + current-
+  state doc. Substantive pushback, not tuning: (1) marker grouping by one
+  shared joint anchor is wrong (markers can be mid-bone / near the child
+  joint; markers close in 3D project close in one view -- the main
+  mislabel cause in the latest video); (2) the pelvis-proxy for
+  anatomical direction is too weak -- normals should be defined in the
+  *parent joint frame* and taken to world via FK from the markerless
+  result / tracker predict; (3) tracklets should probably be the primary
+  assignment unit (match two tracklets in 3D if per-frame errors over
+  shared frames are under threshold and better than alternatives; assign
+  a whole tracklet to one slot if all its frames match); (4) the metrics
+  are ad-hoc and need agreed definitions + ground truth, separately per
+  stage; (5) Stage A: gopro13_01 / oneplus / insta_ace2_pro miss most
+  visibly-present dots. Also a strategic fork raised: enrich the catalog
+  enough to predict a marker's projected position + visibility from the
+  markerless result *before* per-person calibration, OR do manual
+  tracklet->slot assignment for the calibration capture first, get
+  marker-augmented tracking working from per-person-calibrated markers,
+  and solve auto-assignment later.
+
+  Delivered per request: two diagnostic grid videos (all 6 cameras, 40-50s):
+  `scratch/dot_ground_truth/all_dots_overview.mp4` (every raw candidate,
+  no assignment) and `all_tracklets_overview.mp4` (candidates coloured +
+  numbered by DotTrackletLinker tracklet_id) --
+  `python/tools/render_dot_detection_overview_video.py`.
+
+  Stage A diagnosis (real data, frame at t=42.925): the markers gopro-11
+  renders at brightness 254 / saturation 2 (saturated pure white, ideal
+  for threshold 200 + max_saturation 45), gopro13_01 renders at ~198-209
+  / saturation 27-79, and oneplus at ~76-228 / saturation up to 164 on
+  the leg. threshold=200 and max_saturation=45.0 were effectively tuned
+  for the GoPro Mini alone; the other cameras render the same physical
+  markers dimmer and more chroma-tinted, so both filters reject real
+  markers there. Relaxing to threshold 150 roughly doubles gopro13_01's
+  and oneplus's candidate counts. `dot_threshold_by_camera` already
+  exists for exactly this but was only ever set for pixel9; a per-camera
+  `max_saturation` override does not exist yet. Not re-run -- feeds the
+  design phase.
+
+  Next: a scoped design phase before more implementation.
+
+- **2026-09-10** (later still, after Harri's inline comments) — Revised
+  the redesign doc §1.3–1.4 per those comments: no "link" concept
+  (markers keep a plain parent joint, per the existing schema); the
+  bone-local frame is defined **canonically for the right side** with a
+  `mirror: true` flag (avoids the left-side handedness/anatomy
+  inconsistency); `e_long` uses the schema's existing `bone_tip_offset`
+  instead of an undefined "primary child joint". Added §1.11 recording
+  the skeleton-schema redesign (decouple topology / markers / metrics /
+  placement; explicit link+twist concepts) as **deferred** — Harri:
+  "let's not do it yet... don't understand all schema requirements yet".
+  Added **§8, a concrete prototyping plan** answering "how does
+  prototyping continue": P-A FK marker-slot prediction from the existing
+  markerless `tracking_results` + a hand-authored trial right-leg
+  attachment set (the keystone experiment — does nominal prediction +
+  markerless pose land close enough to detections to drive clustering,
+  and get visibility sign right); P-B cross-camera tracklet grouping +
+  manual tracklet→slot assignment → calibrated attachment set (the
+  manual-first deliverable); P-C minimal slot-labelled GT + per-stage
+  metric harness (parallel with P-A); P-D per-camera detection
+  calibration; P-E body-model spike. Order: P-A + P-C now in parallel,
+  P-B after P-A, reconvene before committing to §3 auto-assignment.
+
+- **2026-09-10** (earlier) — Wrote
+  [marker-catalog-and-assignment-redesign.md](marker-catalog-and-assignment-redesign.md),
+  the design doc for that phase. Deep sections, per Harri's priority: (1)
+  **catalog spec** -- markers attach to a *link* (identified by its
+  proximal joint), not a joint anchor; offset stored scale-robustly as
+  `along` (fraction of bone length) + `lateral`/`anterior` (metres) in a
+  link-local frame `(e_long, e_lat, e_ant)` built from the skeleton rest
+  pose without depending on its Euler `orientation`; explicit surface
+  `normal` in the same frame for FK-carried backface culling; one-side
+  authoring + sagittal mirror; modules composed per capture; nominal vs.
+  per-person-calibrated attachment sets, same file format. (2)
+  **metrics** -- two GT captures (CAL slow / HARD fast), multi-camera
+  hand-labeled dot GT with slot names + per-camera track ids + triangul-
+  ated 3D slot positions; a distinct metric per stage (detection
+  recall/precision per camera; tracklet fragmentation/purity/coverage/ID-
+  switch vs GT tracks -- the principled version of the ad-hoc "purity";
+  fusion 3D error / recall / false-merge / view-completeness; assignment
+  per-slot precision/recall split by confidence and by near-neighbour
+  presence, plus temporal consistency). Sketched: FK-based slot
+  prediction replacing the pelvis proxy; per-camera projected-cluster +
+  cross-camera-3D + tracklet-native assignment replacing the old
+  Stages C-E; tracklet->slot manual assignment for calibration captures.
+  Recommends manual-first (calibrate markers by manual tracklet
+  assignment, get marker-augmented tracking working, build auto-assignment
+  against the resulting GT + calibration afterward). Includes a §6 on
+  whether to align with a permissive body model (SOMA-X / ANNY both
+  Apache; SMPL rejected on licence + joint quality) -- recommends a
+  1-2 day spike (licence audit incl. model assets, pick a reference
+  skeleton topology so catalog files are forward-compatible, assess
+  SOMA's labeling approach as an architectural alternative), not adoption
+  now.
+
+- **2026-09-10** — Rewrote `fuse_frame()`'s view-membership logic per
+  Harri's explicit request ("fusion should group all detections that
+  reproject close, it does not make sense to just apply to the winning
+  pair"): a fused point now reprojects into *every* camera with
+  candidates (not only the pair that seeded it) and claims each camera's
+  best-matching candidate via global greedy best-first resolution, sorted
+  by reprojection error -- one raw candidate can now only ever support
+  one fused point. This structurally eliminates the shared-raw-pixel bug
+  from the previous entry (no longer needs the local
+  `_dedup_shared_view_fused_points` workaround in
+  `prototype_marker_normal_assignment.py`, which was removed) and expands
+  coverage to cameras that weren't part of the winning triangulating
+  pair. Measured, honest trade-off on the same validation clip: purity
+  improved further (0.814 -> 0.821) but ambiguous-group coverage actually
+  *dropped* (7,436 -> 4,734 assignments) rather than increasing -- the
+  more aggressive global consensus also eliminates more low-quality
+  duplicate hypotheses, not just recovers extra views; net effect is
+  fewer but higher-confidence fused points, not a straightforward
+  coverage win. Re-rendered and re-verified the previously-buggy frame
+  (8679) on both a single-camera video and a new 6-camera grid video
+  (`scratch/dot_ground_truth/normal_aware_check_v4.mp4`,
+  `normal_aware_grid_check.mp4`).
+
+  Also wrote
+  [person-marker-assignment-current-state.md](person-marker-assignment-current-state.md)
+  -- a from-scratch (non-chronological) description of the pipeline as it
+  actually stands today, requested by Harri after this session's chain of
+  fixes made the design doc's original phased plan hard to reconcile with
+  the real, current behavior ("I have a feeling that there are now so
+  many changes that we do not see the forest from the trees").
+
+- **2026-09-09** (later still) — Built marker-normal disambiguation for
+  the ambiguous same-joint groups (`prototype_marker_normal_assignment.py`),
+  next per Harri's own sequencing ("tracklets first, then normals").
+  Confirmed a real structural gap this closes: every marker in an
+  ambiguous group (e.g. `knee_L_medial`/`knee_L_lateral`/`knee_L_front`)
+  shares one vitpose anchor index, so their triangulated 3D anchor in
+  `hybrid_assign_frame` was numerically *identical* for all group members
+  -- the existing Hungarian match had zero information to tell them apart
+  and was tie-breaking arbitrarily, not deciding. This is almost
+  certainly the real mechanism behind the medial/lateral/front flicker
+  Harri reported.
+
+  Approach: derive medial/lateral/anterior directions *anatomically* each
+  frame from the skeleton's own triangulated pose (pelvis-width vector
+  for medial/lateral, `cross(world_up, pelvis_vector)` for anterior),
+  rather than requiring per-marker 3D geometric offsets baked into the
+  catalog ahead of time. Real bug caught before trusting it: an earlier
+  version derived anterior from each limb's own instantaneous thigh/shank
+  direction, which swings with hip/knee *flexion* (raising a leg) even
+  though the knee's true anterior-facing direction doesn't rotate with
+  flexion, only with hip axial rotation -- caught by rendering the
+  computed frame as arrows on a real image
+  (`render_marker_normal_debug_frame.py`) and checking anterior against
+  which way the subject was visibly facing: the limb-direction version
+  pointed backwards on the raised (bent) leg while looking correct on the
+  straight standing leg; the pelvis-anchored version matches on both.
+
+  Validated on real data (10s/6-camera window, same clip as the tracklet-
+  smoothing work): per-tracklet name-purity within ambiguous groups (how
+  consistently a physical dot gets the same name) improved from a 71.9%
+  baseline (`hybrid_assign_frame`) to 75.6% with directional preference
+  alone, up to 82.1% when actively rejecting poorly-aligned pairings
+  (`min_direction_score=0.6`) -- a real, expected coverage/purity
+  trade-off (ambiguous-group assignment count drops from 13,325 to 8,582
+  at that threshold). Spot-checking rendered frames shows the previously-
+  impossible case working: `knee_L_lateral` and `knee_R_medial` correctly
+  distinguished on two simultaneously-visible knees in the same frame.
+  Individual-frame semantic correctness beyond that spot check not yet
+  independently verified against ground truth -- video handed to Harri
+  for the real review, matching how every other real bug this session
+  found (the coordinate bias, the fusion-stage framing, the frame-7920
+  swap, the render-pipeline blur) was ultimately caught by watching, not
+  by a script-level check alone.
+
+  That review immediately caught another real bug: `knee_L` was
+  confidently mislabeled `medial` (should be `lateral`) for the first
+  ~350 frames of the clip, correcting itself around frame 8130. Traced to
+  real per-frame data, not a smoothing artifact: the 3D pass (available
+  once cross-camera triangulation of the candidate kicks in around frame
+  7900) was correct and stable throughout at a strong ~0.9 cosine score;
+  the bug was in the **2D-only fallback pass**, active during the earlier
+  single-camera-only stretch. At frame 7600 the one nearby candidate's
+  real projected pixel offset was ~32 degrees off *every* modeled
+  direction (medial/lateral/front) -- "medial" won only for being the
+  least-wrong of three bad options (cosine 0.85), not for being right. A
+  plain score threshold can't catch this: 0.85 looks like a confident
+  match, it's simply the wrong one, because a single camera's projected-
+  offset geometry is far more sensitive to joint-position triangulation
+  noise and imperfect real marker placement than working directly in 3D.
+  Fixed by disabling ambiguous-group directional disambiguation in the 2D
+  fallback pass by default (`disambiguate_2d_fallback=False`) -- drop
+  rather than confidently guess wrong, matching this project's existing
+  precedent. Re-measured: purity rises further to 0.814 at
+  `min_direction_score=0.4` (vs 0.719 baseline, vs 0.797 with the buggy
+  2D fallback active), at a real coverage cost (246 -> 151 ambiguous-
+  group tracklets get any name at all in the 10s/1-camera check).
+  Re-verified on the actual rendered video: `knee_L` now stays correctly
+  unassigned through the previously-wrong stretch and shows `lateral`
+  from its first appearance, no transition.
+
+  Harri's follow-up review found two more real, distinct issues, both
+  root-caused with real data:
+  - **Fusion-stage duplicate-pixel bug** (frame 8679, `knee_L_lateral`
+    shown as `ankle_L_medial`): two `FusedPoint`s shared the exact same
+    raw pixel in one camera, paired with two *different* candidates in
+    two other cameras, producing two distinct 3D positions from one 2D
+    dot -- the per-group direction Hungarian had no way to know they
+    shared a raw pixel and assigned different names to both. Fixed with
+    `_dedup_shared_view_fused_points()`: before assignment, drop the
+    lower-quality (higher reprojection error) of any two FusedPoints that
+    share a raw (camera, candidate) view. Likely also affects
+    `hybrid_assign_frame`'s own unambiguous-group 3D pass (a single
+    Hungarian call doesn't prevent two different FusedPoint columns from
+    sharing a raw pixel either) -- not fixed there yet, wasn't the
+    reported symptom.
+  - **Knee/toe often undetected despite a visible dot** -- measured, not
+    guessed, over the full 10s/1-camera window: toe's keypoint is visible
+    1192/1199 frames but a raw candidate is only *nearby* in 381 of those
+    (32%) -- toe's real bottleneck is upstream detection/proximity, not
+    assignment (when a candidate is nearby, 93% get assigned). Knee's
+    candidate is nearby 1106/1192 times (93%) but only 529 (48%) get
+    assigned, split into two distinct causes: 459 frames (78% of the gap)
+    have no cross-camera-triangulated candidate near the joint at all --
+    the direct, deliberate cost of disabling the 2D single-camera
+    fallback for ambiguous groups; 118 frames (20% of the gap) have a
+    fused candidate that *was* found and correctly named, but using two
+    *other* cameras' pixels -- confirmed the camera under review has its
+    own separate raw candidate only 14.8px from its own knee keypoint at
+    a sampled instance, almost certainly the same physical dot, that
+    never inherits the name because `fuse_frame`'s `views` only records
+    the winning triangulation pair, not every camera that can also see
+    the point. Not fixed -- flagged as a real, well-understood follow-on
+    (back-fill a confirmed name to any other camera's own unconsumed
+    candidate that reprojects close to it) pending Harri's go-ahead.
+
+- **2026-09-09** (later still) — Two real bugs found reviewing the
+  tracklet-smoothed video with Harri, both now fixed and re-verified
+  against the actual rendered frames (not just Python-level data checks,
+  which had missed both):
+  - **Tracklet-smoothing rewrite pass had a mutual-swap clobber bug**
+    (`prototype_tracklet_smoothed_assignment.py`): when two tracklets swap
+    names within the *same* frame -- exactly the frame-7920 heel_L/ankle_L
+    case -- correcting them one at a time via `dict.pop(old_name)` /
+    `dict[new_name] = ...` on the shared per-frame dict let the second
+    tracklet's correction clobber the first's, since both fight over the
+    same two dict keys (a "swap two variables without a temp" bug).
+    Confirmed with real per-frame tracklet votes: tracklet 31 (physical
+    ankle_L dot, 392/446 votes) and tracklet 110 (physical heel_L dot)
+    swap names for frames 7920-7922; the old rewrite left `heel_L` on
+    tracklet 31's position and dropped `ankle_L_medial` entirely -- this
+    is why the rendered video still showed the swap even though a
+    Python-side dict inspection said it was fixed (the inspection never
+    replayed the actual multi-tracklet rewrite order). Fixed by rebuilding
+    each frame's assignment dict from scratch (`tracklet_id ->
+    majority_name`) in one pass instead of mutating the shared dict
+    in place per tracklet. Re-verified against the actual rendered
+    frames around 7920: heel_L and ankle_L_medial each now stay pinned to
+    the same physical spot throughout.
+  - **`render_hybrid_assignment_video.py` drew annotations before the
+    grid-cell resize**, then squashed the whole image (non-aspect-
+    preserving) down to a fixed cell size -- blurred small circles/text
+    away, and on a camera whose crop window's aspect ratio differs a lot
+    from the cell's (`oneplus9pro-01`: crop 1298x1772, cell 640x480), the
+    anisotropic squash (~3.7x on the tall axis) shrank 5px-radius
+    unassigned-candidate circles into near-invisible slivers -- this, not
+    an actual absence of detections, is why that camera appeared to have
+    none. Confirmed candidates were present all along by reproducing the
+    render script's own per-frame DB lookups directly. Fixed by cropping
+    then resizing (one uniform scale factor for both axes, aspect ratio
+    preserved, letterboxed into the cell) *before* drawing, so every
+    circle/label is drawn at its real final-output pixel size. Also
+    bumped label/timestamp font scale per Harri's request.
+  - Also added multi-camera grid rendering to the same script (one cell
+    per `--camera-label` value) so a same-frame issue can be checked
+    across every camera's own view at once.
+
+- **2026-09-09** (later still) — Checked Harri's question about
+  `oneplus9pro-01`'s crop appearing to drift slightly during a clip
+  (hypothesis: phone autofocus). The render script's own crop window is
+  computed once and is static in code, so any visible drift has to be
+  real. Confirmed with ORB feature matching on the static background
+  (furniture, the calibration box) between the start and end of a 10s
+  window: a single consistent affine transform fit all 200 matched
+  points with zero RANSAC outliers -- a genuine, systematic ~0.2% scale
+  change plus ~4px translation over just 10 seconds, not noise. This is a
+  real concern for this camera's calibration: if continuous autofocus
+  changes effective focal length mid-capture, a single fixed-intrinsics
+  calibration for the whole take will accumulate real reprojection error
+  over time. Not yet investigated further (whether this is present on
+  other phone cameras in the rig, whether it's severe enough to need
+  per-segment recalibration, or a capture-setup fix like locking AE/AF) --
+  flagging as an open question for the productization plan, not fixed
+  here.
 
 - **2026-09-09** — Person-marker-assignment-design.md's phases P1-P7
   prototyped and validated (real video review each step, not just

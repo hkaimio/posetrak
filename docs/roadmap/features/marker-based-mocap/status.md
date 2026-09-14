@@ -1,7 +1,24 @@
 # Marker-based mocap — status
 
+- **2026-09-14** (combined-fix skeleton's full-trial run completed:
+  100% tracked, ankle_lat_L regression confirmed fixed, latest) — The
+  full-trial run flagged as in-progress in the previous entry
+  (`056b41dd-4efc-4d61-b786-163d62529666`, combined shoulder-width +
+  ankle-fix skeleton) finished: 11588/11588 steps tracked (100%), 0 lost,
+  152/11588 frames needed the PSD-eigensolver fallback. Comparing the
+  same full trial against the shoulder-fix-only run that carried the
+  ankle regression (`d4f78ce6...`): `ankle_lat_L` median reprojection
+  error improved 37.6px&rarr;27.9px, `ankle_med_L` 35.7px&rarr;25.3px,
+  `ankle_med_R` 37.5px&rarr;25.6px -- confirming the lineage-based fix
+  actually resolved the regression, not just the skeleton's static joint
+  offsets. Head/hip/shoulder markers are, as expected, unaffected by this
+  fix (nose/ear/hip/shoulder medians match the previous run to within
+  0.5px) -- the ankle fix only ever touched leg joints, and the
+  still-elevated head-marker error remains the open item from the
+  confidence-threshold entry above.
+
 - **2026-09-14** (skeleton scaling: added a hip-to-ear derived neck+head
-  measurement, latest) — Follow-up to the head-marker jitter discussion:
+  measurement) — Follow-up to the head-marker jitter discussion:
   Harri asked for a "hips to ears" measurement in the skeleton-scaling
   UI, preferring it over "shoulders to ears" because shoulders move a lot
   with arm motion, so a time-range average anchored there carries more

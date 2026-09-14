@@ -1,7 +1,59 @@
 # Marker-based mocap — status
 
+- **2026-09-14** (fixed the `marker_projections.csv` mode-ambiguity bug;
+  head-marker reprojection error is real but asymmetric, not simple
+  skeleton scaling, latest) — Follow-up to the previous entry's finding
+  #3. Fixed `TrackingExporter::write_frame()` (`cpp/src/io/
+  tracking_export.cpp`): the per-(marker,camera) loop now checks
+  `obs.mode` before building the exported "error" -- `VELOCITY`
+  observations are skipped (would need the previous frame's projection,
+  not available in this per-frame call); `PAIR_DIFF` observations are
+  handled properly by projecting the *parent* marker too (via
+  `ref_marker_id`, or the fixed cross-person `anchor_position` when
+  that's what set the observation) and comparing
+  `(child_proj - parent_proj)` against the already-relative `obs.position`
+  -- apples to apples, instead of an absolute prediction against a
+  relative observation. `POSITION` mode is unchanged. Rebuilt
+  (`meson compile -C optbuild`), `./run_tests.sh --test-args="[export]"`
+  passes (the existing `TrackingExporter basic functionality` test,
+  `[export][io]` -- no dedicated regression test for the PAIR_DIFF case
+  itself yet, a real gap; validated instead by re-running Nelli's own
+  sequence against real data and checking the numbers directly, matching
+  this project's own established practice for this kind of fix).
+
+  **Verified against a fresh tracking run** (same sequence/skeleton/
+  config as the original-noise baseline): every previously-corrupted
+  marker's median "error" dropped from the 1800-2600px artifact range
+  into a sane 5-50px range (e.g. `MRK-thumb3.R` 5px, `MRK-wrist.L` 20px,
+  `MRK-Ankle.L` 9.5px -- all now physically plausible for a run that
+  tracked 100%).
+
+  **Re-examined the head-marker question on the now-correct data --
+  real, but not simple skeleton scaling**: `MRK-nose` (49px) and
+  `MRK-ear.R` (46px) are genuinely elevated vs. `MRK-elbow.L/R` (23px,
+  22px) and `MRK-wrist.L/R` (20px, 22px) -- and elbow/wrist's own ~22px
+  sits close to what the configured noise model itself predicts
+  (`pose_noise_std`=13px * ~1.6 average `crop_scale` &asymp; 21px),
+  suggesting elbow/wrist are behaving close to nominal while nose/ear
+  are not. But **`MRK-ear.L` (26px) is barely elevated at all -- nearly
+  half `MRK-ear.R`'s 46px** -- and a pure skeleton-scale error (a wrong
+  head-segment size or offset) would affect both ears symmetrically,
+  since the geometry is mirror-symmetric by construction. `MRK-hip.L/R`
+  (32/38px) and `MRK-shoulder.L/R` (24/29px) show the same right-higher-
+  than-left pattern, more mildly. This argues *against* Harri's original
+  skeleton-scaling hypothesis as the primary explanation and *for*
+  something more specific to viewing angle or camera calibration on her
+  right side/face -- not yet root-caused. **Open next steps**: (1) check
+  whether nose/ear-R's error correlates with a specific camera or a
+  specific head-orientation range (e.g. worse only when she's turned
+  away from certain cameras) rather than being uniform across the whole
+  run; (2) hip/shoulder's own moderate (not dramatic) elevation over
+  elbow/wrist's noise-model-consistent baseline is still worth a look --
+  possibly a torso-segment scale/offset issue distinct from the more
+  striking head-asymmetry finding, not necessarily the same root cause.
+
 - **2026-09-14** (person+prop coupling A/B test, plus three real findings
-  it led to, latest) — Tried the person+pen/pad coupled tracking run
+  it led to) — Tried the person+pen/pad coupled tracking run
   Phase 3 flagged as unexercised (previous entry): `--person ec1b3e2f...
   119a24b5... b0eff656...` (Nelli + pen + pad) via `MultiPersonTracker`.
   It ran without crashing, and a direct C++ source trace (not just

@@ -233,13 +233,59 @@ void TrackingExporter::write_frame(
             if (obs_map.count(obs_key)) {
                 auto const& obs = obs_map.at(obs_key);
 
-                // Project marker to camera
-                auto projection_opt = camera.project(position_3d);
-                Eigen::Vector2d projection = projection_opt.value_or(Eigen::Vector2d(-1.0, -1.0));
+                // obs.position means different things per obs.mode (see
+                // observation.hpp's own MeasurementMode doc comment) -- comparing
+                // it against an absolute projection unconditionally, the way this
+                // loop used to, produces a physically meaningless "error" for
+                // anything but POSITION (confirmed on real data, 2026-09-14:
+                // 1800-2600px "errors" for every PAIR_DIFF-tracked marker --
+                // wrist/ankle/heel/toe/elbow/knee/fingers -- the exact
+                // mode-ambiguity bug class observation-results-semantics.md
+                // already documents twice). VELOCITY needs the previous frame's
+                // projection, not available in this per-frame call without extra
+                // state -- skipped rather than exported wrong; PAIR_DIFF is
+                // fixed below, since everything it needs is already in scope.
+                if (obs.mode == MeasurementMode::VELOCITY) {
+                    continue;
+                }
+
+                Eigen::Vector2d projection;
+                Eigen::Vector2d observation = obs.position;
+                if (obs.mode == MeasurementMode::PAIR_DIFF) {
+                    // obs.position is child_pixel - parent_pixel (a relative
+                    // offset), not a position -- so the "prediction" this row
+                    // compares it against must be the same kind of relative
+                    // quantity: predicted_child_proj - predicted_parent_proj (or
+                    // - the fixed cross-person anchor, when this observation is
+                    // one of those instead of a same-skeleton parent/child pair).
+                    auto child_proj_opt = camera.project(position_3d);
+                    if (!child_proj_opt) {
+                        continue;
+                    }
+                    Eigen::Vector2d parent_proj;
+                    if (obs.anchor_position.has_value()) {
+                        parent_proj = *obs.anchor_position;
+                    } else if (obs.ref_marker_id >= 0 &&
+                               static_cast<size_t>(obs.ref_marker_id) < markers.size() &&
+                               marker_positions_3d.count(markers[obs.ref_marker_id].name)) {
+                        auto parent_proj_opt =
+                            camera.project(marker_positions_3d.at(markers[obs.ref_marker_id].name));
+                        if (!parent_proj_opt) {
+                            continue;
+                        }
+                        parent_proj = *parent_proj_opt;
+                    } else {
+                        continue;  // no parent to compare against -- can't reconstruct a prediction
+                    }
+                    projection = *child_proj_opt - parent_proj;
+                } else {
+                    auto projection_opt = camera.project(position_3d);
+                    projection = projection_opt.value_or(Eigen::Vector2d(-1.0, -1.0));
+                }
                 bool is_outlier = !used_observations.count(obs_key);
 
                 write_marker_projection_row(frame_number, timestamp, static_cast<int>(marker_idx),
-                                            marker.name, camera_id, projection, obs.position,
+                                            marker.name, camera_id, projection, observation,
                                             is_outlier);
             }
         }

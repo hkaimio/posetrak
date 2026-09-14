@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: pad-marker1-only
+units: meters
+markers:
+  - name: aruco_1
+    type: aruco
+    dictionary: DICT_4X4_50
+    id: "1"
+    size: 0.095
+    corners:
+      - [-0.047500, 0.047500, 0.000000]
+      - [0.047500, 0.047500, 0.000000]
+      - [0.047500, -0.047500, 0.000000]
+      - [-0.047500, -0.047500, 0.000000]

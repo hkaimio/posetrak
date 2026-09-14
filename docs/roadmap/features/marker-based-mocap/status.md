@@ -1,6 +1,57 @@
 # Marker-based mocap — status
 
-- **2026-09-13** (exported pen+pad trajectory into Blender, latest) —
+- **2026-09-13** (validated the production tracker on the pen+pad
+  objects end-to-end, latest) — Phase 3's own "validate the mechanical
+  path first" item (`marker-mocap-productization-plan.md` §4): registered
+  the pen and pad as real `capture_objects` and ran the actual
+  `posetrak-tracker` UKF pipeline against them, not a standalone script.
+
+  The missing piece turned out to already exist and be tested:
+  `app.pose.finalise.finalise_object_to_db()` reads an ArUco detection
+  run bound to a `capture_object_id` and writes one
+  `pose_observation_sequence` automatically (no stitching needed -- one
+  prop is always one track). New `setup_pen_pad_capture_objects.py`
+  wires this up end-to-end per CLAUDE.md's append-only convention:
+  imports each object's marker body YAML, inserts a `capture_objects`
+  row, then -- rather than mutating the existing multi-purpose ArUco run
+  (`75cbf678...`) -- creates a fresh, object-bound `detection_runs` row
+  and *re-encodes* (not byte-copies) the relevant `detection_keypoints`
+  rows onto it, so the new run's `config_json.marker_ids` is a clean,
+  minimal list (`["2","3"]` for the pen, `["1"]` for the pad) rather than
+  inheriting the original 8-marker wire format. Generates + imports each
+  object's prop skeleton (`marker_body_to_skeleton`) to finish.
+
+  Pad uses marker "1" only -- not "0": the calibration-box ID collision
+  (previous entry) means "0" sightings are frequently the box, not the
+  pad, and a single ArUco marker already fully determines a rigid body's
+  6-DOF pose, so dropping "0" avoids relying on the tracker's own outlier
+  rejection to save us from a problem this script can just sidestep.
+  New `catalog/pen.calibrated.2026-09-06-kare-tests.real-capture.yaml`
+  and `catalog/pad.calibrated.2026-09-06-kare-tests.marker1-only.yaml`
+  (the pad one built from the calibration-video's validated relative
+  pose, since marker "1" alone needs no cross-marker geometry at all --
+  its own flat template is the whole rigid body).
+
+  **Ran the real `posetrak-tracker track` CLI** (`optbuild/`, not the
+  stale `~/.posetrak` copy -- `default_binary_path()`'s own documented
+  trap) against both new sequences, `--smooth` on, factory-defaults
+  tracker config (`seed_baseline_tracker_config()`). **Pen: 97.2% tracked
+  (1747/1798 steps), 0 lost, rigid-body init RMS 1.8mm. Pad: 94.9% tracked
+  (1708/1800), 0 lost, RMS 3.6mm.** Cross-validated the smoothed output
+  against the standalone trajectory script's own numbers (previous
+  entries): applying the same calibrated tip offset to the tracker's own
+  `smoothed_root_pose.csv` reproduces the identical physical story --
+  ~10-15cm tip-to-pad distance through the writing period, rising to
+  35-41cm as the pen is lifted away -- from a completely independent
+  computation path (real UKF + RTS smoothing, not a bespoke script).
+
+  Not yet done: a coupled person+pen/pad run using `MultiPersonTracker`'s
+  `--person`-mode cross-subject anchors (`build_cross_person_anchors()`)
+  to minimize hand-to-pen/pad error jointly -- the next item on Phase 3's
+  own "validate the mechanical path" list, still unexercised for a
+  rigid-body (non-person) subject.
+
+- **2026-09-13** (exported pen+pad trajectory into Blender) —
   Built a two-stage Blender export for the pen+pad trajectory (same
   split as `blender_add_cameras.py`: a plain-Python stage does the real
   work, a `bpy`-only stage consumes its JSON, since Blender's bundled

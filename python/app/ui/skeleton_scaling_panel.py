@@ -70,6 +70,7 @@ Y_AXIS_HARD_CAP_CM: float = 100.0
 
 MEAS_KEYS = [
     "femur", "shin", "upper_arm", "lower_arm", "torso_height", "shoulder_width",
+    "hip_to_ear",
 ]
 
 MEAS_LABELS = {
@@ -79,6 +80,12 @@ MEAS_LABELS = {
     "lower_arm":      "Lower arm  (elbow → wrist)",
     "torso_height":   "Torso height  (hip → shoulder midpoint)",
     "shoulder_width": "Shoulder width  (L → R)",
+    # Hip-to-ear, not shoulder-to-ear: shoulders move a lot with arm
+    # movement, so a time-range average of a shoulder-anchored measurement
+    # carries more variation than hip-anchored (Harri, 2026-09-14).
+    # scale_skeleton_yaml() derives the neck+head segment's own scale from
+    # (hip_to_ear - torso_height), not from this value directly.
+    "hip_to_ear":     "Hip to ear midpoint  (neck + head, derived)",
 }
 
 _MEAS_PAIRS: dict[str, list[tuple[str, str]]] = {
@@ -231,6 +238,14 @@ class _MeasWorker(QThread):
                     )
                 else:
                     rec["torso_height"] = float("nan")
+
+                el, er = data.get("MRK-ear.L"), data.get("MRK-ear.R")
+                if all(v is not None for v in (el, er, hl, hr)):
+                    rec["hip_to_ear"] = float(
+                        np.linalg.norm((el + er) / 2 - (hl + hr) / 2)
+                    )
+                else:
+                    rec["hip_to_ear"] = float("nan")
 
                 records.append(rec)
 

@@ -1,8 +1,53 @@
 # Marker-based mocap — status
 
+- **2026-09-14** (skeleton scaling: added a hip-to-ear derived neck+head
+  measurement, latest) — Follow-up to the head-marker jitter discussion:
+  Harri asked for a "hips to ears" measurement in the skeleton-scaling
+  UI, preferring it over "shoulders to ears" because shoulders move a lot
+  with arm motion, so a time-range average anchored there carries more
+  variation than one anchored at the (largely static) hips. Scaling
+  itself is still spine-first: hip-to-shoulder continues to define the
+  spine segment scale (`torso_height`, unchanged), and
+  `(hip_to_ear - torso_height)` defines the neck+head chain's own scale
+  independently.
+
+  `scale_skeleton.py`: `template_measurements()` gains a derived `"head"`
+  key (`hip_to_head_joint - torso_height`, using the `head` *joint*, not
+  the ear markers, as `_fk_rest_pose()` only resolves joints); guarded to
+  0.0 when `head`/`thigh.L`/`thigh.R` aren't present (e.g. a bare prop
+  skeleton). `scale_skeleton_yaml()` gains a matching block: given a
+  `hip_to_ear` measurement, it derives the head-chain ratio the same way
+  and scales only the Y-component of `neck1`/`neck2`/`head`'s offsets by
+  it -- mirroring the existing `_TORSO_HEIGHT_JOINTS` Y-only pattern, and
+  leaving X/Z (and every other joint) untouched. `skeleton_scaling_panel.py`
+  (the real PySide6 scaling GUI, not the read-only Marimo notebook) adds
+  `"hip_to_ear"` to its already fully data-driven `MEAS_KEYS` list and the
+  corresponding `_MeasWorker` midpoint-to-midpoint computation
+  (`MRK-ear.L`/`MRK-ear.R` vs `MRK-hip.L`/`MRK-hip.R`) -- no other UI
+  wiring was needed, confirming the panel's existing key-driven design
+  paid off here.
+
+  **Known imprecision, documented rather than chased further**: like the
+  existing `torso_height` measurement, this is a Euclidean-distance
+  *difference*, not a direct segment length -- a synthetic stress test
+  showed a real ~15% relative discrepancy between the requested and
+  re-measured head-chain length, proportionally larger than
+  `torso_height`'s own error on the same class of approximation because
+  the head segment is shorter. Not a logic bug (verified the ratio is
+  computed and applied exactly as intended); left as a documented
+  limitation rather than over-fit to one synthetic case.
+
+  Added `python/tests/db/test_scale_skeleton.py` -- no prior test
+  coverage existed for `scale_skeleton.py` at all. Covers the pre-existing
+  limb/torso/shoulder-width scaling plus the new hip-to-ear path on a
+  small synthetic skeleton (all offsets along Y, so expected results are
+  exact rather than approximate). `pytest python/tests/db/
+  test_scale_skeleton.py python/tests/app/test_skeleton_scaling_panel.py`
+  passes (14 tests, no regression in the pre-existing panel tests).
+
 - **2026-09-14** (shoulder-width skeleton fix confirmed on the full trial,
   but reintroduced an old ankle-lateral-offset regression; root-caused
-  and fixed via skeleton lineage, latest) — Ran the full ~97s trial
+  and fixed via skeleton lineage) — Ran the full ~97s trial
   (11588 steps, not the ~1799-step windows used for the earlier A/B
   tests) with "Nelli scale attempt 2026-09-14" (shoulder width corrected
   from the default female skeleton's 35cm to the measured 30.4cm; see

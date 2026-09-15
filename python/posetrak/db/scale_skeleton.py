@@ -156,6 +156,12 @@ def template_measurements(joints: list[dict]) -> dict[str, float]:
         # "Neck + head" section. hip_to_head_joint approximates hip_to_ear;
         # subtracting torso_height leaves just the neck+head chain's own length.
         "head": hip_to_head_joint - torso_height,
+        # Raw counterpart of "head" above (not torso-subtracted) -- lets
+        # callers that generically look up a template value per MEAS_KEYS
+        # entry (skeleton_scaling_panel.py's "Orig"/"New" card display) find
+        # a sensible current-skeleton value under the same key the UI and
+        # scale_skeleton_yaml() use for the user-measured input.
+        "hip_to_ear": hip_to_head_joint,
     }
 
 

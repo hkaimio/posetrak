@@ -58,6 +58,12 @@ def test_template_measurements_head_is_neck_plus_head_chain() -> None:
     # 0.10+0.12+0.30+0.04+0.04 = 0.60; hip Y = -0.02 -> hip_to_head = 0.62;
     # torso_height = 0.44 -> head = 0.62 - 0.44 = 0.18 (neck1+neck2+head chain).
     assert tmpl["head"] == pytest.approx(0.18)
+    # hip_to_ear is head's raw (non-torso-subtracted) counterpart, i.e.
+    # hip_to_head_joint itself -- the UI's "Orig" template value for the
+    # hip_to_ear card is looked up under this exact key (regression test
+    # for a real bug: this key was missing, so the card showed 0.0/no
+    # dotted line instead of the skeleton's actual current value).
+    assert tmpl["hip_to_ear"] == pytest.approx(0.62)
     # shoulder_width = dist(upper_arm.L, upper_arm.R); each is offset 0.10 in
     # X from its own shoulder.L/R (themselves at X=+-0.05) -> world X = +-0.15.
     assert tmpl["shoulder_width"] == pytest.approx(0.30)

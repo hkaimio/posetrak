@@ -198,14 +198,20 @@ class SessionReader {
     /// @param edited_kp_noise_std When > 0, keypoints overridden by a pose_observation_edits row
     ///   get this as noise_std_override and Observation::force_inlier = true (see
     ///   TrackerConfig::edited_kp_noise_std). 0 = disabled (edits use the normal formula/gate).
+    /// @param confidence_threshold_marker_names Marker names gated by
+    ///   confidence_threshold_override instead of min_confidence (see
+    ///   TrackerConfig::confidence_threshold_marker_names). Empty = disabled.
+    /// @param confidence_threshold_override Per-marker confidence floor used for the markers
+    ///   named above.
     /// @return ObservationSet ready for the tracker
-    ObservationSet load_observations(std::string const& sequence_id,
-                                     std::map<std::string, Camera> const& cameras,
-                                     Skeleton const& skeleton, double min_confidence = 0.1,
-                                     int person_id = 0, bool use_relative_obs = false,
-                                     double relative_min_conf = 0.5, double pose_noise_std = 0.0,
-                                     double cross_pair_max_px = 0.0, int cross_pair_max_n = 10,
-                                     double edited_kp_noise_std = 0.0);
+    ObservationSet
+    load_observations(std::string const& sequence_id, std::map<std::string, Camera> const& cameras,
+                      Skeleton const& skeleton, double min_confidence = 0.1, int person_id = 0,
+                      bool use_relative_obs = false, double relative_min_conf = 0.5,
+                      double pose_noise_std = 0.0, double cross_pair_max_px = 0.0,
+                      int cross_pair_max_n = 10, double edited_kp_noise_std = 0.0,
+                      std::vector<std::string> const& confidence_threshold_marker_names = {},
+                      double confidence_threshold_override = 0.0);
 
     /// @brief Load anonymous reflective-dot candidates for a sequence.
     ///

@@ -263,6 +263,21 @@ struct TrackerConfig {
     double prismatic_process_noise_std =
         0.0001;  ///< σ for prismatic DOFs in calibration mode (m/√s)
 
+    // === Per-marker confidence-threshold override (experimental, not yet DB/TOML-committed) ===
+    // See docs/roadmap/features/marker-based-mocap/status.md, 2026-09-14
+    // "confidence-vs-head-orientation" entry: ViTPose's raw confidence for
+    // nose/ear.L/ear.R stays elevated enough to pass the normal
+    // min_confidence gate even when the marker is on the occluded back side
+    // of the head, because occlusion only *lowers* confidence, it doesn't
+    // zero it out. Empty confidence_threshold_marker_names = disabled (every
+    // marker uses the single global min_confidence passed into
+    // load_observations(), unchanged from today). When non-empty, a keypoint
+    // whose skeleton marker name appears in this list is gated by
+    // confidence_threshold_override instead of the global value; every other
+    // marker is unaffected.
+    std::vector<std::string> confidence_threshold_marker_names;
+    double confidence_threshold_override = 0.0;
+
     // === Debug ===
     /// Print per-marker 3D errors (prior and posterior vs triangulated) for the first N frames.
     int debug_init_frames = 0;
@@ -337,6 +352,11 @@ struct TrackerAppConfig {
 
     // === Trusted keypoint edits (Phase 0) ===
     double edited_kp_noise_std = 0.0;
+
+    // === Per-marker confidence-threshold override (experimental) ===
+    // See TrackerConfig's own field doc comment.
+    std::vector<std::string> confidence_threshold_marker_names;
+    double confidence_threshold_override = 0.0;
 
     // === Initialization ===
     std::optional<std::filesystem::path> python_state_path;  // Optional: use Python state for init
@@ -467,6 +487,8 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.nis_feedback_threshold = nis_feedback_threshold;
     tc.nis_feedback_max_multiplier = nis_feedback_max_multiplier;
     tc.edited_kp_noise_std = edited_kp_noise_std;
+    tc.confidence_threshold_marker_names = confidence_threshold_marker_names;
+    tc.confidence_threshold_override = confidence_threshold_override;
     tc.ukf_alpha = ukf_alpha;
     tc.ukf_beta = ukf_beta;
     tc.ukf_kappa = ukf_kappa;

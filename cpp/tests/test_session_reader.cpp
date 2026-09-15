@@ -207,7 +207,9 @@ static void create_fixture_db() {
             dot_streak_velocity_noise_std REAL,
             process_noise_vel_max_multiplier REAL,
             dot_assignment_gate_mahalanobis REAL,
-            dot_tracklet_gate_multiplier REAL
+            dot_tracklet_gate_multiplier REAL,
+            confidence_threshold_marker_names TEXT,
+            confidence_threshold_override REAL
         );
     )");
 

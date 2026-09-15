@@ -170,6 +170,15 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
 
         result.edited_kp_noise_std = tracking["edited_kp_noise_std"].value_or(0.0);
 
+        if (auto names = tracking["confidence_threshold_marker_names"].as_array()) {
+            for (auto&& elem : *names) {
+                if (auto str = elem.value<std::string>())
+                    result.confidence_threshold_marker_names.push_back(*str);
+            }
+        }
+        result.confidence_threshold_override =
+            tracking["confidence_threshold_override"].value_or(0.0);
+
         // Initialization sub-section
         if (auto init = tracking["initialization"]) {
             if (auto state_path = init["python_state_path"].value<std::string>()) {

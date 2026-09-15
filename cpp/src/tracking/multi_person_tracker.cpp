@@ -278,7 +278,9 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
         full_sequence_id, ctx->cameras_by_name, ctx->skeleton, opts.min_confidence, spec.person_id,
         ctx->tracker_config.use_relative_observations, ctx->tracker_config.relative_min_confidence,
         ctx->tracker_config.pose_noise_std, ctx->tracker_config.cross_pair_max_px,
-        ctx->tracker_config.cross_pair_max_n, ctx->tracker_config.edited_kp_noise_std);
+        ctx->tracker_config.cross_pair_max_n, ctx->tracker_config.edited_kp_noise_std,
+        ctx->tracker_config.confidence_threshold_marker_names,
+        ctx->tracker_config.confidence_threshold_override);
 
     if (ctx->observations.empty()) {
         throw std::runtime_error("No observations found in sequence");

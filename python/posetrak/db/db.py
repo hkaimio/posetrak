@@ -24,8 +24,8 @@ from typing import Final
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 11
-SESSION_SCHEMA_VERSION: Final[int] = 52
+REGISTRY_SCHEMA_VERSION: Final[int] = 12
+SESSION_SCHEMA_VERSION: Final[int] = 53
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -316,6 +316,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 10
     if actual == 10:
         _migrate_registry_v10_to_v11(conn)
+        actual = 11
+    if actual == 11:
+        _migrate_registry_v11_to_v12(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -688,6 +691,24 @@ def _migrate_registry_v10_to_v11(conn: sqlite3.Connection) -> None:
     if "dot_tracklet_gate_multiplier" not in existing:
         conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_tracklet_gate_multiplier REAL")
     _set_schema_version(conn, 11)
+    conn.commit()
+
+
+def _migrate_registry_v11_to_v12(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 11 to 12.
+
+    v12 adds the experimental per-marker confidence-threshold override to
+    tracker_configs, mirroring the session schema v52->v53 change -- see
+    _migrate_session_v52_to_v53's docstring.
+    """
+    existing = _tracker_config_columns(conn)
+    if "confidence_threshold_marker_names" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN confidence_threshold_marker_names TEXT"
+        )
+    if "confidence_threshold_override" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN confidence_threshold_override REAL")
+    _set_schema_version(conn, 12)
     conn.commit()
 
 
@@ -1755,6 +1776,31 @@ def _migrate_session_v51_to_v52(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v52_to_v53(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 52 to 53.
+
+    v53 adds an experimental per-marker confidence-threshold override to
+    tracker_configs (2026-09-15): confidence_threshold_marker_names (JSON
+    string array) names which markers are gated by
+    confidence_threshold_override instead of the existing global
+    min_confidence/measurement_noise_std path. Motivated by the
+    confidence-vs-head-orientation analysis in
+    docs/roadmap/features/marker-based-mocap/status.md (2026-09-14) --
+    nose/ear.L/ear.R keep passing the normal confidence gate even when
+    occluded by the back of the head, because occlusion only lowers
+    ViTPose's reported confidence, it doesn't zero it out.
+    """
+    existing = _tracker_config_columns(conn)
+    if "confidence_threshold_marker_names" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN confidence_threshold_marker_names TEXT"
+        )
+    if "confidence_threshold_override" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN confidence_threshold_override REAL")
+    _set_schema_version(conn, 53)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1931,6 +1977,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 51
     if actual == 51:
         _migrate_session_v51_to_v52(conn)
+        actual = 52
+    if actual == 52:
+        _migrate_session_v52_to_v53(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

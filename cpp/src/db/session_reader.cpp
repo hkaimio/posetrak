@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -200,7 +201,9 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
         "       COALESCE(process_noise_vel_max_multiplier, 10.0) AS "
         "process_noise_vel_max_multiplier,"
         "       COALESCE(dot_assignment_gate_mahalanobis, 9.21) AS dot_assignment_gate_mahalanobis,"
-        "       COALESCE(dot_tracklet_gate_multiplier, 1.0) AS dot_tracklet_gate_multiplier"
+        "       COALESCE(dot_tracklet_gate_multiplier, 1.0) AS dot_tracklet_gate_multiplier,"
+        "       confidence_threshold_marker_names,"
+        "       COALESCE(confidence_threshold_override, 0.0) AS confidence_threshold_override"
         " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -233,7 +236,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //         49=dot_streak_k_min_samples, 50=dot_streak_min_displacement_px,
     //         51=dot_streak_min_elongation_px, 52=dot_streak_velocity_noise_std,
     //         53=process_noise_vel_max_multiplier, 54=dot_assignment_gate_mahalanobis,
-    //         55=dot_tracklet_gate_multiplier
+    //         55=dot_tracklet_gate_multiplier, 56=confidence_threshold_marker_names,
+    //         57=confidence_threshold_override
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -426,6 +430,22 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     apply_real(53, out.tracker.process_noise_vel_max_multiplier);
     apply_real(54, out.tracker.dot_assignment_gate_mahalanobis);
     apply_real(55, out.tracker.dot_tracklet_gate_multiplier);
+
+    // confidence_threshold_marker_names: stored as JSON string array, e.g. ["MRK-nose"]
+    if (sqlite3_column_type(stmt.ptr, 56) != SQLITE_NULL) {
+        char const* json_str = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 56));
+        if (json_str) {
+            auto arr = nlohmann::json::parse(json_str, nullptr, /*allow_exceptions=*/false);
+            if (arr.is_array()) {
+                for (auto const& elem : arr) {
+                    if (elem.is_string())
+                        out.tracker.confidence_threshold_marker_names.push_back(
+                            elem.get<std::string>());
+                }
+            }
+        }
+    }
+    apply_real(57, out.tracker.confidence_threshold_override);
 
     return out;
 }
@@ -723,13 +743,14 @@ SessionReader::load_cameras(std::string const& session_id,
 
 // ---------------------------------------------------------------------------
 
-ObservationSet SessionReader::load_observations(std::string const& sequence_id,
-                                                std::map<std::string, Camera> const& cameras,
-                                                Skeleton const& skeleton, double min_confidence,
-                                                int person_id, bool use_relative_obs,
-                                                double relative_min_conf, double pose_noise_std,
-                                                double cross_pair_max_px, int cross_pair_max_n,
-                                                double edited_kp_noise_std) {
+ObservationSet SessionReader::load_observations(
+    std::string const& sequence_id, std::map<std::string, Camera> const& cameras,
+    Skeleton const& skeleton, double min_confidence, int person_id, bool use_relative_obs,
+    double relative_min_conf, double pose_noise_std, double cross_pair_max_px, int cross_pair_max_n,
+    double edited_kp_noise_std, std::vector<std::string> const& confidence_threshold_marker_names,
+    double confidence_threshold_override) {
+    std::unordered_set<std::string> confidence_override_set(
+        confidence_threshold_marker_names.begin(), confidence_threshold_marker_names.end());
     // Step 0: Read pixels_are_undistorted flag for this sequence
     bool pixels_are_undistorted = load_pixels_are_undistorted(sequence_id);
 
@@ -1093,13 +1114,26 @@ ObservationSet SessionReader::load_observations(std::string const& sequence_id,
         // Collect POSITION observations for this frame/camera first, then generate RELATIVE pairs.
         std::vector<Observation> frame_obs;
         for (int i = 0; i < static_cast<int>(merged.size()); ++i) {
-            if (merged[static_cast<size_t>(i)].confidence < static_cast<float>(min_confidence)) {
-                ++rows_skipped_confidence;
-                continue;
-            }
+            // Marker identity must be resolved before the confidence gate now that the
+            // gate itself can be marker-dependent (confidence_override_set) -- this
+            // reorders which of rows_skipped_confidence/rows_skipped_coco a keypoint
+            // that fails both checks is counted under (cosmetic, diagnostics only; a
+            // keypoint that matches no marker was never going to be used either way).
             auto marker_idx_opt = resolve_marker_idx(i);
             if (!marker_idx_opt.has_value()) {
                 ++rows_skipped_coco;
+                continue;
+            }
+            double effective_min_confidence = min_confidence;
+            if (!confidence_override_set.empty()) {
+                auto const& marker_name = markers[static_cast<size_t>(*marker_idx_opt)].name;
+                if (confidence_override_set.count(marker_name) > 0) {
+                    effective_min_confidence = confidence_threshold_override;
+                }
+            }
+            if (merged[static_cast<size_t>(i)].confidence <
+                static_cast<float>(effective_min_confidence)) {
+                ++rows_skipped_confidence;
                 continue;
             }
 

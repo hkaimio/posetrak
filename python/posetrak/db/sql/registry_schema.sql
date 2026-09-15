@@ -203,7 +203,14 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     -- row could never actually override it -- fixed here alongside the new
     -- tracklet multiplier since both touch the same assignment gate.
     dot_assignment_gate_mahalanobis  REAL,     -- Chi-square gate on assignment cost; NULL/9.21 = prior default
-    dot_tracklet_gate_multiplier     REAL      -- Divides cost for a same-tracklet pairing; NULL/1.0 = disabled
+    dot_tracklet_gate_multiplier     REAL,     -- Divides cost for a same-tracklet pairing; NULL/1.0 = disabled
+    -- Added in schema migration v53 (session)/v12 (registry), 2026-09-15:
+    -- experimental per-marker confidence-threshold override -- see
+    -- docs/roadmap/features/marker-based-mocap/status.md (2026-09-14
+    -- confidence-vs-head-orientation entry). NULL/empty = disabled (every
+    -- marker uses the existing global min_confidence path, unchanged).
+    confidence_threshold_marker_names TEXT,    -- JSON string array, e.g. ["MRK-nose","MRK-ear.L"]
+    confidence_threshold_override     REAL     -- Confidence floor applied to the markers named above
 );
 
 -- Added in schema migration v37: hierarchical body/hand solver -- per-stage

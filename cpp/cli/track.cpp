@@ -961,7 +961,8 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                              double min_confidence, int person_id,
                              std::vector<std::string> const& active_joint_groups,
                              double override_start_time = std::numeric_limits<double>::quiet_NaN(),
-                             double override_end_time = std::numeric_limits<double>::quiet_NaN()) {
+                             double override_end_time = std::numeric_limits<double>::quiet_NaN(),
+                             std::optional<Eigen::Vector3d> const& seed_position = std::nullopt) {
     try {
         PersonSpec spec;
         spec.sequence_id = sequence_id;
@@ -980,6 +981,7 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
         opts.debug_init = debug_init;
         opts.smooth_output = smooth_output;
         opts.quiet = quiet;
+        opts.seed_position = seed_position;
 
         auto ctx = build_person_context(spec, opts, verbose);
 
@@ -996,8 +998,8 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
 
                 auto [t_start, t_end] = person_context_step_window(*ctx, step);
                 auto const t_bucket0 = Clock::now();
-                auto candidates_by_camera =
-                    bucket_candidates_by_camera(ctx->unlabeled_candidates, t_start, t_end);
+                auto candidates_by_camera = bucket_candidates_by_camera(
+                    ctx->unlabeled_candidates_by_camera, t_start, t_end);
                 frame_step_profile::add_bucket_candidates_ms(Ms(Clock::now() - t_bucket0).count());
                 if (!candidates_by_camera.empty()) {
                     step_person_context_predict(*ctx, step);
@@ -1134,6 +1136,7 @@ int main(int argc, char* argv[]) {
     std::vector<std::string> db_active_joint_groups;
     double db_start_time = std::numeric_limits<double>::quiet_NaN();
     double db_end_time = std::numeric_limits<double>::quiet_NaN();
+    std::vector<double> db_seed_position;  // see BuildPersonContextOptions::seed_position
     // Multi-person mode: repeated 4-value groups (sequence, skeleton, tracker_config,
     // person_id), flattened by CLI11's take_all() into one vector.
     std::vector<std::string> db_person_specs;
@@ -1176,6 +1179,14 @@ int main(int argc, char* argv[]) {
                           "first frame where min_cameras_for_init cameras are active)");
     track_cmd->add_option("--end-time", db_end_time,
                           "Override sequence end time in seconds (default: from sequence record)");
+    track_cmd
+        ->add_option("--seed-position", db_seed_position,
+                     "Externally-supplied initial root position (x y z, meters), bypassing "
+                     "the normal observation-based init search. Single-subject only (--person "
+                     "not supported) -- see BuildPersonContextOptions::seed_position for why "
+                     "this exists: a rigid body with only unlabeled_points (anonymous dot) "
+                     "markers has no cold-start path of its own.")
+        ->expected(3);
     track_cmd
         ->add_option("--person", db_person_specs,
                      "Track an additional person: --person <sequence> <skeleton> "
@@ -1236,10 +1247,15 @@ int main(int argc, char* argv[]) {
                            "and --tracker-config\n");
                 return 1;
             }
-            return run_track_from_db(db_path, db_sequence_id, db_skeleton_id, db_config_id,
-                                     db_output_dir, verbose, quiet, smooth_output, debug_output,
-                                     debug_init, db_min_confidence, db_person_id,
-                                     db_active_joint_groups, db_start_time, db_end_time);
+            std::optional<Eigen::Vector3d> seed_position;
+            if (!db_seed_position.empty()) {
+                seed_position =
+                    Eigen::Vector3d(db_seed_position[0], db_seed_position[1], db_seed_position[2]);
+            }
+            return run_track_from_db(
+                db_path, db_sequence_id, db_skeleton_id, db_config_id, db_output_dir, verbose,
+                quiet, smooth_output, debug_output, debug_init, db_min_confidence, db_person_id,
+                db_active_joint_groups, db_start_time, db_end_time, seed_position);
         } else {
             if (track_config.empty()) {
                 fmt::print(stderr, "Error: config file required when not using --session-db\n");

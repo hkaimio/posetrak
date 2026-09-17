@@ -42,6 +42,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -102,6 +103,21 @@ struct BuildPersonContextOptions {
     bool debug_init = false;
     bool smooth_output = false;
     bool quiet = true;
+    /// @brief Externally-supplied initial root position, bypassing the normal
+    /// observation-based init search entirely (2026-09-15: single-subject
+    /// escape hatch, not general multi-person functionality -- shared across
+    /// every person in a --person run, so only meaningful for a one-subject
+    /// invocation). A rigid body whose only markers are `unlabeled_points`-
+    /// tracked (e.g. a single fully-reflective ball with no coded pattern
+    /// and no second marker to disambiguate against) has no cold-start path
+    /// at all: Tracker::initialize() only ever sees the labeled `observations`
+    /// set, which is permanently empty for such a skeleton, and per-frame dot
+    /// assignment itself needs an existing predicted position to gate
+    /// candidates against -- there's nothing to bootstrap from without an
+    /// external seed. Root orientation is left at identity (this is only
+    /// useful for a skeleton where orientation is genuinely unobserved, same
+    /// as initialize_rigid_body()'s own single-marker branch).
+    std::optional<Eigen::Vector3d> seed_position;
 };
 
 /// @brief Owns everything needed to track one person through a sequence and record
@@ -137,10 +153,23 @@ struct PersonContext {
 
     /// Anonymous reflective-dot candidates for this person's whole sequence,
     /// loaded once (like *observations*) when has_dot_track is true; empty
-    /// otherwise. A per-step subset is bucketed by camera on demand (see
-    /// bucket_candidates_by_camera()) rather than sliced up front, mirroring
-    /// how *observations* itself is queried per step via get_all_in_range().
+    /// otherwise. Kept in raw, load order purely for the one-time size()
+    /// log line -- per-step queries go through unlabeled_candidates_by_camera
+    /// below instead.
     std::vector<UnlabeledCandidate> unlabeled_candidates;
+
+    /// unlabeled_candidates split by camera_id once at load time (see
+    /// build_person_context()), each inner vector in the same relative
+    /// order load_unlabeled_candidates() produced it in -- sorted by
+    /// timestamp (non-decreasing) per camera, since that reader's own query
+    /// is `ORDER BY camera_instance_id, video_frame`. bucket_candidates_by_
+    /// camera() binary-searches this per step instead of scanning the flat
+    /// list above (2026-09-13 perf fix, the same one
+    /// ObservationSequence::get_in_range() got the same day for
+    /// *observations* -- this field's previous doc comment described
+    /// mirroring that function's now-fixed linear-scan design; it mirrors
+    /// the fix too).
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> unlabeled_candidates_by_camera;
 
     std::shared_ptr<const SkeletonLayout> layout;
 
@@ -237,11 +266,17 @@ void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet,
 /// shape at all) don't duplicate the formula.
 std::pair<double, double> person_context_step_window(PersonContext const& ctx, int step);
 
-/// @brief Buckets *candidates* whose timestamp falls in [t_start, t_end) by
-/// camera_id -- the shape resolve_shared_dot_assignment() needs as input.
-std::unordered_map<int, std::vector<UnlabeledCandidate>>
-bucket_candidates_by_camera(std::vector<UnlabeledCandidate> const& candidates, double t_start,
-                            double t_end);
+/// @brief Filters PersonContext::unlabeled_candidates_by_camera down to
+/// candidates whose timestamp falls in [t_start, t_end) -- the shape
+/// resolve_shared_dot_assignment() needs as input. Binary-searches each
+/// camera's own vector (2026-09-13 perf fix) rather than scanning it,
+/// relying on unlabeled_candidates_by_camera's own documented sorted-by-
+/// timestamp invariant.
+/// @param candidates_by_camera PersonContext::unlabeled_candidates_by_camera
+///        (or an equivalent already-split, per-camera-sorted map).
+std::unordered_map<int, std::vector<UnlabeledCandidate>> bucket_candidates_by_camera(
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
+    double t_start, double t_end);
 
 /// @brief Predict-only half of a per-person step, for a subject participating
 /// in the shared dot-assignment phase this step: sets the UKF frame number

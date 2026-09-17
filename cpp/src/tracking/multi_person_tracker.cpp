@@ -282,7 +282,12 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
         ctx->tracker_config.confidence_threshold_marker_names,
         ctx->tracker_config.confidence_threshold_override);
 
-    if (ctx->observations.empty()) {
+    // A dots-track skeleton (has_dot_track) can legitimately have zero labeled
+    // observations here by construction -- load_observations() itself already
+    // makes the same exception for a skeleton with no labeled marker at all
+    // (2026-09-16, the ball: a single unlabeled_points marker, nothing else).
+    // Its real data comes from load_unlabeled_candidates() just below, not here.
+    if (ctx->observations.empty() && !ctx->has_dot_track) {
         throw std::runtime_error("No observations found in sequence");
     }
 
@@ -299,6 +304,15 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
             reader.load_unlabeled_candidates(full_sequence_id, ctx->cameras_by_name);
         if (!quiet) {
             fmt::print("  Loaded {} unlabeled dot candidates\n", ctx->unlabeled_candidates.size());
+        }
+        // Split by camera once here rather than per step (2026-09-13 perf
+        // fix) -- load_unlabeled_candidates()'s own query is ORDER BY
+        // camera_instance_id, video_frame, so each camera's slice below
+        // comes out already sorted by timestamp, which
+        // bucket_candidates_by_camera() relies on for its own binary
+        // search.
+        for (auto const& c : ctx->unlabeled_candidates) {
+            ctx->unlabeled_candidates_by_camera[c.camera_id].push_back(c);
         }
     }
 
@@ -413,12 +427,32 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
     double const search_end = std::min(end_time, start_time + kInitSearchWindowS);
     double init_timestamp = start_time;
     bool initialized = false;
-    for (double t = start_time; t < search_end; t += dt) {
-        auto obs = ctx->observations.get_all_in_range(t, t + dt);
-        if (ctx->tracker->initialize(obs, t)) {
-            initialized = true;
-            init_timestamp = t;
-            break;
+    if (opts.seed_position.has_value()) {
+        // See BuildPersonContextOptions::seed_position's own doc comment --
+        // an anonymous-dot-only rigid body has no observation-based cold
+        // start at all, so skip the search loop entirely.
+        int num_dof = ctx->skeleton.total_dof_count();
+        State seed_state(*opts.seed_position, Eigen::Quaterniond::Identity(),
+                         Eigen::VectorXd::Zero(num_dof), Eigen::Vector3d::Zero(),
+                         Eigen::Vector3d::Zero(), Eigen::VectorXd::Zero(num_dof));
+        ctx->tracker->initialize_from_state(seed_state, start_time);
+        initialized = true;
+        init_timestamp = start_time;
+        if (!quiet) {
+            fmt::print(
+                "  Initialized from externally-supplied seed position ({:.3f}, {:.3f}, "
+                "{:.3f}) at t={:.3f}s\n",
+                opts.seed_position->x(), opts.seed_position->y(), opts.seed_position->z(),
+                start_time);
+        }
+    } else {
+        for (double t = start_time; t < search_end; t += dt) {
+            auto obs = ctx->observations.get_all_in_range(t, t + dt);
+            if (ctx->tracker->initialize(obs, t)) {
+                initialized = true;
+                init_timestamp = t;
+                break;
+            }
         }
     }
 
@@ -644,13 +678,19 @@ std::pair<double, double> person_context_step_window(PersonContext const& ctx, i
     return {t_start, t_start + ctx.dt};
 }
 
-std::unordered_map<int, std::vector<UnlabeledCandidate>>
-bucket_candidates_by_camera(std::vector<UnlabeledCandidate> const& candidates, double t_start,
-                            double t_end) {
+std::unordered_map<int, std::vector<UnlabeledCandidate>> bucket_candidates_by_camera(
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
+    double t_start, double t_end) {
     std::unordered_map<int, std::vector<UnlabeledCandidate>> result;
-    for (auto const& c : candidates) {
-        if (c.timestamp >= t_start && c.timestamp < t_end) {
-            result[c.camera_id].push_back(c);
+    for (auto const& [camera_id, sorted_candidates] : candidates_by_camera) {
+        auto const lo =
+            std::lower_bound(sorted_candidates.begin(), sorted_candidates.end(), t_start,
+                             [](UnlabeledCandidate const& c, double t) { return c.timestamp < t; });
+        auto const hi =
+            std::lower_bound(sorted_candidates.begin(), sorted_candidates.end(), t_end,
+                             [](UnlabeledCandidate const& c, double t) { return c.timestamp < t; });
+        if (lo != hi) {
+            result.emplace(camera_id, std::vector<UnlabeledCandidate>(lo, hi));
         }
     }
     return result;
@@ -1292,7 +1332,8 @@ void MultiPersonTracker::run() {
             if (step >= ctx.num_steps || !ctx.has_dot_track)
                 continue;
             auto [t_start, t_end] = person_context_step_window(ctx, step);
-            auto candidates = bucket_candidates_by_camera(ctx.unlabeled_candidates, t_start, t_end);
+            auto candidates =
+                bucket_candidates_by_camera(ctx.unlabeled_candidates_by_camera, t_start, t_end);
             if (!candidates.empty()) {
                 candidates_by_idx[idx] = std::move(candidates);
             }

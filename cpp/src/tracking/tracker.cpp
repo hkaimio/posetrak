@@ -109,19 +109,27 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
     // Step 1: Triangulate marker positions
     std::map<std::string, Eigen::Vector3d> marker_positions = triangulate_markers(observations);
 
-    if (marker_positions.size() < 3) {
-        return false;
-    }
-    init_marker_positions_ = marker_positions;
-
     // A root-only skeleton (no non-root active joints -- a prop skeleton
     // generated from a marker body definition, design §5.3) has no pose to
     // solve for beyond its 6-DOF root: triangulation + full IK is overkill
     // and can fall into a local minimum for this degenerate case. Closed-form
-    // rigid-body fit instead (algorithms doc §4.2).
+    // rigid-body fit instead (algorithms doc §4.2). Checked before the
+    // generic <3-marker gate below (2026-09-15): a single free-floating
+    // point body (e.g. a fully-reflective ball with no distinguishing
+    // geometry -- see initialize_rigid_body()'s own single-marker branch)
+    // has exactly one marker, ever, and would otherwise never pass it.
     if (skeleton_->is_rigid_body()) {
+        if (marker_positions.empty()) {
+            return false;
+        }
+        init_marker_positions_ = marker_positions;
         return initialize_rigid_body(marker_positions, timestamp);
     }
+
+    if (marker_positions.size() < 3) {
+        return false;
+    }
+    init_marker_positions_ = marker_positions;
 
     // Step 2: Analytically estimate root position + orientation from observed markers.
     // This gives us a good global pose even before IK runs.
@@ -402,6 +410,35 @@ bool Tracker::initialize_rigid_body(std::map<std::string, Eigen::Vector3d> const
         body_local.push_back(it->second);
         world_pts.push_back(world_pos);
     }
+    // A single free-floating marker (2026-09-15: a fully-reflective ball,
+    // no coded pattern or second marker to fix orientation against) has no
+    // relative geometry for Kabsch/Umeyama to fit at all -- rotation about
+    // any axis through the one point is equally consistent with the single
+    // observation. Place the root directly so the marker lands exactly on
+    // the triangulated point, with identity orientation standing in for
+    // "unobserved, not estimated" -- nothing in this skeleton has any other
+    // marker or joint whose FK output depends on that orientation, so an
+    // arbitrary choice here costs nothing downstream. Skips the Kabsch
+    // residual check below entirely: a direct placement has no fit error
+    // to report.
+    if (body_local.size() == 1) {
+        Eigen::Vector3d root_position = world_pts[0] - body_local[0];
+        Eigen::Quaterniond root_orientation = Eigen::Quaterniond::Identity();
+        fmt::print(
+            "  Rigid-body init: single free-floating marker, no orientation to fit -- "
+            "placed at ({:.3f}, {:.3f}, {:.3f}), orientation left at identity\n",
+            root_position.x(), root_position.y(), root_position.z());
+
+        int num_dof = skeleton_->total_dof_count();
+        State init_state(root_position, root_orientation, Eigen::VectorXd::Zero(num_dof),
+                         Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+                         Eigen::VectorXd::Zero(num_dof));
+        initialize_ukf(init_state, timestamp);
+        initialized_ = true;
+        last_timestamp_ = timestamp;
+        return true;
+    }
+
     if (body_local.size() < 3) {
         fmt::print("  Rigid-body init: fewer than 3 markers with a body-local match ({})\n",
                    body_local.size());

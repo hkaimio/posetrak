@@ -1277,8 +1277,27 @@ ObservationSet SessionReader::load_observations(
     }
     flush_group();
 
-    // Step 5: Build ObservationSet — throw a diagnostic error if nothing came through
-    if (rows_total == 0) {
+    // Step 5: Build ObservationSet — throw a diagnostic error if nothing came through.
+    // Exception: a skeleton with no labeled (coco_id / non-unlabeled_points-track)
+    // marker at all -- e.g. the ball (2026-09-16): a single unlabeled_points marker,
+    // nothing else -- can *never* produce a labeled Observation here by construction
+    // (this function's own query excludes source='dots' outright; anonymous dot
+    // candidates are load_unlabeled_candidates()'s job, called separately by the
+    // caller). rows_total==0 there is the expected, only-ever-possible outcome, not
+    // a wrong-person_id mistake to fail loudly over.
+    bool const has_any_labeled_marker = [&] {
+        for (auto const& m : markers) {
+            if (m.coco_id.has_value())
+                return true;
+            if (!m.track.empty()) {
+                InputTrack const* t = skeleton.get_input_track(m.track);
+                if (t == nullptr || t->type != "unlabeled_points")
+                    return true;
+            }
+        }
+        return false;
+    }();
+    if (rows_total == 0 && has_any_labeled_marker) {
         // Query returned no rows — most likely wrong person_id. Show available IDs.
         Stmt pid_stmt(db_,
                       "SELECT DISTINCT person_id FROM pose_observations"

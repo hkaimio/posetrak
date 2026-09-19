@@ -1,0 +1,22 @@
+# Catalog
+
+Nominal, reusable marker definitions belong here: `catalog/modules/` will
+hold the per-module marker layouts (for example the leg dot module) once the
+`posetrak marker-set` tooling lands
+(`docs/roadmap/features/marker-based-mocap/productization-architecture-and-plan.md` §3.2).
+
+Capture-specific results do not belong in the repository. Calibrated
+attachment sets and dot-augmented skeletons are products of one capture and
+are kept beside that capture's session database; the session database holds
+the skeletons a tracking run actually used.
+
+Three capture-specific files remain only because scripts that are still the
+working path read them by this relative path:
+
+| File | Read by |
+|---|---|
+| `ball.single-reflective-dot.*.yaml` | `python/tools/finalize_ball_blender_detection.py`, `finalize_ball_cutie_detection.py` |
+| `pen.calibrated.*.yaml`, `pad.calibrated.*.yaml` | `python/tools/setup_pen_pad_capture_objects.py` |
+
+Remove them in the change that deletes those scripts (`posetrak sequence
+compose`, plan WS1 item 1).

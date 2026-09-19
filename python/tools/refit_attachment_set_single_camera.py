@@ -40,11 +40,11 @@ into this script.
 
 Usage:
     python tools/refit_attachment_set_single_camera.py \\
-        --session D:/mocap/2026-09-06-kare-tests/2026-09-06-kare-tests.db \\
+        --session /path/to/session.db \\
         --shot-id b21fa02d-2a82-4a37-a749-a156116a0aa0 \\
         --tracking-run d096d14f-3e66-4875-a843-b3ddf9aab263 \\
-        --calibrated-attachment-set catalog/leg.calibrated.2026-09-06-kare-tests.yaml \\
-        --output catalog/leg.calibrated.2026-09-06-kare-tests.refit-single-camera.yaml
+        --calibrated-attachment-set /path/to/leg.calibrated.yaml \\
+        --output /path/to/leg.calibrated.refit-single-camera.yaml
 """
 from __future__ import annotations
 

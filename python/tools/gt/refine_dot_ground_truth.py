@@ -29,8 +29,8 @@ file) and spot-checking the ones that moved the most.
 Usage:
     python tools/refine_dot_ground_truth.py \\
         --labels scratch/dot_ground_truth/labels.json \\
-        --session nelli=D:/mocap/2026-09-06-kare-tests/2026-09-06-kare-tests.db \\
-        --session sword=E:/mocap/vanhaa/ukemi-tommi-20260509.db \\
+        --session nelli=/path/to/session.db \\
+        --session sword=/path/to/session.db \\
         --background-cache-dir scratch/dot_ground_truth/bg_cache \\
         --output scratch/dot_ground_truth/labels_refined.json
 """

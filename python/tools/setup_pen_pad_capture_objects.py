@@ -25,7 +25,7 @@ this script can just avoid outright.
 
 Usage:
     python tools/setup_pen_pad_capture_objects.py \\
-        --session D:/mocap/2026-09-06-kare-tests/2026-09-06-kare-tests.db \\
+        --session /path/to/session.db \\
         --shot-id b21fa02d-2a82-4a37-a749-a156116a0aa0 \\
         --source-detection-run 75cbf678-2066-4a58-ab81-d27ea4c58d02 \\
         --time-start 98.0 --time-end 113.0

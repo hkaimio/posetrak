@@ -31,8 +31,8 @@ so this can't drift even if a camera's actual_fps is slightly imprecise.
 Usage::
 
     python tools/finalize_ball_blender_detection.py \\
-        --session D:/mocap/2026-09-06-kare-tests/2026-09-06-kare-tests.db \\
-        --blender-csv-dir D:/mocap/posetrak/scratch/nelli-ball-tracks
+        --session /path/to/session.db \\
+        --blender-csv-dir /path/to/ball-tracks
 """
 
 from __future__ import annotations

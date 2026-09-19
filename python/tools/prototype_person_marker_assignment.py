@@ -26,7 +26,7 @@ of number and does not conflate them:
 
 Usage:
     python tools/prototype_person_marker_assignment.py \\
-        --session D:/mocap/2026-09-06-kare-tests/2026-09-06-kare-tests.db \\
+        --session /path/to/session.db \\
         --marker-detection-run 01c2e3c1-204b-49f8-9b14-6fd611b765a4 \\
         --pose-sequence ec1b3e2f-1ef8-4e31-806c-33102a969ecd \\
         --camera-label gopro-11_mini_01 \\

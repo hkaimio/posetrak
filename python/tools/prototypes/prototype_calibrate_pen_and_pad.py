@@ -32,10 +32,10 @@ roll) unconstrained. Not resolved here; flagged, not glossed over.
 
 Usage:
     python tools/prototype_calibrate_pen_and_pad.py \\
-        --session D:/mocap/2026-09-06-kare-tests/2026-09-06-kare-tests.db \\
+        --session /path/to/session.db \\
         --shot-id b21fa02d-2a82-4a37-a749-a156116a0aa0 \\
-        --pad-video D:/mocap/2026-09-06-kare-tests/calib-board-gopro13_02-4k-120fps.MP4 \\
-        --pen-video D:/mocap/2026-09-06-kare-tests/calib-pen-gopro13_02-4k-120fps.MP4 \\
+        --pad-video /path/to/calib-board-gopro13_02-4k-120fps.MP4 \\
+        --pen-video /path/to/calib-pen-gopro13_02-4k-120fps.MP4 \\
         --pad-marker-ids 40 41 --pen-marker-ids 42 43 \\
         --marker-size-m 0.095
 """

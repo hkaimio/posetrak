@@ -32,7 +32,7 @@ tip band's derived world position.
 
 Usage:
     python tools/prototype_track_pen_trajectory.py \\
-        --session D:/mocap/2026-09-06-kare-tests/2026-09-06-kare-tests.db \\
+        --session /path/to/session.db \\
         --shot-id b21fa02d-2a82-4a37-a749-a156116a0aa0 \\
         --time-start 98.0 --time-end 113.0 \\
         --marker-size 0.095 \\

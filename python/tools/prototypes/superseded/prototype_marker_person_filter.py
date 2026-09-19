@@ -41,7 +41,7 @@ keypoint's crosshair; not a bug in this script.
 
 Usage:
     python tools/prototype_marker_person_filter.py \\
-        --session D:/mocap/2026-09-06-kare-tests/2026-09-06-kare-tests.db \\
+        --session /path/to/session.db \\
         --marker-detection-run a6431d58-1ac9-4fed-86d7-f3904865e7d0 \\
         --pose-sequence ec1b3e2f-1ef8-4e31-806c-33102a969ecd \\
         --camera-label gopro13_01 pixel9 \\

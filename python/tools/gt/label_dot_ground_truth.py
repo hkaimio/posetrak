@@ -45,7 +45,7 @@ Two modes:
 Usage:
     python tools/label_dot_ground_truth.py \\
         --manifest scratch/dot_ground_truth/frame_manifest.json \\
-        --session nelli=D:/mocap/2026-09-06-kare-tests/2026-09-06-kare-tests.db \\
+        --session nelli=/path/to/session.db \\
         --slots "hip_R,knee_med_R,knee_lat_R,knee_ant_R,ankle_med_R,ankle_lat_R,heel_R,toe_R,hip_L,knee_med_L,knee_lat_L,knee_ant_L,ankle_med_L,ankle_lat_L,heel_L,toe_L" \\
         --output scratch/dot_ground_truth/labels.json
 

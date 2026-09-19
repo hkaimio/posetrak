@@ -26,8 +26,8 @@ and reports:
 Usage:
     python tools/validate_dot_detector.py \\
         --labels scratch/dot_ground_truth/labels.json \\
-        --session nelli=D:/mocap/2026-09-06-kare-tests/2026-09-06-kare-tests.db \\
-        --session sword=E:/mocap/vanhaa/ukemi-tommi-20260509.db \\
+        --session nelli=/path/to/session.db \\
+        --session sword=/path/to/session.db \\
         --background-cache-dir scratch/dot_ground_truth/bg_cache \\
         --bg-subtract --threshold 60 --max-saturation 45 --bg-sample-count 40
 """

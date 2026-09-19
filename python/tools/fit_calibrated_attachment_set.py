@@ -43,7 +43,7 @@ this session, real, not a labeling accident.
 
 Usage:
     python tools/fit_calibrated_attachment_set.py \\
-        --session D:/mocap/2026-09-06-kare-tests/2026-09-06-kare-tests.db \\
+        --session /path/to/session.db \\
         --shot-id b21fa02d-2a82-4a37-a749-a156116a0aa0 \\
         --tracking-run 990fb01a-6c72-47bc-bdb7-4d31147d2ef7 \\
         --groups scratch/dot_ground_truth/tracklet_groups_full_v2.json \\

@@ -45,7 +45,7 @@ Mechanism:
 
 Usage:
     python tools/prototype_pen_band_tracking.py \\
-        --session D:/mocap/2026-09-06-kare-tests/2026-09-06-kare-tests.db \\
+        --session /path/to/session.db \\
         --shot-id b21fa02d-2a82-4a37-a749-a156116a0aa0 \\
         --time-start 101.0 --time-end 111.5 \\
         --marker-size 0.095

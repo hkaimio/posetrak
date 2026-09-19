@@ -30,7 +30,7 @@ work belonging to a future pass, not something to invent solo mid-validation.
 
 Usage:
     python tools/copy_dot_candidates_to_sequence.py \\
-        --session D:/mocap/2026-09-06-kare-tests/2026-09-06-kare-tests.db \\
+        --session /path/to/session.db \\
         --detection-run 75cbf678-2066-4a58-ab81-d27ea4c58d02 \\
         --sequence ec1b3e2f-1ef8-4e31-806c-33102a969ecd
 """

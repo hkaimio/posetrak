@@ -19,7 +19,7 @@ single-view observation too.
 
 Usage:
     python tools/prototype_fused_person_marker_assignment.py \\
-        --session D:/mocap/2026-09-06-kare-tests/2026-09-06-kare-tests.db \\
+        --session /path/to/session.db \\
         --shot-id b21fa02d-2a82-4a37-a749-a156116a0aa0 \\
         --marker-detection-run 01c2e3c1-204b-49f8-9b14-6fd611b765a4 \\
         --pose-sequence ec1b3e2f-1ef8-4e31-806c-33102a969ecd \\

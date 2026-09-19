@@ -26,10 +26,10 @@ not a replacement for the original.
 
 Usage:
     python tools/build_dot_augmented_skeleton.py \\
-        --session D:/mocap/2026-09-06-kare-tests/2026-09-06-kare-tests.db \\
+        --session /path/to/session.db \\
         --base-skeleton-id 0d08a889b32acc13298ecba139ac585792f4221679b3238d0be40c356c945f04 \\
-        --calibrated-attachment-set catalog/leg.calibrated.2026-09-06-kare-tests.yaml \\
-        --output catalog/reallusion-no-waist.dot-augmented.2026-09-06-kare-tests.yaml
+        --calibrated-attachment-set /path/to/leg.calibrated.yaml \\
+        --output /path/to/reallusion-no-waist.dot-augmented.yaml
 """
 from __future__ import annotations
 

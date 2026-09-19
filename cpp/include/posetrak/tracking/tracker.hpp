@@ -25,6 +25,8 @@
 #include "posetrak/kinematics/forward_kinematics.hpp"
 #include "posetrak/kinematics/inverse_kinematics.hpp"
 #include "posetrak/kinematics/triangulation.hpp"
+#include "posetrak/tracking/marker_prediction.hpp"
+#include "posetrak/tracking/streak_k_accumulator.hpp"
 #include <deque>
 #include <functional>
 #include <map>
@@ -212,6 +214,142 @@ class Tracker {
     TrackingResult track_frame(std::vector<Observation> const& observations, double timestamp);
 
     /**
+     * @brief Predict-only half of the track_frame() cycle (marker-mocap design doc
+     * dot-assignment-architecture-design.md §5.1): advances the UKF by dt with no
+     * observations yet, and stashes everything update_step() needs to finish the
+     * frame later.
+     *
+     * Exists so an external orchestrator can call predict_step() on every
+     * dot-bearing subject in a scene *before* any of them commits an update --
+     * the shared dot-assignment phase (design doc §5.2) needs every subject's
+     * live prediction for the same instant, and
+     * UnscentedKalmanFilter::predict() mutates state in place (not a peekable
+     * dry run), so there is no other way to get that live prediction without
+     * holding the result open across the resolution step. track_frame() itself
+     * is just predict_step() immediately followed by update_step() -- a
+     * subject with no dots to resolve sees no behavioural change.
+     *
+     * @param dt Time elapsed since last frame. Not validated here (unlike
+     *        track_frame()'s own negative-dt guard) -- the caller (track_frame()
+     *        itself, or an orchestrator's driving loop) owns that decision.
+     * @note Requires is_initialized() == true.
+     * @note Must be followed by exactly one update_step() call before this
+     *       Tracker's state reflects "this frame" -- calling update_step()
+     *       without a preceding predict_step() throws, and calling
+     *       predict_step() again without an intervening update_step() discards
+     *       the pending predict and starts over (not a supported usage, but not
+     *       one worth guarding against either).
+     */
+    void predict_step(double dt);
+
+    /**
+     * @brief Every unlabeled_points-track marker's MarkerPrediction (design doc
+     * §6), evaluated at the state predict_step() just computed, for one camera.
+     *
+     * This is the query surface a shared dot-assignment orchestrator (design
+     * doc §5.2) actually calls -- it never touches Skeleton/State/covariance
+     * directly, so which MarkerPrediction implementation runs (closed-form
+     * rigid, §6.1, or the deferred general/articulated case) is entirely this
+     * Tracker's own decision, invisible to the caller.
+     *
+     * @param camera_id Camera to project into.
+     * @return skeleton().markers() index -> MarkerPrediction, for every
+     *         unlabeled_points marker that projects in front of this camera.
+     *         Empty if this skeleton declares no unlabeled_points input track.
+     * @note Requires a predict_step() call this frame (i.e. call between
+     *       predict_step() and update_step(), not before or after).
+     * @throws std::runtime_error if camera_id is unknown.
+     */
+    std::unordered_map<int, MarkerPrediction> predict_dot_slot_predictions(int camera_id) const;
+
+    /**
+     * @brief Same query as predict_dot_slot_predictions(), batched across
+     * every requested camera in one call.
+     *
+     * For an articulated skeleton, calling predict_dot_slot_predictions()
+     * once per camera repeats sigma-point generation and the per-sigma-point
+     * forward-kinematics sweep once per camera, even though neither depends
+     * on camera_id at all -- only the final projection step does. This
+     * batches every (marker, camera) pair the caller needs into one
+     * UnscentedKalmanFilter::predict_marker_slots_all_cameras() call, so
+     * sigma generation and FK each run once per frame instead of once per
+     * camera. For a rigid-body skeleton (predict_rigid_marker()'s closed
+     * form, no sigma points) this is a thin per-camera loop over the
+     * existing single-camera path -- there is no redundant work to remove
+     * there, so no separate batched implementation exists for it.
+     *
+     * @param camera_ids Cameras to project into.
+     * @return camera_id -> (skeleton().markers() index -> MarkerPrediction),
+     *         one inner map per requested camera, same per-marker contents
+     *         predict_dot_slot_predictions(camera_id) would have returned
+     *         for that camera.
+     * @note Requires a predict_step() call this frame, same as
+     *       predict_dot_slot_predictions().
+     * @throws std::runtime_error if any camera_id is unknown.
+     */
+    std::unordered_map<int, std::unordered_map<int, MarkerPrediction>>
+    predict_dot_slot_predictions_all_cameras(std::vector<int> const& camera_ids) const;
+
+    /**
+     * @brief Previous-frame undistorted pixel per (camera, marker), as populated by
+     * the most recent successful update_step()/track_frame() call.
+     *
+     * Exposed (read-only) for the shared dot-assignment orchestrator's streak-
+     * velocity estimation (streak-velocity-design.md §4, resolve_shared_dot_
+     * assignment() in dot_assignment.cpp), which needs this Tracker's own
+     * continuity to compute a real frame-to-frame displacement without
+     * duplicating this bookkeeping itself.
+     */
+    std::unordered_map<int, std::unordered_map<int, Eigen::Vector2d>> const&
+    prev_observations() const {
+        return prev_observations_;
+    }
+
+    /**
+     * @brief Previous-frame resolved dot tracklet_id per (camera, marker), same
+     * lifetime/bookkeeping as prev_observations() above (both updated together in
+     * update_step()'s post-success block) -- see dot_assignment.hpp's
+     * PrevDotTrackletIds doc comment for the gate-relaxation mechanism this feeds.
+     */
+    std::unordered_map<int, std::unordered_map<int, int>> const& prev_dot_tracklet_ids() const {
+        return prev_dot_tracklet_ids_;
+    }
+
+    /**
+     * @brief Mutable per-camera k=exposure_time/frame_time running estimate
+     * (streak-velocity-design.md §3/§4) -- owned here, alongside
+     * prev_observations_, so it persists across frames the same way. Updated and
+     * read by resolve_dot_assignment() via resolve_shared_dot_assignment()'s thin
+     * wrapper; empty/untouched when TrackerConfig::dot_streak_velocity_enabled is
+     * false.
+     */
+    std::unordered_map<int, StreakKAccumulator>& streak_k_accumulators() {
+        return streak_k_accumulators_;
+    }
+
+    /**
+     * @brief Update-only half of the track_frame() cycle -- consumes the
+     * prediction stashed by the most recent predict_step() call and finishes
+     * the frame: observation annotation, sufficiency check, UKF update, NIS
+     * feedback, RTS smoother bookkeeping, FK refresh on the posterior state,
+     * and the same last_timestamp_/frame_count_/prev_observations_/
+     * frame_callback_ bookkeeping track_frame() itself does after a
+     * successful frame.
+     *
+     * @param observations Frame observations -- raw, not yet velocity-mode
+     *        annotated (this method annotates them itself, exactly as
+     *        track_frame() already does).
+     * @param timestamp Frame timestamp (the same value used to compute the dt
+     *        passed to the preceding predict_step() call).
+     * @return TrackingResult for this frame -- identical to what
+     *         track_frame() would have returned for the same
+     *         (observations, timestamp) pair.
+     * @throws std::runtime_error if called without a preceding predict_step()
+     *         this frame.
+     */
+    TrackingResult update_step(std::vector<Observation> const& observations, double timestamp);
+
+    /**
      * @brief Check if tracker is initialized and ready
      */
     bool is_initialized() const { return initialized_; }
@@ -345,18 +483,27 @@ class Tracker {
     triangulate_markers(std::vector<Observation> const& observations) const;
 
     /**
-     * @brief Run the parent (full-body) predict+update step.
+     * @brief Analytic rigid-body initialization for a root-only skeleton (marker-mocap
+     * algorithms doc §4.2) -- a prop skeleton generated from a marker body definition
+     * (design §5.3) has one free-flyer root and no other active joints, so a closed-form
+     * Kabsch/Umeyama fit of body-local marker positions (rest-pose FK) to their
+     * triangulated world positions is better-conditioned than IK and cannot fall into a
+     * local minimum the way IK can for this degenerate case.
      *
-     * Calls ukf_->predict(), ukf_->update(), writes debug output, then
-     * refreshes fk_ so children can query world_transform() immediately after.
+     * Called from initialize() when the skeleton has no non-root active joints, in place
+     * of the human-skeleton analytic-estimate + limb-warm-start + IK path.
      *
-     * @param obs  Observations for this frame
-     * @param dt   Time elapsed since last frame
-     * @param timestamp  Frame timestamp (used only to populate the result)
-     * @return TrackingResult for the parent filter
+     * @param marker_positions Triangulated world positions, keyed by marker name (from
+     *        triangulate_markers()); must have >= 3 entries (checked by the caller).
+     * @param timestamp Frame timestamp, passed through to initialize_ukf().
+     * @return false if fewer than 3 triangulated markers have a body-local counterpart,
+     *         the layout is collinear (not yet supported -- see algorithms doc §4 step 4
+     *         and design doc open question 3), or the fit residual exceeds
+     *         config_.rigid_init_max_residual_m (caller's existing retry-on-a-later-frame
+     *         loop applies, same as a failed human-skeleton IK).
      */
-    TrackingResult run_parent_step(std::vector<Observation> const& obs, double dt,
-                                   double timestamp);
+    bool initialize_rigid_body(std::map<std::string, Eigen::Vector3d> const& marker_positions,
+                               double timestamp);
 
     /**
      * @brief Check if we have sufficient observations for tracking
@@ -430,9 +577,32 @@ class Tracker {
     // Triangulated 3-D positions from the initialization frame, used by debug output.
     std::map<std::string, Eigen::Vector3d> init_marker_positions_;
 
+    // predict_step()/update_step() split (design doc §5.1): everything run_parent_step()
+    // used to compute in its own predict half and consume immediately in its update
+    // half now has to survive the gap where an orchestrator resolves dot assignment.
+    // pending_predict_result_ in particular holds PredictResult::cross_cov_future --
+    // launched async inside ukf_->predict(), deliberately resolved late (in
+    // update_step()) so its work overlaps ukf_->update()'s -- so the whole struct, not
+    // just the prior state/cov, must live here across the boundary.
+    bool predict_pending_ = false;
+    std::optional<PredictResult> pending_predict_result_;
+    std::optional<State> pending_prior_state_;  // State has no default ctor
+    Eigen::MatrixXd pending_prior_cov_;
+    double pending_predict_ms_ = 0.0;
+
     // Previous-frame undistorted pixels per camera and marker, for velocity-mode cameras.
     // Populated at the end of each successful track_frame() call.
     std::unordered_map<int, std::unordered_map<int, Eigen::Vector2d>> prev_observations_;
+
+    // Previous-frame resolved dot tracklet_id per camera and marker --
+    // same population point/lifetime as prev_observations_ just above, see
+    // prev_dot_tracklet_ids()'s own doc comment for what consumes this.
+    std::unordered_map<int, std::unordered_map<int, int>> prev_dot_tracklet_ids_;
+
+    // Per-camera running k=exposure_time/frame_time estimate for the streak-derived
+    // dot velocity mechanism (streak-velocity-design.md §3/§4) -- see
+    // streak_k_accumulators() above.
+    std::unordered_map<int, StreakKAccumulator> streak_k_accumulators_;
 
     // RTS smoother
     bool smoothing_enabled_ = false;

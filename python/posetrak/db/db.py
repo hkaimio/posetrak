@@ -24,8 +24,8 @@ from typing import Final
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 8
-SESSION_SCHEMA_VERSION: Final[int] = 46
+REGISTRY_SCHEMA_VERSION: Final[int] = 12
+SESSION_SCHEMA_VERSION: Final[int] = 53
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -307,6 +307,18 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 7
     if actual == 7:
         _migrate_registry_v7_to_v8(conn)
+        actual = 8
+    if actual == 8:
+        _migrate_registry_v8_to_v9(conn)
+        actual = 9
+    if actual == 9:
+        _migrate_registry_v9_to_v10(conn)
+        actual = 10
+    if actual == 10:
+        _migrate_registry_v10_to_v11(conn)
+        actual = 11
+    if actual == 11:
+        _migrate_registry_v11_to_v12(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -611,6 +623,91 @@ def _migrate_registry_v7_to_v8(conn: sqlite3.Connection) -> None:
         ")"
     )
     _set_schema_version(conn, 8)
+    conn.commit()
+
+
+def _migrate_registry_v8_to_v9(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 8 to 9.
+
+    v9 adds streak-derived dot velocity's tuning columns to tracker_configs --
+    see docs/roadmap/features/marker-based-mocap/streak-velocity-design.md
+    §3/§4. NULL/0 on every column means disabled, matching every other
+    adaptive-tracking mechanism's own backward-compatible default.
+    """
+    existing = _tracker_config_columns(conn)
+    if "dot_streak_velocity_enabled" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_velocity_enabled INTEGER")
+    if "dot_streak_k_window" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_k_window INTEGER")
+    if "dot_streak_k_min_samples" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_k_min_samples INTEGER")
+    if "dot_streak_min_displacement_px" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_min_displacement_px REAL")
+    if "dot_streak_min_elongation_px" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_min_elongation_px REAL")
+    if "dot_streak_velocity_noise_std" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_velocity_noise_std REAL")
+    _set_schema_version(conn, 9)
+    conn.commit()
+
+
+def _migrate_registry_v9_to_v10(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 9 to 10.
+
+    v10 adds process_noise_vel_max_multiplier to tracker_configs: the cap on the
+    adaptive process noise (Mechanism A) variance-domain multiplier, formerly a
+    hardcoded UKF constant (kMaxVelocityNoiseMultiplier = 10.0). It can bind on a
+    fast-swing capture: a third of the run's steps, including 100% of a known
+    bad-tracking window, already saturated the default gain=4/ref_root=2 tuning's
+    multiplier at just ~1.08 rad/s of root angular velocity. NULL means the same
+    10.0 default every existing config already got from the hardcoded constant --
+    backward-compatible. See
+    docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md.
+    """
+    existing = _tracker_config_columns(conn)
+    if "process_noise_vel_max_multiplier" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN process_noise_vel_max_multiplier REAL"
+        )
+    _set_schema_version(conn, 10)
+    conn.commit()
+
+
+def _migrate_registry_v10_to_v11(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 10 to 11.
+
+    v11 adds the dot-candidate assignment gate and its tracklet-aware
+    relaxation to tracker_configs, mirroring the session schema v51->v52
+    change. dot_assignment_gate_mahalanobis existed as a
+    TOML-only tunable before this migration; it had no DB column at all, so
+    a DB-driven tracker_config row could never actually override it -- fixed
+    here alongside the new tracklet multiplier since both touch the same
+    assignment gate.
+    """
+    existing = _tracker_config_columns(conn)
+    if "dot_assignment_gate_mahalanobis" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_assignment_gate_mahalanobis REAL")
+    if "dot_tracklet_gate_multiplier" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_tracklet_gate_multiplier REAL")
+    _set_schema_version(conn, 11)
+    conn.commit()
+
+
+def _migrate_registry_v11_to_v12(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 11 to 12.
+
+    v12 adds the experimental per-marker confidence-threshold override to
+    tracker_configs, mirroring the session schema v52->v53 change -- see
+    _migrate_session_v52_to_v53's docstring.
+    """
+    existing = _tracker_config_columns(conn)
+    if "confidence_threshold_marker_names" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN confidence_threshold_marker_names TEXT"
+        )
+    if "confidence_threshold_override" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN confidence_threshold_override REAL")
+    _set_schema_version(conn, 12)
     conn.commit()
 
 
@@ -1516,6 +1613,188 @@ def _migrate_session_v45_to_v46(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v46_to_v47(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 46 to 47.
+
+    v47 adds detection_runs.detector_type and .config_json, the first
+    piece of the marker-based-mocap data model (design §4.1): a marker
+    detection run (initially ArUco) is a `detection_runs` row like any pose-detection
+    run, distinguished by `detector_type` rather than a parallel table, so
+    every existing run/status/provenance query keeps working unchanged.
+    `detector_type` defaults to 'pose' so every pre-existing row is
+    correctly classified with no backfill. `config_json` carries detector
+    parameters plus, for coded markers, the `marker_ids` list that fixes
+    the corner-blob decode order in detection_keypoints (one physical
+    prop's corner slots are ordered list-position-major by this list, per
+    marker-mocap-design.md §4.1) -- NULL for existing (pose) runs, which
+    have no such config today.
+    """
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(detection_runs)")}
+    if "detector_type" not in existing_cols:
+        conn.execute(
+            "ALTER TABLE detection_runs ADD COLUMN detector_type TEXT NOT NULL DEFAULT 'pose'"
+        )
+    if "config_json" not in existing_cols:
+        conn.execute("ALTER TABLE detection_runs ADD COLUMN config_json TEXT")
+    _set_schema_version(conn, 47)
+    conn.commit()
+
+
+def _migrate_session_v47_to_v48(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 47 to 48.
+
+    v48 adds the marker-based-mocap object data model (design §4.2):
+
+    - `capture_objects`: the object analog of `capture_persons` -- a
+      physical prop instance participating in a capture, linking to its
+      registry `marker_body_definitions` row. Carries no geometry itself
+      (that lives in the definition); adding one to a capture is the same
+      kind of action as adding a named performer.
+    - `tracking_run_persons.capture_object_id`: makes a tracking run's
+      object subjects explicit rather than a convention (design §4.2);
+      set when a subject of the run is an object rather than a person.
+    - `detection_runs.capture_object_id`: the same "make it explicit"
+      reasoning applied to the detection layer, which the design doc
+      doesn't spell out directly -- needed because a marker detection
+      run's `config_json.marker_ids` alone can't disambiguate two
+      `capture_objects` rows that reference the *same* marker body
+      definition (e.g. two physically-identical props in one capture).
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS capture_objects ("
+        "    id                         TEXT PRIMARY KEY,"
+        "    capture_id                 TEXT NOT NULL REFERENCES captures(id),"
+        "    name                       TEXT NOT NULL,"
+        "    marker_body_definition_id  TEXT NOT NULL REFERENCES marker_body_definitions(id),"
+        "    notes                      TEXT,"
+        "    created_at                 TEXT NOT NULL"
+        ")"
+    )
+    tr_persons_cols = {row[1] for row in conn.execute("PRAGMA table_info(tracking_run_persons)")}
+    if "capture_object_id" not in tr_persons_cols:
+        conn.execute(
+            "ALTER TABLE tracking_run_persons ADD COLUMN capture_object_id "
+            "TEXT REFERENCES capture_objects(id)"
+        )
+    detection_runs_cols = {row[1] for row in conn.execute("PRAGMA table_info(detection_runs)")}
+    if "capture_object_id" not in detection_runs_cols:
+        conn.execute(
+            "ALTER TABLE detection_runs ADD COLUMN capture_object_id "
+            "TEXT REFERENCES capture_objects(id)"
+        )
+    _set_schema_version(conn, 48)
+    conn.commit()
+
+
+def _migrate_session_v48_to_v49(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 48 to 49.
+
+    v49 adds `pose_sequence_keypoints` (design §4.3), the keypoint-manifest
+    table sketched as `docs/data-model-and-storage.md` §3's extensibility
+    seam: a sequence *without* manifest rows keeps today's implied-by-
+    `pose_model` layout (fully backward compatible -- every existing
+    person sequence needs no backfill), while a sequence *with* manifest
+    rows (first used by marker-based-mocap object sequences)
+    declares its own per-slot name and source, e.g. `hilt:c0`..`c3` /
+    'aruco'. Landmark names derive from the marker body definition, so the
+    same physical prop always yields the same names regardless of which
+    ArUco ids it happens to carry.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS pose_sequence_keypoints ("
+        "    sequence_id   TEXT NOT NULL REFERENCES pose_observation_sequences(id),"
+        "    keypoint_idx  INTEGER NOT NULL,"
+        "    name          TEXT NOT NULL,"
+        "    source        TEXT NOT NULL,"
+        "    PRIMARY KEY (sequence_id, keypoint_idx)"
+        ")"
+    )
+    _set_schema_version(conn, 49)
+    conn.commit()
+
+
+def _migrate_session_v49_to_v50(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 49 to 50.
+
+    v50 adds streak-derived dot velocity's tuning columns to tracker_configs,
+    mirroring the registry schema v8->v9 change -- see
+    docs/roadmap/features/marker-based-mocap/streak-velocity-design.md §3/§4.
+    """
+    existing = _tracker_config_columns(conn)
+    if "dot_streak_velocity_enabled" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_velocity_enabled INTEGER")
+    if "dot_streak_k_window" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_k_window INTEGER")
+    if "dot_streak_k_min_samples" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_k_min_samples INTEGER")
+    if "dot_streak_min_displacement_px" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_min_displacement_px REAL")
+    if "dot_streak_min_elongation_px" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_min_elongation_px REAL")
+    if "dot_streak_velocity_noise_std" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_streak_velocity_noise_std REAL")
+    _set_schema_version(conn, 50)
+    conn.commit()
+
+
+def _migrate_session_v50_to_v51(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 50 to 51.
+
+    v51 adds process_noise_vel_max_multiplier to tracker_configs, mirroring the
+    registry schema v9->v10 change -- see
+    docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md.
+    """
+    existing = _tracker_config_columns(conn)
+    if "process_noise_vel_max_multiplier" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN process_noise_vel_max_multiplier REAL"
+        )
+    _set_schema_version(conn, 51)
+    conn.commit()
+
+
+def _migrate_session_v51_to_v52(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 51 to 52.
+
+    v52 adds the dot-candidate assignment gate and its tracklet-aware
+    relaxation to tracker_configs, mirroring the registry schema v10->v11
+    change. dot_assignment_gate_mahalanobis existed as a
+    TOML-only tunable before this migration; it had no DB column at all, so
+    a DB-driven tracker_config row could never actually override it -- fixed
+    here alongside the new tracklet multiplier since both touch the same
+    assignment gate.
+    """
+    existing = _tracker_config_columns(conn)
+    if "dot_assignment_gate_mahalanobis" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_assignment_gate_mahalanobis REAL")
+    if "dot_tracklet_gate_multiplier" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_tracklet_gate_multiplier REAL")
+    _set_schema_version(conn, 52)
+    conn.commit()
+
+
+def _migrate_session_v52_to_v53(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 52 to 53.
+
+    v53 adds an experimental per-marker confidence-threshold override to
+    tracker_configs: confidence_threshold_marker_names (JSON string array)
+    names which markers are gated by confidence_threshold_override instead
+    of the existing global min_confidence/measurement_noise_std path.
+    Motivated by nose/ear.L/ear.R, which keep passing the normal confidence
+    gate even when occluded by the back of the head, because occlusion only
+    lowers ViTPose's reported confidence, it doesn't zero it out.
+    """
+    existing = _tracker_config_columns(conn)
+    if "confidence_threshold_marker_names" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN confidence_threshold_marker_names TEXT"
+        )
+    if "confidence_threshold_override" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN confidence_threshold_override REAL")
+    _set_schema_version(conn, 53)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1674,6 +1953,27 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 45
     if actual == 45:
         _migrate_session_v45_to_v46(conn)
+        actual = 46
+    if actual == 46:
+        _migrate_session_v46_to_v47(conn)
+        actual = 47
+    if actual == 47:
+        _migrate_session_v47_to_v48(conn)
+        actual = 48
+    if actual == 48:
+        _migrate_session_v48_to_v49(conn)
+        actual = 49
+    if actual == 49:
+        _migrate_session_v49_to_v50(conn)
+        actual = 50
+    if actual == 50:
+        _migrate_session_v50_to_v51(conn)
+        actual = 51
+    if actual == 51:
+        _migrate_session_v51_to_v52(conn)
+        actual = 52
+    if actual == 52:
+        _migrate_session_v52_to_v53(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

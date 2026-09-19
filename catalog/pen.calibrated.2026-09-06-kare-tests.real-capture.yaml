@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: pen-from-capture
+units: meters
+markers:
+  - name: aruco_2
+    type: aruco
+    dictionary: DICT_4X4_50
+    id: "2"
+    size: 0.095
+    corners:
+      - [-0.047500, 0.047500, 0.000000]
+      - [0.047500, 0.047500, 0.000000]
+      - [0.047500, -0.047500, 0.000000]
+      - [-0.047500, -0.047500, 0.000000]
+  - name: aruco_3
+    type: aruco
+    dictionary: DICT_4X4_50
+    id: "3"
+    size: 0.095
+    corners:
+      - [0.033873, 0.046793, -0.021456]
+      - [-0.060842, 0.043939, -0.021080]
+      - [-0.057792, -0.050779, -0.019745]
+      - [0.036934, -0.047898, -0.019123]

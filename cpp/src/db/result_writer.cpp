@@ -396,6 +396,17 @@ void ResultWriter::write_obs_results(int step, std::vector<ObservationResult> co
         for (int m = 0; m < n_markers; ++m)
             blob[static_cast<size_t>((c * n_markers + m) * kFields + 7)] = 0.0f;
 
+    // Tracks which (camera, marker) slots a POSITION-mode observation has already claimed this
+    // step. tracking_obs_results has exactly one diagnostic slot per (camera, marker), but a
+    // marker can now carry more than one Observation there in a single step -- a streaked dot
+    // gets both a POSITION and a VELOCITY Observation (streak-velocity-design.md §4), and
+    // PAIR_DIFF/relative observations have coexisted with a marker's own POSITION observation
+    // since before this (observation-results-semantics.md's original open question). A POSITION
+    // observation always wins the slot when more than one is present: it's the one whose
+    // actual_x/y is unambiguously an absolute pixel position, which is what every existing
+    // consumer of this table assumes. Order-independent by construction -- see below.
+    std::vector<bool> slot_has_position(static_cast<size_t>(n_cams) * n_markers, false);
+
     for (auto const& obs : observations) {
         // camera_id in ObservationResult is the integer index, not a label — look up directly
         if (obs.camera_id < 0 || obs.camera_id >= n_cams)
@@ -406,7 +417,18 @@ void ResultWriter::write_obs_results(int step, std::vector<ObservationResult> co
 
         int c = obs.camera_id;
         int m = mi->second;
-        float* slot = blob.data() + (c * n_markers + m) * kFields;
+        size_t slot_idx = static_cast<size_t>(c * n_markers + m);
+        if (slot_has_position[slot_idx] && obs.mode != MeasurementMode::POSITION) {
+            // A POSITION observation for this (camera, marker) already claimed this slot this
+            // step (processed earlier in this loop, regardless of *this* observation's own
+            // position in the vector -- this check, not vector order, is what makes the
+            // precedence order-independent) -- don't let a VELOCITY/PAIR_DIFF sibling overwrite
+            // it with a value (a pixel delta/offset, not a position) this table's schema can't
+            // represent without becoming ambiguous again.
+            continue;
+        }
+
+        float* slot = blob.data() + slot_idx * kFields;
         slot[0] = static_cast<float>(obs.actual[0]);
         slot[1] = static_cast<float>(obs.actual[1]);
         slot[2] = static_cast<float>(obs.predicted[0]);
@@ -414,7 +436,16 @@ void ResultWriter::write_obs_results(int step, std::vector<ObservationResult> co
         slot[4] = static_cast<float>(obs.mahalanobis_distance);
         slot[5] = obs.is_outlier ? 0.0f : 1.0f;  // used_in_update
         slot[6] = obs.is_outlier ? 1.0f : 0.0f;  // is_outlier
-        slot[7] = 0.0f;
+        // Measurement mode that produced this slot (ObservationResult::mode's own doc comment;
+        // MeasurementMode's declaration order is POSITION=0, VELOCITY=1, PAIR_DIFF=2) -- was
+        // always 0.0 ("pad", unused) before this. A slot holding anything but 0 here is *not* an
+        // absolute pixel position in actual_x/y/predicted_x/y (only possible when no POSITION
+        // observation existed for this (camera, marker) this step).
+        slot[7] = static_cast<float>(static_cast<int>(obs.mode));
+
+        if (obs.mode == MeasurementMode::POSITION) {
+            slot_has_position[slot_idx] = true;
+        }
     }
 
     sqlite3_stmt* stmt = nullptr;

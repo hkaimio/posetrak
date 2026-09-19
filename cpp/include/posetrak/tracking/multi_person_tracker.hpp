@@ -30,9 +30,11 @@
 #include "posetrak/core/skeleton_layout.hpp"
 #include "posetrak/core/state.hpp"
 #include "posetrak/db/result_writer.hpp"
+#include "posetrak/db/session_reader.hpp"
 #include "posetrak/io/statistics_tracker.hpp"
 #include "posetrak/io/tracking_export.hpp"
 #include "posetrak/kinematics/forward_kinematics.hpp"
+#include "posetrak/tracking/dot_assignment.hpp"
 #include "posetrak/tracking/tracker.hpp"
 #include <chrono>
 #include <filesystem>
@@ -40,6 +42,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -100,6 +103,21 @@ struct BuildPersonContextOptions {
     bool debug_init = false;
     bool smooth_output = false;
     bool quiet = true;
+    /// @brief Externally-supplied initial root position, bypassing the normal
+    /// observation-based init search entirely (a single-subject
+    /// escape hatch, not general multi-person functionality -- shared across
+    /// every person in a --person run, so only meaningful for a one-subject
+    /// invocation). A rigid body whose only markers are `unlabeled_points`-
+    /// tracked (e.g. a single fully-reflective ball with no coded pattern
+    /// and no second marker to disambiguate against) has no cold-start path
+    /// at all: Tracker::initialize() only ever sees the labeled `observations`
+    /// set, which is permanently empty for such a skeleton, and per-frame dot
+    /// assignment itself needs an existing predicted position to gate
+    /// candidates against -- there's nothing to bootstrap from without an
+    /// external seed. Root orientation is left at identity (this is only
+    /// useful for a skeleton where orientation is genuinely unobserved, same
+    /// as initialize_rigid_body()'s own single-marker branch).
+    std::optional<Eigen::Vector3d> seed_position;
 };
 
 /// @brief Owns everything needed to track one person through a sequence and record
@@ -124,6 +142,31 @@ struct PersonContext {
     std::string session_id;
     std::string extrinsic_calibration_id;
     std::string sync_config_id;
+
+    /// True iff *skeleton* declares at least one unlabeled_points-track marker
+    /// (Skeleton::has_unlabeled_points_track()) -- this person/object
+    /// participates in the shared dot-assignment phase (dot-assignment-
+    /// architecture-design.md) on whichever steps it actually has candidates
+    /// queued. False for every existing person and the sword's own ArUco-only
+    /// skeleton -- those keep calling step_person_context() exactly as today.
+    bool has_dot_track = false;
+
+    /// Anonymous reflective-dot candidates for this person's whole sequence,
+    /// loaded once (like *observations*) when has_dot_track is true; empty
+    /// otherwise. Kept in raw, load order purely for the one-time size()
+    /// log line -- per-step queries go through unlabeled_candidates_by_camera
+    /// below instead.
+    std::vector<UnlabeledCandidate> unlabeled_candidates;
+
+    /// unlabeled_candidates split by camera_id once at load time (see
+    /// build_person_context()), each inner vector in the same relative
+    /// order load_unlabeled_candidates() produced it in -- sorted by
+    /// timestamp (non-decreasing) per camera, since that reader's own query
+    /// is `ORDER BY camera_instance_id, video_frame`. bucket_candidates_by_
+    /// camera() binary-searches this per step instead of scanning the flat
+    /// list above (the same binary-search treatment
+    /// ObservationSequence::get_in_range() uses for *observations*).
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> unlabeled_candidates_by_camera;
 
     std::shared_ptr<const SkeletonLayout> layout;
 
@@ -203,6 +246,67 @@ void step_person_context(PersonContext& ctx, int step, bool verbose, bool quiet,
 /// @brief Close exporters, run RTS smoothing if *smooth_output*, flush the result
 /// writer, and write final statistics/summary files.
 void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet, bool verbose);
+
+// ---------------------------------------------------------------------------
+// Shared dot-assignment phase support (dot-assignment-architecture-design.md
+// §5.2): step_person_context() itself stays untouched and is still the right
+// call for every subject with nothing to resolve this step. The pair below
+// exists only for a subject that *does* have dot candidates queued this step,
+// so an orchestrator can predict every such subject before resolving jointly,
+// then update each with its own resolved share -- see MultiPersonTracker::run()
+// and run_track_from_db() for the two real call sites.
+// ---------------------------------------------------------------------------
+
+/// @brief The [t_start, t_end) window step_person_context() itself uses for
+/// step *step* -- factored out so callers needing to know it ahead of time
+/// (to bucket candidates, decide whether this step needs the three-pass
+/// shape at all) don't duplicate the formula.
+std::pair<double, double> person_context_step_window(PersonContext const& ctx, int step);
+
+/// @brief Filters PersonContext::unlabeled_candidates_by_camera down to
+/// candidates whose timestamp falls in [t_start, t_end) -- the shape
+/// resolve_shared_dot_assignment() needs as input. Binary-searches each
+/// camera's own vector rather than scanning it,
+/// relying on unlabeled_candidates_by_camera's own documented sorted-by-
+/// timestamp invariant.
+/// @param candidates_by_camera PersonContext::unlabeled_candidates_by_camera
+///        (or an equivalent already-split, per-camera-sorted map).
+std::unordered_map<int, std::vector<UnlabeledCandidate>> bucket_candidates_by_camera(
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
+    double t_start, double t_end);
+
+/// @brief Predict-only half of a per-person step, for a subject participating
+/// in the shared dot-assignment phase this step: sets the UKF frame number
+/// (the same side effect step_person_context()'s own track_frame() call
+/// triggers internally) and calls Tracker::predict_step(ctx.dt).
+///
+/// Unlike step_person_context() itself, this always predicts -- there is no
+/// early return for "no observations this step", because whether there is
+/// anything to update with can only be known *after* the shared resolve
+/// phase runs, which itself needs every participating subject's prediction
+/// already computed (design doc §5.2). Only call this for a subject that
+/// actually has dot candidates queued this step; every other subject keeps
+/// calling the ordinary step_person_context(), which predicts lazily inside
+/// its own early-return-if-empty check exactly as it does today.
+void step_person_context_predict(PersonContext& ctx, int step);
+
+/// @brief Update-only half of a per-person step -- must be preceded by
+/// step_person_context_predict() this same step. Gathers this step's own
+/// labeled observations, appends *extra_observations* (anchors and/or
+/// resolved dot Observations, the caller's choice), and calls
+/// Tracker::update_step(). Also performs the same post-step bookkeeping
+/// step_person_context() does (CSV export, DB write, stats, frames_tracked/
+/// frames_lost) -- this is the terminal call for the frame either way.
+///
+/// Unlike step_person_context(), this never skips silently on an empty
+/// frame: Tracker::update_step() itself already handles "predict already
+/// ran, but there's nothing to update with" safely (see its own doc
+/// comment), so this always writes a row (a tracking_lost one, if truly
+/// nothing came through) rather than a frame simply going missing from
+/// the output -- a deliberate, narrow difference from step_person_context(),
+/// only reachable via step_person_context_predict() having already run.
+void step_person_context_update(PersonContext& ctx, int step, bool verbose, bool quiet,
+                                std::vector<Observation> const& extra_observations = {});
 
 // ---------------------------------------------------------------------------
 // Stage 2: contact gating + cross-person anchor construction

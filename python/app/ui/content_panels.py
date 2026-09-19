@@ -636,6 +636,174 @@ class CapturePersonsSection(QWidget):
         self._refresh()
 
 
+class _AddObjectDialog(QDialog):
+    """Name + marker body definition picker (marker-based-mocap design doc
+    §6.2 step 1). Mirrors _AddPersonDialog's shape --
+    an object's marker body is required, not optional like a person's
+    default skeleton, since an object with no marker body can never be
+    detected or tracked."""
+
+    def __init__(self, marker_body_names: dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Add object")
+
+        self._name_edit = QLineEdit()
+        self._body_combo = QComboBox()
+        for body_id, name in marker_body_names.items():
+            self._body_combo.addItem(name, body_id)
+
+        form = QFormLayout()
+        form.addRow("Name:", self._name_edit)
+        form.addRow("Marker body:", self._body_combo)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        if not marker_body_names:
+            layout.addWidget(QLabel(
+                "No marker body definitions in this session yet -- import one "
+                "first (marker-body CLI, or \"Manage rigs…\" in the setup app)."
+            ))
+            self._body_combo.setEnabled(False)
+            buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def _on_accept(self) -> None:
+        if not self._name_edit.text().strip():
+            QMessageBox.warning(self, "Name required", "Enter a name for this object.")
+            return
+        self.accept()
+
+    def name(self) -> str:
+        return self._name_edit.text().strip()
+
+    def marker_body_definition_id(self) -> str | None:
+        return self._body_combo.currentData()
+
+
+class CaptureObjectsSection(QWidget):
+    """"Objects" list for CapturePanel: this capture's tracked props
+    (marker-based-mocap design doc §6.2 step 1), with add/rename/remove.
+    The object analog of CapturePersonsSection above -- same flat-list
+    shape, since there is exactly as little to show per row (name + which
+    marker body, folded into one label).
+    """
+
+    def __init__(self, conn: sqlite3.Connection, capture_id: str, parent=None) -> None:
+        super().__init__(parent)
+        self._conn = conn
+        self._capture_id = capture_id
+        self._body_names: dict[str, str] = {}
+        self._build()
+        self._refresh()
+
+    def _build(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        box = QGroupBox("Objects")
+        box_layout = QVBoxLayout(box)
+
+        self._list = QListWidget()
+        self._list.setToolTip(
+            "Tracked props defined for this capture (marker-based-mocap) --\n"
+            "each carries a marker body definition describing its physical\n"
+            "marker layout. Detected the same way as a person, via a marker\n"
+            "detection run in Run Detection."
+        )
+        self._list.itemSelectionChanged.connect(self._update_button_states)
+        box_layout.addWidget(self._list)
+
+        btn_row = QHBoxLayout()
+        self._add_btn = QPushButton("Add…")
+        self._add_btn.clicked.connect(self._on_add)
+        self._rename_btn = QPushButton("Rename…")
+        self._rename_btn.clicked.connect(self._on_rename)
+        self._remove_btn = QPushButton("Remove")
+        self._remove_btn.clicked.connect(self._on_remove)
+        btn_row.addWidget(self._add_btn)
+        btn_row.addWidget(self._rename_btn)
+        btn_row.addWidget(self._remove_btn)
+        box_layout.addLayout(btn_row)
+
+        root.addWidget(box)
+        self._update_button_states()
+
+    def _update_button_states(self) -> None:
+        has_selection = self._list.currentItem() is not None
+        self._rename_btn.setEnabled(has_selection)
+        self._remove_btn.setEnabled(has_selection)
+
+    def _selected_object_id(self) -> str | None:
+        item = self._list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+    def _refresh(self) -> None:
+        from posetrak.db.manage_capture_object import list_capture_objects
+
+        body_rows = self._conn.execute(
+            "SELECT id, name FROM marker_body_definitions ORDER BY name"
+        ).fetchall()
+        self._body_names = {r["id"]: r["name"] for r in body_rows}
+        selected_id = self._selected_object_id()
+        self._list.clear()
+        for obj in list_capture_objects(self._conn, self._capture_id):
+            body_name = self._body_names.get(obj["marker_body_definition_id"], "(unknown body)")
+            item = QListWidgetItem(f"{obj['name']}  —  {body_name}")
+            item.setData(Qt.ItemDataRole.UserRole, obj["id"])
+            self._list.addItem(item)
+            if obj["id"] == selected_id:
+                self._list.setCurrentItem(item)
+        self._update_button_states()
+
+    def _on_add(self) -> None:
+        from posetrak.db.manage_capture_object import create_capture_object
+
+        dlg = _AddObjectDialog(self._body_names, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        create_capture_object(
+            self._conn, self._capture_id, dlg.name(), dlg.marker_body_definition_id(),
+        )
+        self._refresh()
+
+    def _on_rename(self) -> None:
+        from posetrak.db.manage_capture_object import rename_capture_object
+
+        object_id = self._selected_object_id()
+        if object_id is None:
+            return
+        current = self._list.currentItem().text().split("  —  ")[0]
+        name, ok = QInputDialog.getText(self, "Rename object", "Name:", text=current)
+        name = name.strip()
+        if not ok or not name:
+            return
+        rename_capture_object(self._conn, object_id, name)
+        self._refresh()
+
+    def _on_remove(self) -> None:
+        from posetrak.db.manage_capture_object import delete_capture_object
+
+        object_id = self._selected_object_id()
+        if object_id is None:
+            return
+        if QMessageBox.question(
+            self, "Remove object", "Remove this object?"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            delete_capture_object(self._conn, object_id)
+        except ValueError as exc:
+            QMessageBox.critical(self, "Cannot remove object", str(exc))
+            return
+        self._refresh()
+
+
 # ---------------------------------------------------------------------------
 # CapturePanel
 # ---------------------------------------------------------------------------
@@ -741,6 +909,9 @@ class CapturePanel(QWidget):
 
         # Persons (config-improvements design doc, phase 5)
         root.addWidget(CapturePersonsSection(self._conn, self._capture_id, parent=self))
+
+        # Objects (marker-based-mocap design doc §7.1)
+        root.addWidget(CaptureObjectsSection(self._conn, self._capture_id, parent=self))
 
         # Bottom toolbar
         toolbar = QHBoxLayout()
@@ -1354,14 +1525,26 @@ class DetectionRunPanel(QWidget):
 
 
 class StandaloneRunPanel(QWidget):
-    """Assignment editor (StitcherPanel) for a single detection run.
+    """Assignment editor (StitcherPanel) for a person detection run, or a
+    lightweight finalise/review summary for a marker (object) detection run
+    (marker-based-mocap design doc §7.1) -- the two run kinds have nothing in
+    common past this point. A person run needs track-to-person stitching
+    before it can be finalised; an object run has no stitching decision to
+    make and is normally auto-finalised the
+    moment its detection job completes (RunDetectionDialog._on_finished).
+    This panel's object branch covers what that automation doesn't: a run
+    finalised before it existed, or one whose auto-finalise attempt failed
+    and needs a retry -- without this branch such a run would fall through to
+    StitcherPanel, which has no person tracks to show for an object run and no
+    way to proceed.
 
     Reached by clicking a detection run row in TrialPanel or a detection run
     node in the session tree.  Shows a compact breadcrumb header above the
-    full-width StitcherPanel.
+    full-width StitcherPanel (person runs) or the object summary (object runs).
     """
 
     data_changed = Signal()
+    navigate_object_track = Signal(str)  # sequence_id of a marker-based-mocap object
 
     def __init__(self, conn: sqlite3.Connection, run_id: str, parent=None) -> None:
         super().__init__(parent)
@@ -1379,11 +1562,10 @@ class StandaloneRunPanel(QWidget):
         return True
 
     def _build(self) -> None:
-        from app.pose.stitcher_panel import StitcherPanel
-
         run = self._conn.execute(
-            "SELECT dr.id, dr.detector_model, dr.pose_model, dr.created_at, "
-            "       dr.trial_id, t.name AS trial_name, c.label AS capture_label "
+            "SELECT dr.id, dr.detector_type, dr.detector_model, dr.pose_model, dr.created_at, "
+            "       dr.trial_id, dr.capture_object_id, t.name AS trial_name, "
+            "       c.label AS capture_label "
             "FROM detection_runs dr "
             "LEFT JOIN trials t ON t.id = dr.trial_id "
             "LEFT JOIN captures c ON c.id = t.capture_id "
@@ -1409,10 +1591,58 @@ class StandaloneRunPanel(QWidget):
             bc.setStyleSheet("color: gray; font-size: 11px;")
             vbox.addWidget(bc)
 
+        if run is not None and run["detector_type"] == "aruco":
+            self._build_object_summary(vbox, run)
+            return
+
+        from app.pose.stitcher_panel import StitcherPanel
+
         panel = StitcherPanel(self._conn, self._run_id, parent=self)
         panel.applied.connect(self.data_changed)
         self._stitcher_panel = panel
         vbox.addWidget(panel, 1)
+
+    def _build_object_summary(self, vbox: QVBoxLayout, run: sqlite3.Row) -> None:
+        object_row = self._conn.execute(
+            "SELECT name FROM capture_objects WHERE id = ?", (run["capture_object_id"],)
+        ).fetchone()
+        object_name = object_row["name"] if object_row else "(unknown object)"
+        vbox.addWidget(QLabel(f"<b>Object:</b> {object_name}"))
+
+        seq_row = self._conn.execute(
+            "SELECT id FROM pose_observation_sequences WHERE detection_run_id = ?",
+            (self._run_id,),
+        ).fetchone()
+
+        if seq_row is None:
+            vbox.addWidget(QLabel(
+                "Not finalised yet. An object has no per-frame review step "
+                "before finalising (one prop = one track, no stitching "
+                "decision to make) -- finalising is the only remaining step."
+            ))
+            finalise_btn = QPushButton("Finalise")
+            finalise_btn.clicked.connect(self._on_finalise_object)
+            vbox.addWidget(finalise_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        else:
+            vbox.addWidget(QLabel("Finalised."))
+            review_btn = QPushButton("Review corners…")
+            review_btn.clicked.connect(
+                lambda: self.navigate_object_track.emit(seq_row["id"])
+            )
+            vbox.addWidget(review_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        vbox.addStretch()
+
+    def _on_finalise_object(self) -> None:
+        from app.pose.finalise import finalise_object_to_db
+
+        try:
+            seq_id = finalise_object_to_db(self._conn, self._run_id)
+        except (ValueError, RuntimeError) as exc:
+            QMessageBox.critical(self, "Finalise failed", str(exc))
+            return
+        self.data_changed.emit()
+        self.navigate_object_track.emit(seq_id)
 
 
 class SegmentationRunPanel(QWidget):
@@ -6408,6 +6638,302 @@ class _RunInfoPane(QWidget):
         _set_run_config_as_trial_default(
             self, self._conn, self._current_cfg_id, self._current_trial_id
         )
+
+
+# ---------------------------------------------------------------------------
+# ObjectPanel / ObjectCropGridWidget — marker-based-mocap design doc §7.1
+# (object review). Object analog of PersonPanel/
+# PersonCropGridWidget below, deliberately far simpler: no stitching, no
+# hand regions, no segmentation overlay, no crop caching (marker detection
+# never writes frame_cache_entries) -- full frames are decoded on demand
+# via FrameReader and shown through the *same* _CropCell/_ImageCanvas
+# primitives, so the keypoint-edit mode (drag a corner, write via
+# pose_observation_edits) is the same mechanism, not a second
+# implementation of it.
+# ---------------------------------------------------------------------------
+
+
+class ObjectCropGridWidget(QWidget):
+    """Per-camera marker-corner review + correction for one finalised
+    object sequence."""
+
+    def __init__(self, conn: sqlite3.Connection, sequence_id: str, parent=None) -> None:
+        super().__init__(parent)
+        self._conn = conn
+        self._sequence_id = sequence_id
+        self._cells: list[_CropCell] = []
+        self._readers: list = []
+        self._cameras: list[dict] = []
+        self._obs_kp: dict[str, dict[int, "object"]] = {}
+        self._current_frame_by_cam: dict[str, int | None] = {}
+        self._sync_table: SyncTable | None = None
+        self._time_start_s = 0.0
+        self._time_end_s = 0.0
+        self._build()
+
+    def _build(self) -> None:
+        from app.setup.db_context import SyncPoint, SyncTable
+
+        seq = self._conn.execute(
+            "SELECT shot_id, sync_config_id, time_start_s, time_end_s "
+            "FROM pose_observation_sequences WHERE id = ?",
+            (self._sequence_id,),
+        ).fetchone()
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        if seq is None:
+            root.addWidget(QLabel("Sequence not found."))
+            return
+        self._shot_id = seq["shot_id"]
+        self._time_start_s = seq["time_start_s"]
+        self._time_end_s = seq["time_end_s"]
+
+        sp_rows = self._conn.execute(
+            "SELECT sp.shot_video_id, sp.video_frame, sp.timestamp_s, sv.actual_fps "
+            "FROM sync_points sp JOIN capture_videos sv ON sv.id = sp.shot_video_id "
+            "WHERE sp.sync_config_id = ?",
+            (seq["sync_config_id"],),
+        ).fetchall()
+        points = [
+            SyncPoint(camera_instance_id="", shot_video_id=r["shot_video_id"],
+                      video_frame=r["video_frame"], timestamp_s=r["timestamp_s"])
+            for r in sp_rows
+        ]
+        fps_by_video = {r["shot_video_id"]: float(r["actual_fps"] or 30.0) for r in sp_rows}
+        self._sync_table = SyncTable(points, fps_by_video)
+
+        cam_rows = self._conn.execute(
+            "SELECT DISTINCT po.camera_instance_id, cv.id AS shot_video_id, cv.file_path, "
+            "       COALESCE(ci.label, cv.camera_instance_id) AS label "
+            "FROM pose_observations po "
+            "JOIN capture_videos cv ON cv.camera_instance_id = po.camera_instance_id "
+            "    AND cv.shot_id = ? "
+            "LEFT JOIN camera_instances ci ON ci.id = po.camera_instance_id "
+            "WHERE po.sequence_id = ?",
+            (self._shot_id, self._sequence_id),
+        ).fetchall()
+        self._cameras = [dict(r) for r in cam_rows]
+
+        if not self._cameras:
+            root.addWidget(QLabel("No camera observations for this sequence."))
+            return
+
+        from app.setup.video_reader import FrameReader
+
+        toolbar = QHBoxLayout()
+        self._edit_check = QCheckBox("Edit mode")
+        self._edit_check.setToolTip(
+            "Drag a corner to correct it -- writes a pose_observation_edits "
+            "row, same mechanism PersonPanel's crop grid already uses."
+        )
+        self._edit_check.toggled.connect(self._on_edit_toggled)
+        toolbar.addWidget(self._edit_check)
+        toolbar.addStretch()
+        root.addLayout(toolbar)
+
+        grid = QHBoxLayout()
+        for cam in self._cameras:
+            cell = _CropCell(cam["label"])
+            cell._canvas.keypoint_moved.connect(
+                lambda idx, x, y, cid=cam["camera_instance_id"]: self._on_kp_moved(cid, idx, x, y)
+            )
+            self._cells.append(cell)
+            grid.addWidget(cell, stretch=1)
+
+            reader = FrameReader(cam["file_path"], self)
+            reader.frame_ready.connect(
+                lambda idx, frame, cid=cam["camera_instance_id"]: self._on_frame_ready(cid, idx, frame)
+            )
+            reader.start()
+            self._readers.append(reader)
+        root.addLayout(grid, stretch=1)
+
+        self._slider = QSlider(Qt.Orientation.Horizontal)
+        self._slider.setRange(0, 1000)
+        self._slider.valueChanged.connect(self._on_slider_changed)
+        root.addWidget(self._slider)
+
+        self._time_label = QLabel("")
+        root.addWidget(self._time_label)
+
+        self._load_observations()
+        self._on_slider_changed(0)
+
+    def _load_observations(self) -> None:
+        from app.pose.db_cache import read_observations_with_edits
+        for cam in self._cameras:
+            cid = cam["camera_instance_id"]
+            self._obs_kp[cid] = read_observations_with_edits(
+                self._conn, self._sequence_id, cid, primary_source="markers"
+            )
+
+    def _current_time(self) -> float:
+        frac = self._slider.value() / max(self._slider.maximum(), 1)
+        return self._time_start_s + frac * (self._time_end_s - self._time_start_s)
+
+    def _cell_index(self, cam_id: str) -> int:
+        return next(i for i, c in enumerate(self._cameras) if c["camera_instance_id"] == cam_id)
+
+    def _on_slider_changed(self, _value: int) -> None:
+        t = self._current_time()
+        self._time_label.setText(f"{t:.2f}s")
+        for cam, cell, reader in zip(self._cameras, self._cells, self._readers):
+            cid = cam["camera_instance_id"]
+            frame_idx = self._sync_table.lookup(t, cam["shot_video_id"])
+            self._current_frame_by_cam[cid] = frame_idx
+            if frame_idx is None:
+                cell.show_empty()
+                continue
+            reader.request(frame_idx)
+            kp = self._obs_kp.get(cid, {}).get(frame_idx)
+            cell.set_overlay(kp, None, [], None, True, False)
+
+    def _on_frame_ready(self, cam_id: str, frame_idx: int, frame) -> None:
+        import cv2
+        # Coalesced background reads can arrive after the slider moved on.
+        if self._current_frame_by_cam.get(cam_id) != frame_idx:
+            return
+        cell = self._cells[self._cell_index(cam_id)]
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w = rgb.shape[:2]
+        qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+        cell.show_image(QPixmap.fromImage(qimg), 0.0, 0.0, 1.0)
+
+    def _on_edit_toggled(self, enabled: bool) -> None:
+        for cell in self._cells:
+            cell.set_edit_mode(enabled)
+
+    def _on_kp_moved(self, cam_id: str, kp_idx: int, new_x: float, new_y: float) -> None:
+        from app.pose.db_cache import read_observations_with_edits, update_single_keypoint_edit
+        frame_idx = self._current_frame_by_cam.get(cam_id)
+        if frame_idx is None:
+            return
+        update_single_keypoint_edit(
+            self._conn, self._sequence_id, cam_id, frame_idx, kp_idx, new_x, new_y,
+            source="markers",  # object sequences have no 'body' source to infer width from
+        )
+        self._obs_kp[cam_id] = read_observations_with_edits(
+            self._conn, self._sequence_id, cam_id, primary_source="markers"
+        )
+        self._cells[self._cell_index(cam_id)].set_overlay(
+            self._obs_kp[cam_id].get(frame_idx), None, [], None, True, False
+        )
+
+    def shutdown(self) -> None:
+        for reader in self._readers:
+            reader.shutdown()
+
+
+class ObjectPanel(QWidget):
+    """Object panel: info, marker-corner review/correction crop grid, and
+    tracker launcher (marker-based-mocap design doc §7.1)."""
+
+    def __init__(self, conn: sqlite3.Connection, sequence_id: str,
+                 session_path: Path, parent=None) -> None:
+        super().__init__(parent)
+        self._conn = conn
+        self._sequence_id = sequence_id
+        self._session_path = session_path
+        self._crop_grid: ObjectCropGridWidget | None = None
+        self._run_box: QGroupBox | None = None
+        self._run_list: QListWidget | None = None
+        self._build()
+
+    def _build(self) -> None:
+        seq = self._conn.execute(
+            "SELECT id, time_start_s, time_end_s, detection_run_id "
+            "FROM pose_observation_sequences WHERE id = ?",
+            (self._sequence_id,),
+        ).fetchone()
+        if seq is None:
+            return
+
+        run = self._conn.execute(
+            "SELECT co.name AS object_name, co.marker_body_definition_id, mbd.name AS body_name "
+            "FROM detection_runs dr "
+            "JOIN capture_objects co ON co.id = dr.capture_object_id "
+            "LEFT JOIN marker_body_definitions mbd ON mbd.id = co.marker_body_definition_id "
+            "WHERE dr.id = ?",
+            (seq["detection_run_id"],),
+        ).fetchone()
+        object_name = (run["object_name"] if run else None) or "Object"
+        body_name = (run["body_name"] if run else None) or "—"
+
+        n_manifest = self._conn.execute(
+            "SELECT COUNT(*) FROM pose_sequence_keypoints WHERE sequence_id = ?",
+            (self._sequence_id,),
+        ).fetchone()[0]
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.addWidget(QLabel(f"<h2>{object_name}</h2>"))
+
+        form_box = _section("Object info")
+        form = QFormLayout()
+        form.addRow("Marker body:", QLabel(body_name))
+        form.addRow("Time range:", QLabel(
+            f"{_fmt_time(seq['time_start_s'])}  →  {_fmt_time(seq['time_end_s'])}"
+        ))
+        form.addRow("Markers:", QLabel(str(n_manifest // 4) if n_manifest else "0"))
+        form_box.inner_layout().addLayout(form)
+        layout.addWidget(form_box)
+
+        self._crop_grid = ObjectCropGridWidget(self._conn, self._sequence_id)
+        layout.addWidget(self._crop_grid, stretch=1)
+
+        # --- Tracking runs section ---
+        self._run_box = _section("Tracking runs (0)")
+        self._run_list = QListWidget()
+        self._run_list.setMaximumHeight(110)
+        self._run_box.inner_layout().addWidget(self._run_list)
+        run_btn = _action_btn("Run tracker…")
+        run_btn.clicked.connect(self._open_run_tracker)
+        self._run_box.inner_layout().addWidget(run_btn)
+        layout.addWidget(self._run_box)
+        self._refresh_runs()
+
+    def _refresh_runs(self) -> None:
+        if self._run_list is None or self._run_box is None:
+            return
+        self._run_list.clear()
+        runs = self._conn.execute(
+            "SELECT tr.id, tr.ran_at, s.name AS skel_name "
+            "FROM tracking_runs tr "
+            "LEFT JOIN skeletons s ON s.id = tr.skeleton_id "
+            "WHERE tr.observation_sequence_id = ? ORDER BY tr.ran_at DESC",
+            (self._sequence_id,),
+        ).fetchall()
+        self._run_box.setTitle(f"Tracking runs ({len(runs)})")
+        if not runs:
+            self._run_list.addItem("No tracking runs yet.")
+            return
+        for r in runs:
+            stats = self._conn.execute(
+                "SELECT COUNT(*) AS total, "
+                "       SUM(CASE WHEN tracking_lost=0 THEN 1 ELSE 0 END) AS tracked "
+                "FROM tracking_results WHERE run_id=? AND person_id=0 AND is_smoothed=0",
+                (r["id"],),
+            ).fetchone()
+            label = f"[{r['skel_name'] or '?'}]  {_fmt_ts(r['ran_at'])}"
+            if stats and stats["total"]:
+                pct = 100.0 * (stats["tracked"] or 0) / stats["total"]
+                label += f"  —  {stats['tracked']}/{stats['total']} frames ({pct:.0f}%)"
+            self._run_list.addItem(label)
+
+    def _open_run_tracker(self) -> None:
+        from app.pose.run_tracker import ObjectRunTrackerDialog
+        dlg = ObjectRunTrackerDialog(
+            conn=self._conn,
+            session_path=str(self._session_path),
+            sequence_id=self._sequence_id,
+            parent=self,
+        )
+        dlg.exec()
+        self._refresh_runs()
+
+    def shutdown(self) -> None:
+        if self._crop_grid is not None:
+            self._crop_grid.shutdown()
 
 
 # ---------------------------------------------------------------------------

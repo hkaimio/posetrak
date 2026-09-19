@@ -10,6 +10,7 @@
 #include "posetrak/tracking/tracker.hpp"
 
 #include <Eigen/Dense>
+#include <Eigen/Geometry>
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/jacobian.hpp>
 
@@ -107,6 +108,23 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
 
     // Step 1: Triangulate marker positions
     std::map<std::string, Eigen::Vector3d> marker_positions = triangulate_markers(observations);
+
+    // A root-only skeleton (no non-root active joints -- a prop skeleton
+    // generated from a marker body definition, design §5.3) has no pose to
+    // solve for beyond its 6-DOF root: triangulation + full IK is overkill
+    // and can fall into a local minimum for this degenerate case. Closed-form
+    // rigid-body fit instead (algorithms doc §4.2). Checked before the
+    // generic <3-marker gate below: a single free-floating
+    // point body (e.g. a fully-reflective ball with no distinguishing
+    // geometry -- see initialize_rigid_body()'s own single-marker branch)
+    // has exactly one marker, ever, and would otherwise never pass it.
+    if (skeleton_->is_rigid_body()) {
+        if (marker_positions.empty()) {
+            return false;
+        }
+        init_marker_positions_ = marker_positions;
+        return initialize_rigid_body(marker_positions, timestamp);
+    }
 
     if (marker_positions.size() < 3) {
         return false;
@@ -371,6 +389,128 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
     return true;
 }
 
+bool Tracker::initialize_rigid_body(std::map<std::string, Eigen::Vector3d> const& marker_positions,
+                                    double timestamp) {
+    // Body-local marker positions come from rest-pose FK (root at identity):
+    // for a root-only skeleton every marker's local_pos is already expressed
+    // directly in the root joint's frame, so this is exactly the body-local
+    // geometry the design doc's Kabsch/Umeyama fit needs.
+    Eigen::VectorXd q_rest = Eigen::VectorXd::Zero(model_->nq);
+    if (model_->nq >= 7) {
+        q_rest[6] = 1.0;  // identity quaternion w component (Pinocchio free-flyer q = [xyz, xyzw])
+    }
+    auto rest_markers = fk_->compute(q_rest);
+
+    std::vector<Eigen::Vector3d> body_local;
+    std::vector<Eigen::Vector3d> world_pts;
+    for (auto const& [name, world_pos] : marker_positions) {
+        auto it = rest_markers.find(name);
+        if (it == rest_markers.end())
+            continue;
+        body_local.push_back(it->second);
+        world_pts.push_back(world_pos);
+    }
+    // A single free-floating marker (e.g. a fully-reflective ball,
+    // no coded pattern or second marker to fix orientation against) has no
+    // relative geometry for Kabsch/Umeyama to fit at all -- rotation about
+    // any axis through the one point is equally consistent with the single
+    // observation. Place the root directly so the marker lands exactly on
+    // the triangulated point, with identity orientation standing in for
+    // "unobserved, not estimated" -- nothing in this skeleton has any other
+    // marker or joint whose FK output depends on that orientation, so an
+    // arbitrary choice here costs nothing downstream. Skips the Kabsch
+    // residual check below entirely: a direct placement has no fit error
+    // to report.
+    if (body_local.size() == 1) {
+        Eigen::Vector3d root_position = world_pts[0] - body_local[0];
+        Eigen::Quaterniond root_orientation = Eigen::Quaterniond::Identity();
+        fmt::print(
+            "  Rigid-body init: single free-floating marker, no orientation to fit -- "
+            "placed at ({:.3f}, {:.3f}, {:.3f}), orientation left at identity\n",
+            root_position.x(), root_position.y(), root_position.z());
+
+        int num_dof = skeleton_->total_dof_count();
+        State init_state(root_position, root_orientation, Eigen::VectorXd::Zero(num_dof),
+                         Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+                         Eigen::VectorXd::Zero(num_dof));
+        initialize_ukf(init_state, timestamp);
+        initialized_ = true;
+        last_timestamp_ = timestamp;
+        return true;
+    }
+
+    if (body_local.size() < 3) {
+        fmt::print("  Rigid-body init: fewer than 3 markers with a body-local match ({})\n",
+                   body_local.size());
+        return false;
+    }
+
+    // Non-collinear check (algorithms doc §4 step 2): smallest singular value
+    // of the centered body-local point matrix. A collinear layout (e.g. a
+    // two-band staff) needs the reduced position+axis solution instead --
+    // not yet implemented (design doc open question 3: "decide during phase
+    // 1 implementation against a real symmetric prop"); no such prop exists
+    // yet, so this rejects rather than silently mis-fitting.
+    Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
+    for (auto const& p : body_local) {
+        centroid += p;
+    }
+    centroid /= static_cast<double>(body_local.size());
+
+    Eigen::MatrixXd centered(3, static_cast<Eigen::Index>(body_local.size()));
+    for (size_t i = 0; i < body_local.size(); ++i) {
+        centered.col(static_cast<Eigen::Index>(i)) = body_local[i] - centroid;
+    }
+    Eigen::JacobiSVD<Eigen::MatrixXd> collinearity_check(centered);
+    constexpr double kCollinearSingularValueThreshold = 1e-4;  // metres
+    if (collinearity_check.singularValues().size() < 2 ||
+        collinearity_check.singularValues()(1) < kCollinearSingularValueThreshold) {
+        fmt::print(
+            "  Rigid-body init: marker layout is collinear -- reduced position+axis "
+            "solution is not yet implemented (design doc open question 3)\n");
+        return false;
+    }
+
+    // Closed-form rigid (no scaling -- prop geometry is metric by
+    // construction) fit: body_local -> world.
+    Eigen::MatrixXd src(3, static_cast<Eigen::Index>(body_local.size()));
+    Eigen::MatrixXd dst(3, static_cast<Eigen::Index>(body_local.size()));
+    for (size_t i = 0; i < body_local.size(); ++i) {
+        src.col(static_cast<Eigen::Index>(i)) = body_local[i];
+        dst.col(static_cast<Eigen::Index>(i)) = world_pts[i];
+    }
+    Eigen::Matrix4d transform = Eigen::umeyama(src, dst, /*with_scaling=*/false);
+    Eigen::Matrix3d rotation = transform.block<3, 3>(0, 0);
+    Eigen::Vector3d root_position = transform.block<3, 1>(0, 3);
+    Eigen::Quaterniond root_orientation(rotation);
+    root_orientation.normalize();
+
+    double squared_error_sum = 0.0;
+    for (size_t i = 0; i < body_local.size(); ++i) {
+        Eigen::Vector3d predicted = rotation * body_local[i] + root_position;
+        squared_error_sum += (predicted - world_pts[i]).squaredNorm();
+    }
+    double residual_rms = std::sqrt(squared_error_sum / static_cast<double>(body_local.size()));
+    fmt::print("  Rigid-body init: Kabsch/Umeyama fit over {} markers, RMS residual = {:.4f} m\n",
+               body_local.size(), residual_rms);
+
+    if (residual_rms > config_.rigid_init_max_residual_m) {
+        fmt::print("  Rigid-body init: residual {:.4f} m > {:.4f} m limit -- rejecting frame\n",
+                   residual_rms, config_.rigid_init_max_residual_m);
+        return false;
+    }
+
+    int num_dof = skeleton_->total_dof_count();  // 0 for a pure root-only skeleton
+    State init_state(root_position, root_orientation, Eigen::VectorXd::Zero(num_dof),
+                     Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+                     Eigen::VectorXd::Zero(num_dof));
+
+    initialize_ukf(init_state, timestamp);
+    initialized_ = true;
+    last_timestamp_ = timestamp;
+    return true;
+}
+
 void Tracker::initialize_from_rest_pose(double timestamp) {
     // Create state with all zeros (rest pose)
     // Use layout that will be created by initialize_ukf to size the state correctly
@@ -486,6 +626,7 @@ void Tracker::initialize_ukf(State const& initial_state, double timestamp) {
         config_.process_noise_vel_gain_joint, config_.process_noise_vel_ref_joint,
         config_.process_noise_vel_gain_root, config_.process_noise_vel_ref_root,
         config_.process_noise_vel_joint_names);
+    ukf_->set_velocity_noise_max_multiplier(config_.process_noise_vel_max_multiplier);
     {
         std::vector<UnscentedKalmanFilter::VelocityNoiseScope> scopes;
         for (VelocityNoiseScope const& scope : config_.process_noise_vel_scopes) {
@@ -743,30 +884,14 @@ TrackingResult Tracker::track_frame(std::vector<Observation> const& observations
                               "Negative dt: timestamps out of order"};
     }
 
-    std::vector<Observation> const annotated = build_annotated_observations(observations);
-    auto result = run_parent_step(annotated, dt, timestamp);
-
-    if (!result.tracking_lost) {
-        last_timestamp_ = timestamp;
-        ++frame_count_;
-        // Store raw pixel positions for next frame's velocity-mode annotation
-        for (Observation const& obs : observations) {
-            prev_observations_[obs.camera_id][obs.marker_id] = obs.position;
-        }
-        if (frame_callback_) {
-            frame_callback_(result);
-        }
-    }
-
-    return result;
+    predict_step(dt);
+    return update_step(observations, timestamp);
 }
 
-TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observations, double dt,
-                                        double timestamp) {
+void Tracker::predict_step(double dt) {
     using Clock = std::chrono::steady_clock;
     using Ms = std::chrono::duration<double, std::milli>;
 
-    // Step 1: Predict
     auto t0 = Clock::now();
     auto predict_result = ukf_->predict(dt);
     double const predict_ms = Ms(Clock::now() - t0).count();
@@ -778,15 +903,177 @@ TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observat
         print_init_debug(prior_state, "PRIOR ");
     }
 
+    pending_predict_ms_ = predict_ms;
+    pending_prior_state_ = prior_state;
+    pending_prior_cov_ = prior_cov;
+    pending_predict_result_ = std::move(predict_result);
+    predict_pending_ = true;
+}
+
+std::unordered_map<int, MarkerPrediction>
+Tracker::predict_dot_slot_predictions(int camera_id) const {
+    auto cam_it = cameras_.find(camera_id);
+    if (cam_it == cameras_.end()) {
+        throw std::runtime_error("Tracker::predict_dot_slot_predictions: unknown camera_id " +
+                                 std::to_string(camera_id));
+    }
+    if (!predict_pending_) {
+        throw std::runtime_error(
+            "Tracker::predict_dot_slot_predictions: called without a preceding predict_step() "
+            "this frame");
+    }
+
+    std::unordered_map<int, MarkerPrediction> result;
+    auto const& markers = skeleton_->markers();
+
+    if (skeleton_->is_rigid_body()) {
+        // Rigid closed form (dot-assignment-architecture-design.md §6.1) --
+        // cheap and exact, no FK, no Pinocchio call.
+        //
+        // Body-local marker positions from rest-pose FK (root at identity) -- same
+        // trick initialize_rigid_body() uses for its own Kabsch/Umeyama fit (see
+        // that function's doc comment): for a root-only skeleton this is exactly
+        // the geometry predict_rigid_marker()'s local_pos parameter wants.
+        // Recomputed fresh each call rather than cached -- cheap (no articulation
+        // to run FK over) and avoids tying this method's correctness to which of
+        // Tracker's several init paths happened to run (initialize_rigid_body()
+        // is only one of them; initialize_from_state() and
+        // initialize_with_fixed_root() also produce an initialized Tracker but
+        // never touch a rigid-body-specific cache).
+        Eigen::VectorXd q_rest = Eigen::VectorXd::Zero(model_->nq);
+        if (model_->nq >= 7) {
+            q_rest[6] =
+                1.0;  // identity quaternion w component (Pinocchio free-flyer q = [xyz, xyzw])
+        }
+        auto rest_markers = fk_->compute(q_rest);
+
+        Eigen::Matrix<double, 6, 6> const pose_cov = pending_prior_cov_.topLeftCorner<6, 6>();
+        Eigen::Vector3d const root_position = pending_prior_state_->root_position();
+        Eigen::Quaterniond const root_orientation = pending_prior_state_->root_orientation();
+
+        for (size_t i = 0; i < markers.size(); ++i) {
+            Marker const& marker = markers[i];
+            if (marker.track.empty())
+                continue;
+            InputTrack const* track = skeleton_->get_input_track(marker.track);
+            if (track == nullptr || track->type != "unlabeled_points")
+                continue;
+            auto local_it = rest_markers.find(marker.name);
+            if (local_it == rest_markers.end())
+                continue;
+
+            auto prediction =
+                predict_rigid_marker(local_it->second, root_position, root_orientation, pose_cov,
+                                     cam_it->second, marker.normal);
+            if (prediction.has_value()) {
+                result.emplace(static_cast<int>(i), *prediction);
+            }
+        }
+    } else {
+        // General/articulated (design §6):
+        // UnscentedKalmanFilter::predict_marker_slots() reuses the same
+        // sigma-point machinery predict()/update() already run for labeled
+        // observations, real FK per sigma point rather than a closed form --
+        // additive on top of the rigid path above, not a rewrite of it.
+        //
+        // Batched across every dot-track marker on this camera in one call:
+        // calling the single-marker variant once per marker repeats a
+        // full-skeleton FK pass per sigma point -- 16 markers x 6 cameras x
+        // ~437 sigma points measured ~1.2 tracked-fps (a 2.6-hour run for a
+        // 97s capture). predict_marker_slots() runs that
+        // FK pass once per sigma point *total*, shared across every marker
+        // in the batch, since predict_measurements() below the surface
+        // never depended on how many observations it was asked to project.
+        std::vector<int> dot_marker_ids;
+        for (size_t i = 0; i < markers.size(); ++i) {
+            Marker const& marker = markers[i];
+            if (marker.track.empty())
+                continue;
+            InputTrack const* track = skeleton_->get_input_track(marker.track);
+            if (track == nullptr || track->type != "unlabeled_points")
+                continue;
+            dot_marker_ids.push_back(static_cast<int>(i));
+        }
+        result = ukf_->predict_marker_slots(dot_marker_ids, camera_id, *pending_prior_state_,
+                                            pending_prior_cov_, cameras_, *fk_);
+    }
+    return result;
+}
+
+std::unordered_map<int, std::unordered_map<int, MarkerPrediction>>
+Tracker::predict_dot_slot_predictions_all_cameras(std::vector<int> const& camera_ids) const {
+    for (int camera_id : camera_ids) {
+        if (cameras_.find(camera_id) == cameras_.end()) {
+            throw std::runtime_error(
+                "Tracker::predict_dot_slot_predictions_all_cameras: unknown camera_id " +
+                std::to_string(camera_id));
+        }
+    }
+    if (!predict_pending_) {
+        throw std::runtime_error(
+            "Tracker::predict_dot_slot_predictions_all_cameras: called without a preceding "
+            "predict_step() this frame");
+    }
+
+    std::unordered_map<int, std::unordered_map<int, MarkerPrediction>> result;
+
+    if (skeleton_->is_rigid_body()) {
+        // Closed-form, no sigma points -- nothing redundant to remove across
+        // cameras, so just loop the existing single-camera path.
+        for (int camera_id : camera_ids) {
+            result[camera_id] = predict_dot_slot_predictions(camera_id);
+        }
+        return result;
+    }
+
+    // General/articulated: gather the dot-track markers once (identical to
+    // predict_dot_slot_predictions()'s own loop) and hand the whole
+    // (markers x cameras) batch to the UKF in one call, so sigma generation
+    // and the per-sigma-point FK sweep each run once per frame rather than
+    // once per camera -- see this method's own doc comment (tracker.hpp).
+    auto const& markers = skeleton_->markers();
+    std::vector<int> dot_marker_ids;
+    for (size_t i = 0; i < markers.size(); ++i) {
+        Marker const& marker = markers[i];
+        if (marker.track.empty())
+            continue;
+        InputTrack const* track = skeleton_->get_input_track(marker.track);
+        if (track == nullptr || track->type != "unlabeled_points")
+            continue;
+        dot_marker_ids.push_back(static_cast<int>(i));
+    }
+    return ukf_->predict_marker_slots_all_cameras(dot_marker_ids, camera_ids, *pending_prior_state_,
+                                                  pending_prior_cov_, cameras_, *fk_);
+}
+
+TrackingResult Tracker::update_step(std::vector<Observation> const& observations,
+                                    double timestamp) {
+    using Clock = std::chrono::steady_clock;
+    using Ms = std::chrono::duration<double, std::milli>;
+
+    if (!predict_pending_) {
+        throw std::runtime_error(
+            "Tracker::update_step: called without a preceding predict_step() this frame");
+    }
+    predict_pending_ = false;
+    PredictResult predict_result = std::move(*pending_predict_result_);
+    State const prior_state = *pending_prior_state_;
+    Eigen::MatrixXd const prior_cov = std::move(pending_prior_cov_);
+    double const predict_ms = pending_predict_ms_;
+    pending_predict_result_.reset();
+    pending_prior_state_.reset();
+
+    std::vector<Observation> const annotated = build_annotated_observations(observations);
+
     // Step 2: Check if we have observations
-    if (!has_sufficient_observations(observations)) {
+    if (!has_sufficient_observations(annotated)) {
         return TrackingResult{timestamp, ukf_->state(), ukf_->covariance(),         {},
                               0,         true,          "Insufficient observations"};
     }
 
     // Step 3: Update
     auto t1 = Clock::now();
-    auto update_info = ukf_->update(observations, cameras_, *fk_, config_.pose_noise_std,
+    auto update_info = ukf_->update(annotated, cameras_, *fk_, config_.pose_noise_std,
                                     config_.calib_noise_std, config_.outlier_threshold);
     double const update_ms = Ms(Clock::now() - t1).count();
 
@@ -865,7 +1152,7 @@ TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observat
         predict_result.cross_cov_future.get();
     }
 
-    return TrackingResult{
+    TrackingResult result{
         timestamp,
         ukf_->state(),
         ukf_->covariance(),
@@ -887,6 +1174,25 @@ TrackingResult Tracker::run_parent_step(std::vector<Observation> const& observat
         update_info.kalman_ms,
         update_info.cov_update_ms,
     };
+
+    // track_frame()'s own post-run_parent_step() bookkeeping (design doc §5.1) -- folded in
+    // here since update_step() is now the terminal call for the frame either way.
+    if (!result.tracking_lost) {
+        last_timestamp_ = timestamp;
+        ++frame_count_;
+        // Store raw pixel positions for next frame's velocity-mode annotation, and
+        // each observation's own tracklet_id (-1, a no-op, for anything not built from an
+        // anonymous dot candidate) for the next frame's tracklet gate-relaxation lookup.
+        for (Observation const& obs : observations) {
+            prev_observations_[obs.camera_id][obs.marker_id] = obs.position;
+            prev_dot_tracklet_ids_[obs.camera_id][obs.marker_id] = obs.tracklet_id;
+        }
+        if (frame_callback_) {
+            frame_callback_(result);
+        }
+    }
+
+    return result;
 }
 
 bool Tracker::has_sufficient_observations(std::vector<Observation> const& observations) const {
@@ -901,6 +1207,8 @@ void Tracker::reset() {
     ukf_.reset();
     smoother_cache_.clear();
     prev_observations_.clear();
+    prev_dot_tracklet_ids_.clear();
+    streak_k_accumulators_.clear();
 }
 
 // ─── RTS smoothing ────────────────────────────────────────────────────────────

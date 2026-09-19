@@ -1,0 +1,19 @@
+{
+  "sessions": {
+    "props": "/path/to/props-session.db",
+    "sword": "/path/to/sword-session.db"
+  },
+  "cases": [
+    {"name": "rigid-prop", "session": "props", "baseline_run": "<tracking run id prefix>",
+     "expect": {"tracked_pct": 97.2, "lost_max": 0, "init_rms_mm": 1.8}},
+    {"name": "dots-only-ball", "session": "props", "baseline_run": "<tracking run id prefix>",
+     "start_time": 57.05, "end_time": 57.80, "seed_from_baseline": true,
+     "expect": {"lost_max": 0},
+     "tolerance": {"reproj_px": 15.0, "reproj_rel": 0.35}},
+    {"name": "person-with-dot-module", "session": "props", "baseline_run": "<tracking run id prefix>",
+     "expect": {"tracked_pct": 100.0, "lost_max": 0, "nis_close_to_run": "<markerless run id prefix>"}},
+    {"name": "sword", "session": "sword", "baseline_run": "<tracking run id prefix>",
+     "expect": {"tracked_pct": 91.4},
+     "tolerance": {"tracked_pct": 1.0}}
+  ]
+}

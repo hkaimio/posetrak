@@ -20,6 +20,7 @@
 #include "posetrak/filters/sigma_points.hpp"
 #include "posetrak/filters/update_result.hpp"
 #include "posetrak/kinematics/forward_kinematics.hpp"
+#include "posetrak/tracking/marker_prediction.hpp"
 #include <future>
 #include <memory>
 #include <optional>
@@ -235,6 +236,22 @@ class UnscentedKalmanFilter {
     void set_velocity_noise_gain(double gain_joint, double vel_ref_joint, double gain_root,
                                  double vel_ref_root,
                                  std::vector<std::string> const& joint_names = {});
+
+    /**
+     * @brief Override the cap on the per-DOF variance-domain multiplier applied by
+     * set_velocity_noise_gain() (and set_velocity_noise_gain_scopes()) -- was a fixed
+     * `kMaxVelocityNoiseMultiplier = 10.0` constant until a real capture showed it
+     * binding: a fast enough sword swing saturates the default gain=4/ref=2 tuning's
+     * multiplier at just ~1.08 rad/s of root angular velocity, well below real swing
+     * speeds, so the mechanism meant to widen the dot-assignment gate during fast
+     * motion can't widen any further exactly when it's needed most.
+     *
+     * @param max_multiplier Cap on `(1 + gain*|v|/vel_ref)^2`, in variance-domain
+     *        units (i.e. 10.0 means up to 10x the static variance, ~3.16x the std
+     *        dev). Must be >= 1.0; the default (10.0, applied unless this is called)
+     *        reproduces every existing config's prior behavior unchanged.
+     */
+    void set_velocity_noise_max_multiplier(double max_multiplier);
 
     /**
      * @brief One additional, independent velocity-driven gain scope for
@@ -494,6 +511,112 @@ class UnscentedKalmanFilter {
         return apply_near_limit_damping(scaled_in, state_);
     }
 
+    /**
+     * @brief General (articulated) MarkerPrediction for a batch of named
+     * marker slots on one camera, via the same sigma-point machinery
+     * predict()/update() already use for labeled observations --
+     * dot-assignment-architecture-design.md §6's deferred "general/
+     * articulated" implementation of the MarkerPrediction seam. Unlike
+     * predict_rigid_marker()'s closed form (exact, cheap, rigid-body
+     * only), this runs real FK across every sigma point via the existing
+     * predict_measurements(), so it is the correct predictor for any
+     * skeleton with articulation -- what a full marker-based-mocap slot
+     * (hip/knee/ankle/etc., each a different joint) needs.
+     *
+     * Takes every marker to predict on this camera in one call rather
+     * than one marker at a time: predict_measurements() runs a full FK
+     * pass over the *entire* skeleton regardless of how many observations
+     * are in its list, so that cost depends only on n_sigma, not on how
+     * many markers are asked about. Calling this once per marker would
+     * cost 16 dot slots x 6 cameras = 96 calls/frame, each repeating
+     * ~437 sigma points' worth of full-skeleton FK -- ~42k FK evaluations/
+     * frame, measured at ~1.2 tracked-fps on a 16-marker, 6-camera
+     * capture. Batching every marker needing this camera into one
+     * observations list cuts that to ~437 FK evaluations per camera per
+     * frame, shared across every marker in the batch -- a ~16x reduction
+     * for this capture's marker count, with identical per-marker results.
+     *
+     * The returned covariance is *state uncertainty only*, with no
+     * measurement noise R added -- matching predict_rigid_marker()'s own
+     * convention exactly (marker_prediction.cpp has no R term either),
+     * since dot_assignment.cpp's own gating uses MarkerPrediction::
+     * covariance directly with no separate R addition of its own; adding
+     * R here and not there would silently double-count it for rigid vs.
+     * articulated subjects.
+     *
+     * @param marker_ids Indices into skeleton->markers() (same convention
+     *                   as Observation::marker_id) to predict, all on the
+     *                   same camera.
+     * @param camera_id  Camera to project into.
+     * @param state      Distribution mean (e.g. a Tracker's own prior
+     *                   state right after predict_step()).
+     * @param covariance Distribution covariance (error-state, matching
+     *                   `state`; e.g. Tracker's own prior_cov).
+     * @param cameras    Camera map.
+     * @param fk         ForwardKinematics instance (mutated per call --
+     *                   same contract as predict_measurements()'s own
+     *                   `fk` parameter).
+     * @return One entry per marker_id whose central (zero-error) sigma
+     *         point projects in front of the camera -- mirrors
+     *         predict_rigid_marker()'s own "not visible this frame"
+     *         contract, applied per marker rather than to the whole
+     *         batch. A handful of *other* sigma points landing behind the
+     *         camera for a given marker (plausible near a joint limit or
+     *         a fast-moving marker) don't invalidate that marker's own
+     *         prediction -- they're excluded from its weighted mean/
+     *         covariance individually, same NaN-safe convention
+     *         update()'s own Step 3/4 already uses.
+     */
+    std::unordered_map<int, MarkerPrediction>
+    predict_marker_slots(std::vector<int> const& marker_ids, int camera_id, State const& state,
+                         Eigen::MatrixXd const& covariance,
+                         std::unordered_map<int, Camera> const& cameras,
+                         ForwardKinematics& fk) const;
+
+    /**
+     * @brief Same computation as predict_marker_slots(), batched across
+     * every requested camera too, since neither sigma-point generation nor
+     * the FK sweep depends on the camera.
+     *
+     * predict_measurements() runs one full-skeleton FK pass per sigma
+     * point regardless of how many observations -- or which cameras --
+     * are in its list; only the final per-observation projection step
+     * actually reads camera_id. predict_marker_slots() already batches
+     * every marker on ONE camera into a single predict_measurements() call
+     * per sigma point; this batches every (marker, camera) pair the caller
+     * needs into that same single call, so sigma-point generation and the
+     * FK sweep each run once per frame instead of once per camera.
+     * Measured on a 16-marker, 6-camera capture: with sigma generation
+     * and the per-sigma-point loop already parallelized, sigma generation
+     * was 61.7% of
+     * predict_marker_slots()'s own cost and ran identically 6 times a
+     * frame (once per camera) from the same state/covariance -- this
+     * removes that redundancy.
+     *
+     * @param marker_ids Indices into skeleton->markers() to predict.
+     * @param camera_ids Cameras to project into -- every marker is
+     *                   predicted for every camera in this list.
+     * @param state      Distribution mean (e.g. a Tracker's own prior
+     *                   state right after predict_step()).
+     * @param covariance Distribution covariance (error-state, matching
+     *                   `state`; e.g. Tracker's own prior_cov).
+     * @param cameras    Camera map.
+     * @param fk         ForwardKinematics instance (mutated per call --
+     *                   same contract as predict_measurements()'s own
+     *                   `fk` parameter).
+     * @return camera_id -> (marker_id -> MarkerPrediction), one inner map
+     *         per requested camera; a marker missing from a camera's inner
+     *         map means its central sigma point didn't project in front of
+     *         that camera, same "not visible this frame" contract as
+     *         predict_marker_slots().
+     */
+    std::unordered_map<int, std::unordered_map<int, MarkerPrediction>>
+    predict_marker_slots_all_cameras(std::vector<int> const& marker_ids,
+                                     std::vector<int> const& camera_ids, State const& state,
+                                     Eigen::MatrixXd const& covariance,
+                                     std::unordered_map<int, Camera> const& cameras,
+                                     ForwardKinematics& fk) const;
+
    private:
     /**
      * @brief Compute weighted mean of states (manifold-aware)
@@ -680,7 +803,11 @@ class UnscentedKalmanFilter {
         std::unordered_set<std::string> joint_names;
     };
     std::vector<ResolvedVelocityNoiseScope> vel_noise_extra_scopes_;
-    static constexpr double kMaxVelocityNoiseMultiplier = 10.0;
+    /// Default cap, kept as the fallback if set_velocity_noise_max_multiplier() is
+    /// never called (every pre-existing config/call site). See that setter's own doc
+    /// comment for why this became configurable instead of staying a fixed constant.
+    static constexpr double kDefaultMaxVelocityNoiseMultiplier = 10.0;
+    double vel_noise_max_multiplier_ = kDefaultMaxVelocityNoiseMultiplier;
     /// Returns a copy of the static process_noise_ baseline (as built by
     /// rebuild_process_noise()) with each active DOF's diagonal entries scaled by
     /// its own velocity-driven multiplier; returns process_noise_ unchanged if both

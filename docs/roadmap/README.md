@@ -13,13 +13,14 @@ python docs/roadmap/generate_readme.py
 
 #### Extrinsics Calibration Improvements
 
-**Status:** 🚧 In progress (40%) · **Categories:** `calibration`, `ui` · **Last updated:** 2026-08-09
+**Status:** 🚧 In progress (85%) · **Categories:** `calibration`, `ui` · **Last updated:** 2026-08-15
 
-Improvements to multi-camera extrinsic calibration: scrubbing calibration frames directly from capture video instead of a pre-extracted PNG folder, per-control-point per-frame observations, ArUco/ChArUco marker detection to anchor the coordinate system and provide a rigid marker-pose bundle-adjustment residual, and persisted fiducial markers for recalibration reuse.
+Improvements to multi-camera extrinsic calibration: scrubbing calibration frames directly from capture video instead of a pre-extracted PNG folder, per-control-point per-frame observations, ArUco/ChArUco marker detection to anchor the coordinate system and provide a rigid marker-pose bundle-adjustment residual, persisted fiducial markers for recalibration reuse, and (added after Phase 4 live testing) a portable non-planar calibration rig -- characterizable from a single orbit video, not just measured or hand-typed -- plus scattered-tag redundancy as a more robust alternative to anchoring the world frame from a single flat ChArUco board alone. Delivered end to end as a native GUI calibration workflow (dialog, CLI, and user guide), not just backend capability -- see extrinsics-ux-redesign.md for the current UI design.
 
 Documents:
 - [status.md](features/extrinsics-improvements/status.md)
 - [extrinsics-improvements-design.md](features/extrinsics-improvements/extrinsics-improvements-design.md)
+- [extrinsics-ux-redesign.md](features/extrinsics-improvements/extrinsics-ux-redesign.md)
 
 ### capture-hardware
 
@@ -61,6 +62,16 @@ Documents:
 - [hand-detect-test-frames.txt](features/hand-detection-refinement/hand-detect-test-frames.txt)
 - [hand-detection-refinement-design.md](features/hand-detection-refinement/hand-detection-refinement-design.md)
 
+#### Segmentation Reuse (Time-Range-Scoped Bbox Source)
+
+**Status:** 🚧 In progress (85%) · **Categories:** `detection-pipeline`, `data-model` · **Last updated:** 2026-08-16
+
+Makes a Cutie segmentation a time-range-scoped, reusable bbox source independent of any specific detection run — so a redo with a different pose model, or an added hand-refinement pass, can reuse an existing human-reviewed segmentation instead of requiring a fresh one or a one-off script to copy detections across runs.
+
+Documents:
+- [status.md](features/segmentation-reuse/status.md)
+- [segmentation-reuse-design.md](features/segmentation-reuse/segmentation-reuse-design.md)
+
 #### Pose Detection Improvements (Aikido Capture)
 
 **Status:** 📝 Proposal · **Categories:** `detection-pipeline` · **Last updated:** 2026-08-06
@@ -72,15 +83,19 @@ Documents:
 - [marker-detection-analysis.md](features/pose-detect-improvements/marker-detection-analysis.md)
 - [pose-detect-improvements-analysis.md](features/pose-detect-improvements/pose-detect-improvements-analysis.md)
 
-#### Segmentation Reuse (Time-Range-Scoped Bbox Source)
+### release
 
-**Status:** 📝 Proposal · **Categories:** `detection-pipeline`, `data-model` · **Last updated:** 2026-08-06
+#### Release Packaging (Windows/Linux Installer)
 
-Makes a Cutie segmentation a time-range-scoped, reusable bbox source independent of any specific detection run — so a redo with a different pose model, or an added hand-refinement pass, can reuse an existing human-reviewed segmentation instead of requiring a fresh one or a one-off script to copy detections across runs.
+**Status:** 🚧 In progress (85%) · **Categories:** `release`, `packaging`, `build` · **Last updated:** 2026-08-23
+
+Produce an installable release artifact (Windows installer, Linux AppImage/tarball) that doesn't require a compiler or manual `uv sync` -- a thin bootstrapper (uv binary + pre-built C++ tracker + pinned lockfile) rather than a fully offline fat bundle, keeping one dependency-resolution path for both a release install and a dev checkout.
 
 Documents:
-- [status.md](features/segmentation-reuse/status.md)
-- [segmentation-reuse-design.md](features/segmentation-reuse/segmentation-reuse-design.md)
+- [status.md](features/packaging/status.md)
+- [code-signing-plan.md](features/packaging/code-signing-plan.md)
+- [installer-prototype-plan.md](features/packaging/installer-prototype-plan.md)
+- [packaging-design.md](features/packaging/packaging-design.md)
 
 ### tracker-core
 
@@ -103,6 +118,31 @@ Splits tracking into a two-pass batch solve — a body-only parent filter, then 
 Documents:
 - [status.md](features/hierarchical-solver/status.md)
 - [hierarchical-solver-design.md](features/hierarchical-solver/hierarchical-solver-design.md)
+
+#### Marker-Based Motion Capture
+
+**Status:** 🚧 In progress · **Categories:** `tracker-core`, `detection-pipeline` · **Last updated:** 2026-09-19
+
+Tracking of rigid props and person-worn reflective dots or ArUco markers alongside the markerless pipeline: marker detection, tracklet linking, shared dot assignment inside the UKF, and rigid-body and articulated tracking. The foundation is built and validated on four real cases; the remaining work is turning the script-driven workflows into CLI and GUI features, per the productization plan.
+
+Documents:
+- [status.md](features/marker-based-mocap/status.md)
+- [dot-assignment-architecture-design.md](features/marker-based-mocap/dot-assignment-architecture-design.md)
+- [gpt-sol-review-20260831.md](features/marker-based-mocap/gpt-sol-review-20260831.md)
+- [marker-catalog-and-assignment-redesign.md](features/marker-based-mocap/marker-catalog-and-assignment-redesign.md)
+- [marker-mocap-algorithms.md](features/marker-based-mocap/marker-mocap-algorithms.md)
+- [marker-mocap-brief.md](features/marker-based-mocap/marker-mocap-brief.md)
+- [marker-mocap-design.md](features/marker-based-mocap/marker-mocap-design.md)
+- [marker-mocap-productization-plan.md](features/marker-based-mocap/marker-mocap-productization-plan.md)
+- [person-marker-assignment-current-state.md](features/marker-based-mocap/person-marker-assignment-current-state.md)
+- [person-marker-assignment-design.md](features/marker-based-mocap/person-marker-assignment-design.md)
+- [person-marker-mocap-productization-plan.md](features/marker-based-mocap/person-marker-mocap-productization-plan.md)
+- [productization-architecture-and-plan.md](features/marker-based-mocap/productization-architecture-and-plan.md)
+- [productization-context-summary.md](features/marker-based-mocap/productization-context-summary.md)
+- [reflective-dot-detection-design.md](features/marker-based-mocap/reflective-dot-detection-design.md)
+- [rigid-marker-body-calibration-design.md](features/marker-based-mocap/rigid-marker-body-calibration-design.md)
+- [skeleton-scaling-and-marker-calibration-design.md](features/marker-based-mocap/skeleton-scaling-and-marker-calibration-design.md)
+- [streak-velocity-design.md](features/marker-based-mocap/streak-velocity-design.md)
 
 #### Measurement Error Model Improvements
 

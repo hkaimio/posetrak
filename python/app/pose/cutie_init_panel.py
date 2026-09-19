@@ -821,12 +821,22 @@ class CutieInitPanel(QWidget):
         if seg_row:
             self._seg_run_id = seg_row["id"]
 
-        # Persons: capture-level definitions (can exist before any detection
-        # has run -- the real prerequisite for segmentation, not "detection
-        # already ran") union'd with any names already assigned to tracks
-        # from a prior detection run on this capture, so captures that went
-        # through the old detect-first flow keep working unchanged. See
+        # Subjects: capture-level performer definitions (can exist before any
+        # detection has run -- the real prerequisite for segmentation, not
+        # "detection already ran") union'd with any names already assigned to
+        # tracks from a prior detection run on this capture, so captures that
+        # went through the old detect-first flow keep working unchanged. See
         # docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md.
+        #
+        # Also union in capture_objects.name, so a non-person prop (e.g. a
+        # ball with no coded pattern, tracked purely by segmentation-mask
+        # centroid) can be selected as a SAM/Cutie target here too, the same
+        # way a person is. Safe to just widen this
+        # one query: self._persons is used everywhere below as a plain list
+        # of label strings (button text, SAM object-id ordinals,
+        # persons_json's ordinal->name snapshot) -- nothing in this panel
+        # ever looks the name back up against capture_persons specifically,
+        # so an object's name flows through identically to a person's.
         from posetrak.db.manage_person import list_persons
         person_names = {r["name"] for r in list_persons(self._conn, shot_id)}
         person_names |= {
@@ -834,6 +844,12 @@ class CutieInitPanel(QWidget):
                 "SELECT DISTINCT dta.person_name FROM detection_track_assignments dta "
                 "JOIN detection_runs dr ON dr.id = dta.detection_run_id "
                 "WHERE dr.shot_id = ?",
+                (shot_id,),
+            ).fetchall()
+        }
+        person_names |= {
+            r["name"] for r in self._conn.execute(
+                "SELECT name FROM capture_objects WHERE capture_id = ?",
                 (shot_id,),
             ).fetchall()
         }

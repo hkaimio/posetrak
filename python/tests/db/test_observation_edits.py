@@ -124,15 +124,18 @@ def test_edit_moves_keypoint(obs_session):
 # ---------------------------------------------------------------------------
 
 def test_edit_marks_outlier_zeroes_confidence(obs_session):
-    """Slots with is_outlier!=0 get confidence zeroed; x/y are left as original."""
-    edit_kp = _make_kp(0.0, 0.0, 1.0)  # is_outlier=1
+    """Slots with is_outlier!=0 get confidence zeroed. x/y come from the edit
+    (the editor stores the position the user left the keypoint at, so toggling
+    outlier after moving a keypoint keeps the moved position)."""
+    edit_kp = _make_kp(77.0, 88.0, 1.0)  # is_outlier=1
     mask = _build_mask(1)
     write_observation_edit(obs_session, "seq1", "cam1", 10, edit_kp, mask)
 
     result = read_observations_with_edits(obs_session, "seq1", "cam1")
     kp = result[10]
     assert kp[1, 2] == pytest.approx(0.0)
-    assert kp[1, 0] == pytest.approx(100.0)  # x unchanged
+    assert kp[1, 0] == pytest.approx(77.0)  # x from the edit, not the original 100
+    assert kp[1, 1] == pytest.approx(88.0)
     # Other slots unaffected
     assert kp[0, 2] == pytest.approx(0.9, rel=1e-5)
 
@@ -257,3 +260,83 @@ def test_update_single_keypoint_edit_uses_body_row_width(multi_source_session):
     assert kp[5, 1] == pytest.approx(43.0)
     # hand_l slots still present and untouched by the edit.
     np.testing.assert_allclose(kp[91:112, 0], 9.0)
+
+
+# ---------------------------------------------------------------------------
+# primary_source (marker-based-mocap design doc §7.1): a
+# sequence whose real source is never 'body' -- an object sequence's
+# source='markers' -- needs its own primary_source passed through both
+# read_observations_with_edits and update_single_keypoint_edit.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def markers_source_session(tmp_path):
+    """Session DB with a 'markers'-sourced sequence (no 'body' row at all)."""
+    conn = create_session(tmp_path / "obs_edits_markers.db")
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute(
+        "INSERT INTO mocap_sessions (id, recorded_at) VALUES ('sess1', '2026-01-01T00:00:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO captures (id, session_id, capture_number) VALUES ('shot1', 'sess1', 1)"
+    )
+    conn.execute(
+        "INSERT INTO pose_observation_sequences"
+        " (id, shot_id, sync_config_id, time_start_s, time_end_s, pixels_are_undistorted)"
+        " VALUES ('seq1', 'shot1', 'sync1', 0.0, 1.0, 0)"
+    )
+    conn.execute(
+        "INSERT INTO pose_observations"
+        " (sequence_id, camera_instance_id, video_frame, timestamp_s, person_id, source, kp_blob)"
+        " VALUES ('seq1', 'cam1', 0, 0.0, 0, 'markers', ?)",
+        (_make_kp(100.0, 200.0, 1.0).tobytes(),),
+    )
+    conn.commit()
+    yield conn
+    conn.close()
+
+
+def test_read_with_primary_source_returns_real_row_unedited(markers_source_session):
+    result = read_observations_with_edits(
+        markers_source_session, "seq1", "cam1", primary_source="markers",
+    )
+    np.testing.assert_allclose(result[0][:, 0], 100.0)
+
+
+def test_edit_one_slot_leaves_others_at_their_real_values(markers_source_session):
+    """Regression test for a bug seen in ObjectPanel: once an edit exists
+    anywhere in the camera, merge_observation_sources synthesized a
+    same-width *zero* body
+    for every frame whose real source wasn't literally 'body' -- silently
+    discarding the real 'markers' row's untouched slots instead of merging
+    onto them, the moment default_width happened to become known (here,
+    from the edit's own shape).
+    """
+    update_single_keypoint_edit(
+        markers_source_session, "seq1", "cam1", 0, kp_idx=0,
+        new_x=999.0, new_y=888.0, source="markers",
+    )
+    result = read_observations_with_edits(
+        markers_source_session, "seq1", "cam1", primary_source="markers",
+    )
+    kp = result[0]
+    assert kp[0, 0] == pytest.approx(999.0)
+    assert kp[0, 1] == pytest.approx(888.0)
+    # Every other slot must still carry its real, untouched value.
+    np.testing.assert_allclose(kp[1:, 0], 100.0)
+    np.testing.assert_allclose(kp[1:, 1], 200.0)
+    np.testing.assert_allclose(kp[1:, 2], 1.0)
+
+
+def test_update_single_keypoint_edit_with_wrong_default_source_is_a_noop(markers_source_session):
+    """Without passing source='markers', update_single_keypoint_edit looks
+    for a 'body' row (its own default), finds none, and returns without
+    writing anything -- documenting the failure mode the source parameter
+    exists to avoid, not silently mis-writing to the wrong width."""
+    update_single_keypoint_edit(
+        markers_source_session, "seq1", "cam1", 0, kp_idx=0, new_x=1.0, new_y=2.0,
+    )
+    assert markers_source_session.execute(
+        "SELECT COUNT(*) FROM pose_observation_edits"
+    ).fetchone()[0] == 0

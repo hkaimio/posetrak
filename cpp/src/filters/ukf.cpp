@@ -14,6 +14,7 @@
 #include <omp.h>
 
 #include "posetrak/core/skeleton_layout.hpp"
+#include "posetrak/tracking/dot_predict_profile.hpp"
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -26,6 +27,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 
 namespace posetrak {
 
@@ -146,6 +148,10 @@ void UnscentedKalmanFilter::set_velocity_noise_gain(double gain_joint, double ve
     vel_noise_joint_scope_all_ = joint_names.empty();
     vel_noise_joint_names_ =
         std::unordered_set<std::string>(joint_names.begin(), joint_names.end());
+}
+
+void UnscentedKalmanFilter::set_velocity_noise_max_multiplier(double max_multiplier) {
+    vel_noise_max_multiplier_ = max_multiplier;
 }
 
 void UnscentedKalmanFilter::set_velocity_noise_gain_scopes(
@@ -365,7 +371,7 @@ Eigen::MatrixXd UnscentedKalmanFilter::apply_velocity_scaling(State const& veloc
         if (gain <= 0.0)
             return;
         double const std_mult = std::min(1.0 + gain * std::abs(velocity) / vel_ref,
-                                         std::sqrt(kMaxVelocityNoiseMultiplier));
+                                         std::sqrt(vel_noise_max_multiplier_));
         double const var_mult = std_mult * std_mult;
         int const vel_idx = active_dof + pos_idx;
         scaled(pos_idx, pos_idx) *= var_mult;
@@ -1648,10 +1654,16 @@ UpdateResult UnscentedKalmanFilter::update(std::vector<Observation> const& obser
             // Find this observation in the inlier list to get its index in measurement_mean
             int inlier_idx = -1;
             for (size_t j = 0; j < inlier_observations.size(); ++j) {
-                // Match by marker_id, camera_id, and frame_idx (uniquely identifies obs)
+                // Match by marker_id, camera_id, frame_idx, AND mode -- (marker_id, camera_id,
+                // frame_idx) alone no longer uniquely identifies an observation now that a
+                // streaked dot can carry both a POSITION and a VELOCITY Observation for the same
+                // (camera, marker) this step (streak-velocity-design.md §4); without the mode
+                // check here, this loop could silently attach one observation's post-outlier-
+                // rejection predicted/innovation to the *other*'s ObservationResult.
                 if (inlier_observations[j].marker_id == observations[i].marker_id &&
                     inlier_observations[j].camera_id == observations[i].camera_id &&
-                    inlier_observations[j].frame_idx == observations[i].frame_idx) {
+                    inlier_observations[j].frame_idx == observations[i].frame_idx &&
+                    inlier_observations[j].mode == observations[i].mode) {
                     inlier_idx = static_cast<int>(j);
                     break;
                 }
@@ -1924,6 +1936,202 @@ Eigen::VectorXd UnscentedKalmanFilter::predict_measurements(
     return predictions;
 }
 
+std::unordered_map<int, MarkerPrediction>
+UnscentedKalmanFilter::predict_marker_slots(std::vector<int> const& marker_ids, int camera_id,
+                                            State const& state, Eigen::MatrixXd const& covariance,
+                                            std::unordered_map<int, Camera> const& cameras,
+                                            ForwardKinematics& fk) const {
+    using Clock = std::chrono::steady_clock;
+    using Ms = std::chrono::duration<double, std::milli>;
+
+    std::unordered_map<int, MarkerPrediction> result;
+    if (marker_ids.empty()) {
+        return result;
+    }
+
+    auto const t_sigma0 = Clock::now();
+    auto const sigma_points = sigma_gen_.generate_sigma_points(state, covariance);
+    dot_predict_profile::add_sigma_gen_ms(Ms(Clock::now() - t_sigma0).count());
+    int const n_sigma = static_cast<int>(sigma_points.size());
+    int const n_mrk = static_cast<int>(marker_ids.size());
+    dot_predict_profile::add_call(n_sigma, n_mrk);
+
+    // One observation per requested marker, all on the same camera --
+    // mode defaults to MeasurementMode::POSITION -- predict_measurements()
+    // then projects each marker fresh from each sigma point's own FK, with
+    // no dependence on any real observed position (there isn't one).
+    std::vector<Observation> observations(static_cast<size_t>(n_mrk));
+    for (int m = 0; m < n_mrk; ++m) {
+        observations[static_cast<size_t>(m)].marker_id = marker_ids[static_cast<size_t>(m)];
+        observations[static_cast<size_t>(m)].camera_id = camera_id;
+    }
+
+    // proj has 2*n_mrk rows (one (u,v) pair per marker, stacked) and n_sigma
+    // columns. predict_measurements() runs a full-skeleton FK pass once per
+    // call regardless of len(observations), so batching every marker into
+    // one observations list here means that FK cost is paid once per sigma
+    // point total, not once per sigma point *per marker* -- see this
+    // method's own doc comment (ukf.hpp) for the ~16x reduction this gave
+    // on a 16-marker, 6-camera capture.
+    //
+    // Parallelized across sigma points, like update()'s equivalent loop
+    // (Step 2 above), via the same data_pool_/ensure_data_pool() machinery.
+    // Run sequentially it cost ~49ms/frame against update()'s ~2.8ms/frame
+    // for comparable per-sigma-point FK+projection work, consistent with
+    // using one core instead of all of them.
+    auto const t_loop0 = Clock::now();
+    Eigen::MatrixXd proj(2 * n_mrk, n_sigma);
+    ensure_data_pool(fk);
+#pragma omp parallel for schedule(static)
+    for (int i = 0; i < n_sigma; ++i) {
+        ForwardKinematics fk_local(fk.model(), data_pool_[omp_get_thread_num()],
+                                   fk.marker_frame_map(), fk.fk_layout());
+        proj.col(i) = predict_measurements(sigma_points[i], observations, cameras, fk_local, {});
+    }
+    dot_predict_profile::add_predict_loop_ms(Ms(Clock::now() - t_loop0).count());
+
+    auto const t_agg0 = Clock::now();
+    Eigen::VectorXd const weights_mean = sigma_gen_.get_mean_weights();
+    Eigen::VectorXd const weights_cov = sigma_gen_.get_covariance_weights();
+
+    for (int m = 0; m < n_mrk; ++m) {
+        int const row0 = 2 * m;
+        // Central (zero-error) sigma point is always index 0 (sigma_points.cpp) --
+        // if this marker isn't visible there, skip it, mirroring
+        // predict_rigid_marker()'s own "behind the camera" -> not-present contract.
+        if (!std::isfinite(proj(row0, 0)) || !std::isfinite(proj(row0 + 1, 0))) {
+            continue;
+        }
+
+        Eigen::Vector2d mean = Eigen::Vector2d::Zero();
+        for (int d = 0; d < 2; ++d) {
+            double sum = 0.0;
+            double weight_sum = 0.0;
+            for (int i = 0; i < n_sigma; ++i) {
+                double const val = proj(row0 + d, i);
+                if (std::isfinite(val)) {
+                    sum += weights_mean(i) * val;
+                    weight_sum += weights_mean(i);
+                }
+            }
+            // weight_sum > 0 is guaranteed here: the central sigma point (checked
+            // finite above) always carries a strictly positive mean weight.
+            mean(d) = sum / weight_sum;
+        }
+
+        // State-uncertainty-only covariance -- deliberately no measurement noise
+        // R added (see this method's own doc comment for why that must match
+        // predict_rigid_marker()'s convention). NaN (behind-camera) sigma points
+        // are zeroed after centering, same convention update()'s own Step 4
+        // uses for the multi-observation case.
+        Eigen::Matrix2d cov = Eigen::Matrix2d::Zero();
+        for (int i = 0; i < n_sigma; ++i) {
+            Eigen::Vector2d z = proj.block(row0, i, 2, 1) - mean;
+            if (!z.allFinite()) {
+                z.setZero();
+            }
+            cov += weights_cov(i) * (z * z.transpose());
+        }
+
+        result.emplace(marker_ids[static_cast<size_t>(m)], MarkerPrediction{mean, cov});
+    }
+    dot_predict_profile::add_aggregate_ms(Ms(Clock::now() - t_agg0).count());
+
+    return result;
+}
+
+std::unordered_map<int, std::unordered_map<int, MarkerPrediction>>
+UnscentedKalmanFilter::predict_marker_slots_all_cameras(
+    std::vector<int> const& marker_ids, std::vector<int> const& camera_ids, State const& state,
+    Eigen::MatrixXd const& covariance, std::unordered_map<int, Camera> const& cameras,
+    ForwardKinematics& fk) const {
+    using Clock = std::chrono::steady_clock;
+    using Ms = std::chrono::duration<double, std::milli>;
+
+    std::unordered_map<int, std::unordered_map<int, MarkerPrediction>> result;
+    int const n_mrk = static_cast<int>(marker_ids.size());
+    int const n_cam = static_cast<int>(camera_ids.size());
+    if (n_mrk == 0 || n_cam == 0) {
+        return result;
+    }
+
+    auto const t_sigma0 = Clock::now();
+    auto const sigma_points = sigma_gen_.generate_sigma_points(state, covariance);
+    dot_predict_profile::add_sigma_gen_ms(Ms(Clock::now() - t_sigma0).count());
+    int const n_sigma = static_cast<int>(sigma_points.size());
+    dot_predict_profile::add_call(n_sigma, n_mrk * n_cam);
+
+    // One observation per (marker, camera) pair -- index c*n_mrk + m, so a
+    // given camera's n_mrk markers occupy one contiguous block of rows in
+    // `proj` below. predict_measurements() already reads camera_id off each
+    // observation independently (it has no notion of "the" camera for a
+    // call), so batching every camera's markers into one observations list
+    // needs no change to that function at all: the redundant FK sweep this
+    // removes was always purely an artefact of calling it once per camera,
+    // never a real dependency.
+    std::vector<Observation> observations(static_cast<size_t>(n_mrk) * static_cast<size_t>(n_cam));
+    for (int c = 0; c < n_cam; ++c) {
+        for (int m = 0; m < n_mrk; ++m) {
+            Observation& obs = observations[static_cast<size_t>(c * n_mrk + m)];
+            obs.marker_id = marker_ids[static_cast<size_t>(m)];
+            obs.camera_id = camera_ids[static_cast<size_t>(c)];
+        }
+    }
+
+    auto const t_loop0 = Clock::now();
+    Eigen::MatrixXd proj(2 * n_mrk * n_cam, n_sigma);
+    ensure_data_pool(fk);
+#pragma omp parallel for schedule(static)
+    for (int i = 0; i < n_sigma; ++i) {
+        ForwardKinematics fk_local(fk.model(), data_pool_[omp_get_thread_num()],
+                                   fk.marker_frame_map(), fk.fk_layout());
+        proj.col(i) = predict_measurements(sigma_points[i], observations, cameras, fk_local, {});
+    }
+    dot_predict_profile::add_predict_loop_ms(Ms(Clock::now() - t_loop0).count());
+
+    auto const t_agg0 = Clock::now();
+    Eigen::VectorXd const weights_mean = sigma_gen_.get_mean_weights();
+    Eigen::VectorXd const weights_cov = sigma_gen_.get_covariance_weights();
+
+    for (int c = 0; c < n_cam; ++c) {
+        auto& per_marker = result[camera_ids[static_cast<size_t>(c)]];
+        for (int m = 0; m < n_mrk; ++m) {
+            int const row0 = 2 * (c * n_mrk + m);
+            if (!std::isfinite(proj(row0, 0)) || !std::isfinite(proj(row0 + 1, 0))) {
+                continue;
+            }
+
+            Eigen::Vector2d mean = Eigen::Vector2d::Zero();
+            for (int d = 0; d < 2; ++d) {
+                double sum = 0.0;
+                double weight_sum = 0.0;
+                for (int i = 0; i < n_sigma; ++i) {
+                    double const val = proj(row0 + d, i);
+                    if (std::isfinite(val)) {
+                        sum += weights_mean(i) * val;
+                        weight_sum += weights_mean(i);
+                    }
+                }
+                mean(d) = sum / weight_sum;
+            }
+
+            Eigen::Matrix2d cov = Eigen::Matrix2d::Zero();
+            for (int i = 0; i < n_sigma; ++i) {
+                Eigen::Vector2d z = proj.block(row0, i, 2, 1) - mean;
+                if (!z.allFinite()) {
+                    z.setZero();
+                }
+                cov += weights_cov(i) * (z * z.transpose());
+            }
+
+            per_marker.emplace(marker_ids[static_cast<size_t>(m)], MarkerPrediction{mean, cov});
+        }
+    }
+    dot_predict_profile::add_aggregate_ms(Ms(Clock::now() - t_agg0).count());
+
+    return result;
+}
+
 Eigen::VectorXd
 UnscentedKalmanFilter::observations_to_vector(std::vector<Observation> const& observations) const {
     int const n_obs = static_cast<int>(observations.size());
@@ -2020,15 +2228,30 @@ UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observati
     }
 
     // Second pass: cross-camera outlier detection
-    // Group valid observations by marker_id. force_inlier observations are excluded here too,
-    // not just from the rejection decision in the third pass below -- a trusted edit that's
-    // currently inconsistent with the filter's state (exactly when force_inlier matters) would
-    // otherwise skew the per-marker median and change whether *other* cameras' genuinely bad
-    // observations of the same marker pass the cross-camera check.
-    std::map<int, std::vector<size_t>> marker_to_obs_indices;
+    // Group valid observations by (marker_id, mode, ref_marker_id). force_inlier observations
+    // are excluded here too, not just from the rejection decision in the third pass below -- a
+    // trusted edit that's currently inconsistent with the filter's state (exactly when
+    // force_inlier matters) would otherwise skew the per-marker median and change whether
+    // *other* cameras' genuinely bad observations of the same marker pass the cross-camera
+    // check.
+    //
+    // Grouping by marker_id alone (as this used to) silently pools together measurements of
+    // fundamentally different physical quantities whenever a marker carries more than one
+    // Observation this step: a POSITION-mode Mahalanobis distance (an absolute-pixel residual)
+    // is not comparable to a VELOCITY-mode one (a frame-to-frame pixel-delta residual) -- pooling
+    // them into one median is statistically meaningless and can reject a perfectly good
+    // observation of one kind because the other kind's distances dominate the median, or the
+    // reverse. Same reasoning extends PAIR_DIFF's ref_marker_id into the key: two different
+    // parent markers produce differently-distributed child-minus-parent residuals for the same
+    // child, so they shouldn't be pooled together either -- relevant once cross-marker relative
+    // observations (e.g. a prop marker's PAIR_DIFF against a person's fingertip) exist alongside
+    // this dot-track's own PAIR_DIFF usage.
+    std::map<std::tuple<int, int, int>, std::vector<size_t>> marker_to_obs_indices;
     for (size_t i = 0; i < observations.size(); ++i) {
         if (obs_data[i].is_valid && !observations[i].force_inlier) {
-            marker_to_obs_indices[observations[i].marker_id].push_back(i);
+            Observation const& o = observations[i];
+            marker_to_obs_indices[{o.marker_id, static_cast<int>(o.mode), o.ref_marker_id}]
+                .push_back(i);
         }
     }
 
@@ -2037,7 +2260,7 @@ UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observati
     double const cross_camera_multiplier = 3.0;  // Tunable: reject if distance > k * median
     double const min_median_threshold = 0.5;     // Skip cross-camera check if median is too small
 
-    for (auto const& [marker_id, obs_indices] : marker_to_obs_indices) {
+    for (auto const& [group_key, obs_indices] : marker_to_obs_indices) {
         if (obs_indices.size() < 2) {
             continue;  // Need at least 2 cameras to compare
         }
@@ -2082,6 +2305,7 @@ UnscentedKalmanFilter::reject_outliers(std::vector<Observation> const& observati
         obs_result.marker_name = layout_->skeleton()->markers()[obs.marker_id].name;
         obs_result.camera_id = obs.camera_id;
         obs_result.camera_frame_idx = obs.frame_idx;
+        obs_result.mode = obs.mode;
         obs_result.predicted = data.predicted;
         obs_result.actual = data.actual;
         obs_result.innovation = data.innovation;
@@ -2196,6 +2420,7 @@ std::vector<ObservationResult> UnscentedKalmanFilter::compute_observation_diagno
             obs_result.marker_name = layout_->skeleton()->markers()[obs.marker_id].name;
             obs_result.camera_id = obs.camera_id;
             obs_result.camera_frame_idx = obs.frame_idx;
+            obs_result.mode = obs.mode;
             obs_result.is_outlier = true;  // Mark as outlier for diagnostics
             obs_result.mahalanobis_distance = 0.0;
             obs_result.innovation = Eigen::Vector2d::Zero();
@@ -2219,6 +2444,7 @@ std::vector<ObservationResult> UnscentedKalmanFilter::compute_observation_diagno
         obs_result.marker_name = layout_->skeleton()->markers()[obs.marker_id].name;
         obs_result.camera_id = obs.camera_id;
         obs_result.camera_frame_idx = obs.frame_idx;
+        obs_result.mode = obs.mode;
         obs_result.is_outlier = false;
         obs_result.mahalanobis_distance = mahal_dist;
         obs_result.innovation = innovation;

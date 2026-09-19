@@ -232,6 +232,26 @@ def test_get_active_sync_prefers_led_auto(
     assert table.lookup(0.1, vid_id) == 20
 
 
+def test_get_active_sync_prefers_led_graph_over_manual_rough(
+    ctx: DBContext,
+    cam_instance_id: str,
+) -> None:
+    """The LED sync dialog saves its result as 'led-graph'; an accepted LED
+    sync must win over the rough manual sync, not be ranked as unknown."""
+    shot_id = ctx.create_shot("s1")
+    vid_id = ctx.create_shot_video(shot_id, cam_instance_id, "/v.mp4", 120.0, 1000, 1920, 1080)
+
+    pt_rough = SyncPoint(cam_instance_id, vid_id, video_frame=10, timestamp_s=0.1)
+    pt_led   = SyncPoint(cam_instance_id, vid_id, video_frame=20, timestamp_s=0.1)
+
+    ctx.write_sync_config(shot_id, "manual-rough", {cam_instance_id: [pt_rough]})
+    ctx.write_sync_config(shot_id, "led-graph",    {cam_instance_id: [pt_led]})
+
+    table = ctx.get_active_sync(shot_id)
+    assert table is not None
+    assert table.lookup(0.1, vid_id) == 20
+
+
 def test_get_active_sync_no_config_returns_none(ctx: DBContext) -> None:
     shot_id = ctx.create_shot("s1")
     assert ctx.get_active_sync(shot_id) is None

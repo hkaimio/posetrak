@@ -45,6 +45,11 @@ posetrak_sources = files(
   'tracking/trajectory_stream.cpp',
   'tracking/relative_observations.cpp',
   'tracking/hierarchical_solver.cpp',
+  'tracking/marker_prediction.cpp',
+  'tracking/dot_assignment.cpp',
+  'tracking/streak_k_accumulator.cpp',
+  'tracking/dot_predict_profile.cpp',
+  'tracking/frame_step_profile.cpp',
 
   # Build metadata
   'version.cpp',

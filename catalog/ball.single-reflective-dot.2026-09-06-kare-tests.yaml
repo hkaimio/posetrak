@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Marker body definition for the reflective ball (2026-09-15/16 Cutie-
+# segmentation ball-tracking experiment). A single point at the body's own
+# origin -- the ball has no coded pattern and is reflective on its entire
+# surface, so only position is ever meaningful, never orientation (see
+# docs/roadmap/features/marker-based-mocap/status.md, 2026-09-15 entry).
+# capture_objects.marker_body_definition_id is a hard NOT NULL FK, so this
+# exists to satisfy that even though the ball's actual skeleton (hand-
+# authored directly, not generated from this file via
+# posetrak.skeleton.marker_body_to_skeleton) needs no real multi-marker
+# geometry to solve for.
+name: ball-single-reflective-dot
+units: meters
+markers:
+  - name: ball_marker
+    type: reflective_dot
+    center: [0.0, 0.0, 0.0]

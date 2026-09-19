@@ -73,6 +73,10 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
         result.calib_noise_std = tracking["calib_noise_std"].value_or(legacy_noise);
         result.pose_noise_std = tracking["pose_noise_std"].value_or(0.0);
         result.outlier_threshold = tracking["outlier_threshold"].value_or(4.0);
+        result.dot_assignment_gate_mahalanobis =
+            tracking["dot_assignment_gate_mahalanobis"].value_or(9.21);
+        result.dot_tracklet_gate_multiplier =
+            tracking["dot_tracklet_gate_multiplier"].value_or(1.0);
         if (auto vel_cams = tracking["velocity_mode_camera_ids"].as_array()) {
             for (auto&& elem : *vel_cams) {
                 if (auto v = elem.value<int64_t>())
@@ -90,6 +94,8 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
         result.process_noise_vel_ref_joint = tracking["process_noise_vel_ref_joint"].value_or(1.0);
         result.process_noise_vel_gain_root = tracking["process_noise_vel_gain_root"].value_or(0.0);
         result.process_noise_vel_ref_root = tracking["process_noise_vel_ref_root"].value_or(1.0);
+        result.process_noise_vel_max_multiplier =
+            tracking["process_noise_vel_max_multiplier"].value_or(10.0);
         if (auto names = tracking["process_noise_vel_joint_names"].as_array()) {
             for (auto&& elem : *names) {
                 if (auto str = elem.value<std::string>())
@@ -164,6 +170,15 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
 
         result.edited_kp_noise_std = tracking["edited_kp_noise_std"].value_or(0.0);
 
+        if (auto names = tracking["confidence_threshold_marker_names"].as_array()) {
+            for (auto&& elem : *names) {
+                if (auto str = elem.value<std::string>())
+                    result.confidence_threshold_marker_names.push_back(*str);
+            }
+        }
+        result.confidence_threshold_override =
+            tracking["confidence_threshold_override"].value_or(0.0);
+
         // Initialization sub-section
         if (auto init = tracking["initialization"]) {
             if (auto state_path = init["python_state_path"].value<std::string>()) {
@@ -176,6 +191,8 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
             result.init_joint_std = init["init_joint_std"].value_or(0.1);
             result.init_velocity_std = init["init_velocity_std"].value_or(0.1);
             result.min_cameras_for_init = init["min_cameras_for_init"].value_or(2);
+            result.rigid_init_max_residual_m = init["rigid_init_max_residual_m"].value_or(0.02);
+            result.init_search_window_s = init["init_search_window_s"].value_or(2.0);
         }
 
         // UKF sub-section
@@ -275,6 +292,20 @@ void TrackerAppConfig::validate() const {
             fmt::format("Invalid outlier_threshold: {} (must be > 0)", outlier_threshold));
     }
 
+    if (dot_assignment_gate_mahalanobis <= 0.0) {
+        throw std::runtime_error(
+            fmt::format("Invalid dot_assignment_gate_mahalanobis: {} (must be > 0)",
+                        dot_assignment_gate_mahalanobis));
+    }
+
+    if (dot_tracklet_gate_multiplier < 1.0) {
+        throw std::runtime_error(
+            fmt::format("Invalid dot_tracklet_gate_multiplier: {} (must be >= 1.0 -- "
+                        "this divides a cost, so anything below 1.0 would tighten the "
+                        "gate for a tracklet match instead of relaxing it)",
+                        dot_tracklet_gate_multiplier));
+    }
+
     if (ik_max_iterations <= 0) {
         throw std::runtime_error(
             fmt::format("Invalid ik_max_iterations: {} (must be > 0)", ik_max_iterations));
@@ -294,6 +325,18 @@ void TrackerAppConfig::validate() const {
         throw std::runtime_error(
             fmt::format("Invalid min_cameras_for_init: {} (must be >= 2 for triangulation)",
                         min_cameras_for_init));
+    }
+
+    if (rigid_init_max_residual_m <= 0.0) {
+        throw std::runtime_error(fmt::format("Invalid rigid_init_max_residual_m: {} (must be > 0)",
+                                             rigid_init_max_residual_m));
+    }
+
+    if (init_search_window_s < 0.0) {
+        throw std::runtime_error(
+            fmt::format("Invalid init_search_window_s: {} (must be >= 0; "
+                        "0 disables the search)",
+                        init_search_window_s));
     }
 
     if (start_time < 0.0) {

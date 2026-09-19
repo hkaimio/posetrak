@@ -14,6 +14,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace posetrak {
@@ -56,6 +57,52 @@ struct SequenceMetadata {
     std::string session_id;
     std::string extrinsic_calibration_id;
     std::string sync_config_id;
+};
+
+/// @brief One anonymous reflective-dot candidate detection, undistorted and
+/// resolved to a Camera, but not yet resolved to a marker identity -- that
+/// resolution is what the shared dot-assignment phase does at tracking time
+/// (see docs/roadmap/features/marker-based-mocap/dot-assignment-architecture-design.md).
+/// Deliberately not an Observation: there is no marker_id yet.
+struct UnlabeledCandidate {
+    int camera_id;
+    int frame_idx;
+    double timestamp;
+    Eigen::Vector2d position;            ///< Undistorted pixels, matches Observation::position
+    Eigen::Vector2d position_distorted;  ///< Original distorted pixels, for diagnostics
+    /// No per-candidate detector confidence exists in the underlying blob (unlike a
+    /// pose keypoint) -- always 1.0. Kept as a field for shape-parity with Observation
+    /// rather than dropped, in case a future detector version adds a real one.
+    double confidence;
+    double area;         ///< Blob area in pixels, from the detector (diagnostics/tuning only)
+    double compactness;  ///< Blob compactness, from the detector (diagnostics/tuning only)
+    /// Minimum-area-rect axes from the detector (db::DotCandidate::major_axis/minor_axis) --
+    /// equal for a round dot; major_axis is a streak's real length and minor_axis its width
+    /// (~the dot's true diameter) for a motion-blur streak accepted via dot_blob_detector.py's
+    /// elongated-blob path. Unlike area/compactness above, these ARE used, not diagnostics-only:
+    /// resolve_dot_assignment() inflates a streaked candidate's Observation::noise_std_override
+    /// from them (dot_assignment.cpp).
+    /// Defaulted (unlike area/compactness above) so an existing fixture or
+    /// call site built before these fields existed still gets major==minor
+    /// (a round dot -- no noise_std_override) rather than reading
+    /// uninitialized memory.
+    double major_axis = 0.0;
+    double minor_axis = 0.0;
+    /// Unit vector along a motion-blur streak's own axis (db::DotCandidate::dir_x/dir_y,
+    /// dot_blob_detector.py's canonicalized, direction-ambiguous streak axis) -- (0, 0) for a
+    /// round dot. Feeds the streak-velocity design
+    /// (docs/roadmap/features/marker-based-mocap/streak-velocity-design.md); defaulted for the
+    /// same reason major_axis/minor_axis are.
+    double dir_x = 0.0;
+    double dir_y = 0.0;
+    /// Per-camera frame-to-frame identity from dot_tracklet.MotionGatedLinker
+    /// (db::DotCandidate::tracklet_id) -- resolve_dot_assignment()
+    /// relaxes its own gate for a candidate whose tracklet_id matches what
+    /// resolved into the same (subject, camera, marker) slot last frame.
+    /// Defaulted to -1 (never matches a real tracklet) for the same reason
+    /// major_axis/minor_axis are -- an existing fixture/call site built
+    /// before this field existed should not silently start matching.
+    int tracklet_id = -1;
 };
 
 /// @brief Reads tracking data from a per-session SQLite database
@@ -151,16 +198,58 @@ class SessionReader {
     /// @param edited_kp_noise_std When > 0, keypoints overridden by a pose_observation_edits row
     ///   get this as noise_std_override and Observation::force_inlier = true (see
     ///   TrackerConfig::edited_kp_noise_std). 0 = disabled (edits use the normal formula/gate).
+    /// @param confidence_threshold_marker_names Marker names gated by
+    ///   confidence_threshold_override instead of min_confidence (see
+    ///   TrackerConfig::confidence_threshold_marker_names). Empty = disabled.
+    /// @param confidence_threshold_override Per-marker confidence floor used for the markers
+    ///   named above.
     /// @return ObservationSet ready for the tracker
-    ObservationSet load_observations(std::string const& sequence_id,
-                                     std::map<std::string, Camera> const& cameras,
-                                     Skeleton const& skeleton, double min_confidence = 0.1,
-                                     int person_id = 0, bool use_relative_obs = false,
-                                     double relative_min_conf = 0.5, double pose_noise_std = 0.0,
-                                     double cross_pair_max_px = 0.0, int cross_pair_max_n = 10,
-                                     double edited_kp_noise_std = 0.0);
+    ObservationSet
+    load_observations(std::string const& sequence_id, std::map<std::string, Camera> const& cameras,
+                      Skeleton const& skeleton, double min_confidence = 0.1, int person_id = 0,
+                      bool use_relative_obs = false, double relative_min_conf = 0.5,
+                      double pose_noise_std = 0.0, double cross_pair_max_px = 0.0,
+                      int cross_pair_max_n = 10, double edited_kp_noise_std = 0.0,
+                      std::vector<std::string> const& confidence_threshold_marker_names = {},
+                      double confidence_threshold_override = 0.0);
+
+    /// @brief Load anonymous reflective-dot candidates for a sequence.
+    ///
+    /// Reads every `pose_observations` row with `source='dots'` (the
+    /// finalized-data counterpart of a `detection_keypoints` row with
+    /// `region_type='dots'`), decodes each row's variable-length
+    /// count-prefixed `float32[N,8]` blob via `db::decode_dot_candidates()`,
+    /// and undistorts positions the same way `load_observations()` does for labeled
+    /// keypoints.
+    ///
+    /// Not filtered by `person_id`: dot candidates are scene-wide detections,
+    /// not yet tied to any one tracked subject -- that is exactly the
+    /// ambiguity the shared dot-assignment phase resolves at tracking time.
+    ///
+    /// @param sequence_id pose_observation_sequences primary key
+    /// @param cameras Camera map (label → Camera) as returned by load_cameras()
+    /// @return Every candidate across every camera/frame with a `source='dots'`
+    ///         row, ordered by camera then frame. Empty if the sequence has no
+    ///         such rows (every sequence before the dot-detection write path
+    ///         exists).
+    std::vector<UnlabeledCandidate>
+    load_unlabeled_candidates(std::string const& sequence_id,
+                              std::map<std::string, Camera> const& cameras);
 
    private:
+    /// @brief Read pose_observation_sequences.pixels_are_undistorted for sequence_id.
+    /// @return true (safe default for pre-flag data) if NULL or the row is absent.
+    bool load_pixels_are_undistorted(std::string const& sequence_id);
+
+    /// @brief Build camera_instance_id -> Camera const* for every camera actually
+    /// used by this sequence's captured videos, resolved against `cameras`.
+    /// Shared by load_observations() and load_unlabeled_candidates() -- both need
+    /// the identical instance-id-to-Camera resolution.
+    /// @note The returned pointers alias `cameras`; callers must not outlive it.
+    std::unordered_map<std::string, Camera const*>
+    load_instance_camera_map(std::string const& sequence_id,
+                             std::map<std::string, Camera> const& cameras);
+
     sqlite3* db_{};
 
     /// @brief RAII wrapper around a prepared SQLite statement

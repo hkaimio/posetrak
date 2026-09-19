@@ -168,6 +168,21 @@ CREATE TABLE IF NOT EXISTS capture_persons (
     created_at          TEXT NOT NULL
 );
 
+-- The object analog of capture_persons (marker-based-mocap design doc
+-- §4.2): a physical prop instance participating in a capture. Carries no
+-- geometry itself -- that lives in marker_body_definition_id's row; a
+-- tracking skeleton is generated from it (posetrak.skeleton.
+-- marker_body_to_skeleton), not authored here.
+-- marker_body_definition_id -- references marker_body_definitions(id) (this table).
+CREATE TABLE IF NOT EXISTS capture_objects (
+    id                         TEXT PRIMARY KEY,
+    capture_id                 TEXT NOT NULL REFERENCES captures(id),
+    name                       TEXT NOT NULL,
+    marker_body_definition_id  TEXT NOT NULL REFERENCES marker_body_definitions(id),
+    notes                      TEXT,
+    created_at                 TEXT NOT NULL
+);
+
 -- Video files associated with a capture, one per camera.
 -- camera_instance_id     -- references registry: camera_instances(id)
 -- camera_mode_id         -- references registry: camera_modes(id); nullable until wizard sets it
@@ -303,6 +318,19 @@ CREATE TABLE IF NOT EXISTS pose_observation_edits (
 CREATE UNIQUE INDEX IF NOT EXISTS pose_observation_edits_unique
     ON pose_observation_edits (sequence_id, camera_instance_id, video_frame);
 
+-- Keypoint-slot manifest (marker-based-mocap design doc §4.3; the
+-- extensibility seam sketched in docs/data-model-and-storage.md §3). A
+-- sequence with no rows here keeps today's implied-by-pose_model layout;
+-- a sequence with rows (marker-based-mocap object sequences) declares its
+-- own per-slot name/source, e.g. "hilt:c0" / "aruco".
+CREATE TABLE IF NOT EXISTS pose_sequence_keypoints (
+    sequence_id   TEXT NOT NULL REFERENCES pose_observation_sequences(id),
+    keypoint_idx  INTEGER NOT NULL,
+    name          TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    PRIMARY KEY (sequence_id, keypoint_idx)
+);
+
 -- A single tracker execution record
 -- tracker_config_id  -- references registry: tracker_configs(id)
 -- skeleton_id        -- references registry: skeletons(id)
@@ -325,10 +353,13 @@ CREATE TABLE IF NOT EXISTS tracking_runs (
 
 -- Per-person skeleton override within a run (supports multi-person tracking)
 -- skeleton_id -- references registry: skeletons(id)
+-- capture_object_id -- NULL for an actual person; set for a tracked object
+--   (marker-based-mocap design doc §4.2).
 CREATE TABLE IF NOT EXISTS tracking_run_persons (
     run_id     TEXT    NOT NULL REFERENCES tracking_runs(id),
     person_id  INTEGER NOT NULL,
     skeleton_id TEXT   NOT NULL, -- references registry: skeletons(id)
+    capture_object_id TEXT REFERENCES capture_objects(id),
     PRIMARY KEY (run_id, person_id)
 );
 
@@ -435,7 +466,10 @@ CREATE TABLE IF NOT EXISTS detection_runs (
     pose_input_height   INTEGER,
     status              TEXT NOT NULL DEFAULT 'running',
     created_at          TEXT NOT NULL,
-    completed_at        TEXT
+    completed_at        TEXT,
+    detector_type       TEXT NOT NULL DEFAULT 'pose',  -- 'pose', 'aruco', 'blob', ...
+    config_json         TEXT,  -- detector-specific config; see marker-mocap-design.md §4.1
+    capture_object_id   TEXT REFERENCES capture_objects(id)  -- NULL for person (pose) runs
 );
 
 -- Raw keypoints produced by pose estimation, keyed by detection run.

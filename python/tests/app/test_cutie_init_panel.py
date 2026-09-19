@@ -98,6 +98,28 @@ def test_persons_union_detection_track_assignments(qapp, capture_db):
         panel.shutdown()
 
 
+def test_persons_union_capture_objects(qapp, capture_db):
+    """A non-person prop (e.g. a ball tracked purely by segmentation-
+    mask centroid, no coded pattern) registered as a capture_objects row is
+    selectable here too, the same way a capture_persons row is -- foreign
+    keys are off in this fixture (matching every other test here), so the
+    mandatory marker_body_definition_id FK doesn't need a real row behind it
+    for this test's purposes."""
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    capture_db.execute(
+        "INSERT INTO capture_objects (id, capture_id, name, marker_body_definition_id, created_at) "
+        "VALUES ('obj1', 'cap1', 'ball', 'mbd1', '2026-01-01T00:00:00Z')"
+    )
+    capture_db.commit()
+
+    panel = CutieInitPanel(capture_db, "cap1")
+    try:
+        assert panel._persons == ["Alice", "ball"]
+    finally:
+        panel.shutdown()
+
+
 def test_ensure_seg_run_creates_capture_scoped_row(qapp, capture_db):
     """_ensure_seg_run() writes shot_id (not detection_run_id) -- the
     schema-migration half of this feature."""

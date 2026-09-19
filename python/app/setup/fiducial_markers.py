@@ -518,11 +518,48 @@ class MarkerRigConfig:
     the design doc's "Reflective dots" subsection and its Open Questions
     entry). Kept here so a marker body's dots survive the load/save
     round-trip for whenever that future feature is built.
+
+    ``marker_names``: marker_id -> its own ``name`` field. ``marker_corners``/
+    ``marker_dictionaries`` are keyed by id (the literal value a real
+    detection is matched against, per the design doc's "name vs id" note),
+    but a *skeleton generator* consuming this config (marker-based-mocap
+    design doc §5.3) needs the human-authored ``name`` for marker naming
+    (``<name>:c0``..``c3``) -- kept as a side table rather than switching
+    the other two dicts' keys, which would break every existing consumer
+    that looks a marker up by id.
+
+    ``symmetry_axis``: this body's rotational-symmetry axis in body-local
+    coordinates, if the marker body definition declares one (marker-based-
+    mocap design doc §6.1 item 3 -- e.g. a jo's long axis, where roll is
+    both invisible to every camera and physically meaningless). ``None``
+    when absent (the common case). Not yet surfaced by any authoring UI;
+    for now this is set only by hand-written YAML or a characterization
+    script, and consumed only by the skeleton generator to emit a
+    locked-DOF annotation (design §5.3) -- unrelated to detection/anchoring,
+    so nothing else in this module reads it.
+
+    ``reflective_dot_faces``: dot name -> the coded marker *id* (not name)
+    it's mounted on the same physical face as, for a ``reflective_dot``
+    entry that declared an explicit ``same_face_as: <marker name>``
+    (marker-based-mocap self-occlusion-culling design). The skeleton
+    generator uses this to assign the dot the *named* tag's own outward
+    normal directly, in preference to inferring one geometrically (nearest
+    face-plane by signed distance). This was needed on the sword body: two
+    real dots' calibrated positions sit almost exactly on the "wrong" tag's
+    own plane, most likely because the object isn't the simple flat
+    two-plane shape that inference assumes, not because of a calibration
+    error. Only direct physical inspection (which face the dot is actually
+    mounted on) resolves that reliably.
+    Absent (empty) for a dot with no ``same_face_as:`` given, in which
+    case the generator falls back to geometric inference as before.
     """
     rig_id: str
     marker_corners: dict[str, np.ndarray] = field(default_factory=dict)
     marker_dictionaries: dict[str, str] = field(default_factory=dict)
     reflective_dots: dict[str, np.ndarray] = field(default_factory=dict)
+    marker_names: dict[str, str] = field(default_factory=dict)
+    symmetry_axis: np.ndarray | None = None
+    reflective_dot_faces: dict[str, str] = field(default_factory=dict)
 
 
 def load_rig_config(path: str) -> MarkerRigConfig:
@@ -597,6 +634,11 @@ def load_marker_body_yaml(yaml_content: str, *, rig_id: str | None = None) -> Ma
     entries are parsed into ``MarkerRigConfig.reflective_dots`` but never
     fed into ``marker_corners`` -- see that field's docstring for why.
 
+    A top-level ``symmetry_axis: [x, y, z]`` (marker-based-mocap design doc
+    §6.1 item 3), if present, is parsed into ``MarkerRigConfig.symmetry_axis``
+    unchanged -- optional, and ignored by every consumer except the
+    skeleton generator.
+
     Parameters
     ----------
     yaml_content:
@@ -622,12 +664,18 @@ def load_marker_body_yaml(yaml_content: str, *, rig_id: str | None = None) -> Ma
     """
     payload = yaml.safe_load(yaml_content) or {}
     resolved_rig_id = rig_id or payload.get("name", "marker_body")
+    symmetry_axis_raw = payload.get("symmetry_axis")
+    symmetry_axis = (
+        np.array(symmetry_axis_raw, dtype=np.float64) if symmetry_axis_raw is not None else None
+    )
 
     seen_names: set[str] = set()
     seen_ids: set[str] = set()
     marker_corners: dict[str, np.ndarray] = {}
     marker_dictionaries: dict[str, str] = {}
     reflective_dots: dict[str, np.ndarray] = {}
+    marker_names: dict[str, str] = {}
+    reflective_dot_faces_by_name: dict[str, str] = {}  # dot name -> referenced marker NAME (unresolved)
 
     for entry in payload.get("markers") or []:
         name = entry.get("name")
@@ -651,6 +699,9 @@ def load_marker_body_yaml(yaml_content: str, *, rig_id: str | None = None) -> Ma
                     f"marker body {resolved_rig_id!r}: reflective_dot {name!r} needs 'center'"
                 )
             reflective_dots[name] = np.array(center, dtype=np.float64)
+            same_face_as = entry.get("same_face_as")
+            if same_face_as:
+                reflective_dot_faces_by_name[name] = same_face_as
             continue
 
         # Coded marker types (aruco, apriltag, ...): need dictionary + id + geometry.
@@ -682,6 +733,7 @@ def load_marker_body_yaml(yaml_content: str, *, rig_id: str | None = None) -> Ma
                 "a composite-key lookup this loader doesn't implement yet."
             )
         seen_ids.add(marker_id)
+        marker_names[marker_id] = name
 
         if "corners" in entry:
             corners = np.array(entry["corners"], dtype=np.float64)
@@ -707,11 +759,24 @@ def load_marker_body_yaml(yaml_content: str, *, rig_id: str | None = None) -> Ma
         marker_corners[marker_id] = corners
         marker_dictionaries[marker_id] = dictionary
 
+    name_to_id = {v: k for k, v in marker_names.items()}
+    reflective_dot_faces: dict[str, str] = {}
+    for dot_name, ref_name in reflective_dot_faces_by_name.items():
+        if ref_name not in name_to_id:
+            raise ValueError(
+                f"marker body {resolved_rig_id!r}: reflective_dot {dot_name!r}'s "
+                f"same_face_as: {ref_name!r} does not match any coded marker's name in this body"
+            )
+        reflective_dot_faces[dot_name] = name_to_id[ref_name]
+
     return MarkerRigConfig(
         rig_id=resolved_rig_id,
         marker_corners=marker_corners,
         marker_dictionaries=marker_dictionaries,
         reflective_dots=reflective_dots,
+        marker_names=marker_names,
+        symmetry_axis=symmetry_axis,
+        reflective_dot_faces=reflective_dot_faces,
     )
 
 

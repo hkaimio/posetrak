@@ -10,6 +10,7 @@
 #include <sqlite3.h>
 
 #include <array>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <stdexcept>
@@ -197,7 +198,18 @@ static void create_fixture_db() {
             edited_kp_noise_std REAL,
             cross_person_max_world_mm REAL,
             cross_person_min_confidence REAL,
-            cross_person_max_n INTEGER
+            cross_person_max_n INTEGER,
+            dot_streak_velocity_enabled INTEGER,
+            dot_streak_k_window INTEGER,
+            dot_streak_k_min_samples INTEGER,
+            dot_streak_min_displacement_px REAL,
+            dot_streak_min_elongation_px REAL,
+            dot_streak_velocity_noise_std REAL,
+            process_noise_vel_max_multiplier REAL,
+            dot_assignment_gate_mahalanobis REAL,
+            dot_tracklet_gate_multiplier REAL,
+            confidence_threshold_marker_names TEXT,
+            confidence_threshold_override REAL
         );
     )");
 
@@ -315,6 +327,18 @@ static void create_fixture_db() {
             kp_blob BLOB NOT NULL,
             kp_mask BLOB NOT NULL,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        );
+    )");
+    // Keypoint-slot manifest (marker-mocap design doc §4.3) -- a sequence
+    // with no rows here (every fixture row inserted before this table
+    // existed) keeps the legacy COCO-id-implied layout.
+    exec_sql(db, R"(
+        CREATE TABLE pose_sequence_keypoints (
+            sequence_id TEXT NOT NULL REFERENCES pose_observation_sequences(id),
+            keypoint_idx INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            source TEXT NOT NULL,
+            PRIMARY KEY (sequence_id, keypoint_idx)
         );
     )");
 
@@ -528,6 +552,133 @@ static void create_fixture_db() {
                       edit_blob, mask);
     }
 
+    // ---------- Marker-based-mocap object sequence (design doc §7.1) --
+    // source='markers', no 'body' row ever, resolved via
+    // pose_sequence_keypoints instead of a COCO id. Regression fixture for the
+    // "primary-source row is whichever row isn't a recognized overlay, not
+    // hardcoded to the literal name 'body'" fix. ----------
+    exec_sql(db,
+             "INSERT INTO pose_observation_sequences "
+             "(id,shot_id,sync_config_id,time_start_s,time_end_s) "
+             "VALUES ('seq_markers','shot1','sc1',0.0,1.0);");
+    exec_sql(db,
+             "INSERT INTO pose_sequence_keypoints (sequence_id, keypoint_idx, name, source) VALUES "
+             "('seq_markers', 0, 'hilt:c0', 'aruco'),"
+             "('seq_markers', 1, 'hilt:c1', 'aruco'),"
+             "('seq_markers', 2, 'hilt:c2', 'aruco'),"
+             "('seq_markers', 3, 'hilt:c3', 'aruco');");
+    {
+        auto make_marker_blob = [](std::vector<std::array<float, 3>> const& corners) {
+            std::vector<float> kps;
+            for (auto const& c : corners) {
+                kps.push_back(c[0]);
+                kps.push_back(c[1]);
+                kps.push_back(c[2]);
+            }
+            return encode_float32_blob(kps);
+        };
+        auto insert_markers_row = [&](int frame, std::vector<std::array<float, 3>> const& corners) {
+            std::string sql =
+                "INSERT INTO pose_observations "
+                "(sequence_id, camera_instance_id, video_frame, timestamp_s, person_id, source,"
+                " kp_blob, noise_scale) "
+                "VALUES ('seq_markers', 'inst1', " +
+                std::to_string(frame) + ", " + std::to_string(frame * (1.0 / 120.0)) +
+                ", 0, 'markers', ?, 1.0)";
+            sqlite3_stmt* stmt = nullptr;
+            sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
+            auto blob = make_marker_blob(corners);
+            sqlite3_bind_blob(stmt, 1, blob.data(), static_cast<int>(blob.size()), SQLITE_STATIC);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        };
+        // Frame 0: all 4 corners seen.
+        insert_markers_row(0, {{{100.f, 200.f, 1.f}},
+                               {{110.f, 200.f, 1.f}},
+                               {{110.f, 210.f, 1.f}},
+                               {{100.f, 210.f, 1.f}}});
+        // Frame 1: corner 2 not seen (NaN-equivalent: confidence 0) -- must be
+        // filtered by min_confidence, not crash or misalign the other three.
+        insert_markers_row(1, {{{101.f, 201.f, 1.f}},
+                               {{111.f, 201.f, 1.f}},
+                               {{0.f, 0.f, 0.f}},
+                               {{101.f, 211.f, 1.f}}});
+
+        // Frame 2: no 'markers' row at all -- the group's only row is a
+        // synthetic 'hand_l'-sourced one, forcing the null-body_row ("no
+        // base/primary row for this group") branch even though a real
+        // object sequence never actually produces a hand_l overlay row.
+        // Regression fixture for the fix generalizing that branch's
+        // full-width placeholder from the literal kFullBodyNKp=133 (a
+        // COCO-133 person assumption) to this sequence's own manifest
+        // width (4, from the pose_sequence_keypoints rows above) --
+        // without it, applying the frame-2 edit below (sized to the real
+        // 4-keypoint manifest width) against a synthesized 133-wide
+        // placeholder throws "edit blob has 4 keypoints, expected 133".
+        insert_markers_row(2, {{{1.f, 2.f, 1.f}}});  // 1 corner only; source overridden below
+        exec_sql(db,
+                 "UPDATE pose_observations SET source='hand_l' "
+                 "WHERE sequence_id='seq_markers' AND video_frame=2");
+
+        std::vector<float> edit_kps(4 * 3, 0.f);
+        edit_kps[0 * 3 + 0] = 300.f;
+        edit_kps[0 * 3 + 1] = 301.f;
+        edit_kps[0 * 3 + 2] = 0.f;  // is_outlier=0 -> apply x/y, confidence=1
+        auto edit_blob = encode_float32_blob(edit_kps);
+
+        std::vector<uint8_t> mask(1, 0);  // ceil(4/8) = 1 byte
+        mask[0] |= 1u;                    // slot 0 only
+
+        bind_and_step(db,
+                      "INSERT INTO pose_observation_edits "
+                      "(id, sequence_id, camera_instance_id, video_frame, kp_blob, kp_mask) "
+                      "VALUES ('edit_markers_ghost', 'seq_markers', 'inst1', 2, ?, ?)",
+                      edit_blob, mask);
+
+        // ---------- Anonymous reflective-dot candidates on the same sequence
+        // (source='dots'): person_id=0 as a placeholder -- dot candidates are
+        // scene-wide, not tied to a tracked subject, but pose_observations'
+        // primary key still requires one. A different candidate count per
+        // frame (3, then 1) exercises the variable-N blob width. ----------
+        // Count-prefixed format: int32 candidate count, then
+        // float32[count, 9] (px, py, area, compactness, major_axis,
+        // minor_axis, dir_x, dir_y, tracklet_id) -- see db_cache.py's
+        // encode_dot_candidates().
+        auto make_dots_blob = [](std::vector<std::array<float, 9>> const& candidates) {
+            std::vector<uint8_t> out;
+            auto const n = static_cast<int32_t>(candidates.size());
+            out.resize(sizeof(int32_t));
+            std::memcpy(out.data(), &n, sizeof(int32_t));
+            std::vector<float> vals;
+            for (auto const& c : candidates) {
+                vals.insert(vals.end(), c.begin(), c.end());
+            }
+            auto payload = encode_float32_blob(vals);
+            out.insert(out.end(), payload.begin(), payload.end());
+            return out;
+        };
+        auto insert_dots_row = [&](int frame, std::vector<std::array<float, 9>> const& candidates) {
+            std::string sql =
+                "INSERT INTO pose_observations "
+                "(sequence_id, camera_instance_id, video_frame, timestamp_s, person_id, source,"
+                " kp_blob, noise_scale) "
+                "VALUES ('seq_markers', 'inst1', " +
+                std::to_string(frame) + ", " + std::to_string(frame * (1.0 / 120.0)) +
+                ", 0, 'dots', ?, NULL)";
+            sqlite3_stmt* stmt = nullptr;
+            sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
+            auto blob = make_dots_blob(candidates);
+            sqlite3_bind_blob(stmt, 1, blob.data(), static_cast<int>(blob.size()), SQLITE_STATIC);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        };
+        // px, py, area, compactness, major_axis, minor_axis, dir_x, dir_y, tracklet_id
+        insert_dots_row(0, {{{400.f, 500.f, 12.5f, 0.90f, 4.0f, 4.0f, 0.0f, 0.0f, 7.0f}},
+                            {{410.f, 505.f, 10.0f, 0.85f, 3.6f, 3.6f, 0.0f, 0.0f, -1.0f}},
+                            {{420.f, 510.f, 15.0f, 0.92f, 4.4f, 4.4f, 0.0f, 0.0f, -1.0f}}});
+        insert_dots_row(1, {{{450.f, 460.f, 8.0f, 0.80f, 3.2f, 3.2f, 0.6f, 0.8f, 7.0f}}});
+    }
+
     sqlite3_close(db);
 }
 
@@ -570,6 +721,26 @@ static Skeleton make_test_skeleton_with_hands() {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: root-only "prop" skeleton with track/landmark-bound markers (no
+// coco_id at all) -- design doc §5.1/§5.3, resolved via pose_sequence_keypoints
+// rather than a COCO id.
+// ---------------------------------------------------------------------------
+static Skeleton make_test_object_skeleton() {
+    Skeleton s;
+    s.add_joint("prop_root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
+    s.add_input_track("prop_markers", "labeled_points");
+    s.add_marker("hilt:c0", 0, Eigen::Vector3d(0.0, 0.0, 0.0), std::nullopt, "prop_markers",
+                 "hilt:c0");
+    s.add_marker("hilt:c1", 0, Eigen::Vector3d(0.05, 0.0, 0.0), std::nullopt, "prop_markers",
+                 "hilt:c1");
+    s.add_marker("hilt:c2", 0, Eigen::Vector3d(0.05, 0.05, 0.0), std::nullopt, "prop_markers",
+                 "hilt:c2");
+    s.add_marker("hilt:c3", 0, Eigen::Vector3d(0.0, 0.05, 0.0), std::nullopt, "prop_markers",
+                 "hilt:c3");
+    return s;
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -600,6 +771,21 @@ TEST_CASE("SessionReader load_tracker_config", "[session_reader]") {
     REQUIRE(cfg.tracker.cross_person_min_confidence ==
             Catch::Approx(TrackerConfig{}.cross_person_min_confidence));
     REQUIRE(cfg.tracker.cross_person_max_n == TrackerConfig{}.cross_person_max_n);
+    REQUIRE(cfg.tracker.dot_streak_velocity_enabled == TrackerConfig{}.dot_streak_velocity_enabled);
+    REQUIRE(cfg.tracker.dot_streak_k_window == TrackerConfig{}.dot_streak_k_window);
+    REQUIRE(cfg.tracker.dot_streak_k_min_samples == TrackerConfig{}.dot_streak_k_min_samples);
+    REQUIRE(cfg.tracker.dot_streak_min_displacement_px ==
+            Catch::Approx(TrackerConfig{}.dot_streak_min_displacement_px));
+    REQUIRE(cfg.tracker.dot_streak_min_elongation_px ==
+            Catch::Approx(TrackerConfig{}.dot_streak_min_elongation_px));
+    REQUIRE(cfg.tracker.dot_streak_velocity_noise_std ==
+            Catch::Approx(TrackerConfig{}.dot_streak_velocity_noise_std));
+    REQUIRE(cfg.tracker.process_noise_vel_max_multiplier ==
+            Catch::Approx(TrackerConfig{}.process_noise_vel_max_multiplier));
+    REQUIRE(cfg.tracker.dot_assignment_gate_mahalanobis ==
+            Catch::Approx(TrackerConfig{}.dot_assignment_gate_mahalanobis));
+    REQUIRE(cfg.tracker.dot_tracklet_gate_multiplier ==
+            Catch::Approx(TrackerConfig{}.dot_tracklet_gate_multiplier));
 }
 
 TEST_CASE("SessionReader load_sequence_info", "[session_reader]") {
@@ -855,4 +1041,150 @@ TEST_CASE("SessionReader load_observations lets hand_l.refined override hand_l",
     // 'hand_r' row still applies untouched.
     REQUIRE(frame3[3].position_distorted.x() == Catch::Approx(173.0));
     REQUIRE(frame3[3].crop_scale == Catch::Approx(0.43));
+}
+
+// ---------------------------------------------------------------------------
+// Marker-based-mocap object sequences (design doc §7.1):
+// source='markers' rows, resolved via pose_sequence_keypoints instead of a
+// COCO id. Regression test for the exact bug this fix addresses: the
+// primary/base-layer row used to be found by literal name =='body', so an
+// object sequence's 'markers' row was never recognised as the base layer and
+// every one of its keypoints was silently discarded (mirrors the Python-side
+// observation_merge.py bug).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SessionReader load_observations resolves a manifest-bound (markers-source) sequence",
+          "[session_reader]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    auto cameras = reader.load_cameras_for_sequence("seq_markers");
+    auto skeleton = make_test_object_skeleton();
+
+    auto obs_set = reader.load_observations("seq_markers", cameras, skeleton, 0.1, 0);
+    auto const& seq = obs_set.sequences().begin()->second;
+
+    // Frame 0: all 4 corners above the confidence threshold.
+    std::vector<Observation> frame0;
+    for (auto const& o : seq.observations)
+        if (o.frame_idx == 0)
+            frame0.push_back(o);
+    REQUIRE(frame0.size() == 4);
+    // Observations come out in ascending manifest-index order (0..3), i.e.
+    // marker_id order hilt:c0, c1, c2, c3 -- confirming resolve_marker_idx
+    // correctly mapped each manifest slot to its skeleton marker, not just
+    // "found something".
+    REQUIRE(frame0[0].position_distorted.x() == Catch::Approx(100.0));
+    REQUIRE(frame0[0].position_distorted.y() == Catch::Approx(200.0));
+    REQUIRE(frame0[1].position_distorted.x() == Catch::Approx(110.0));
+    REQUIRE(frame0[2].position_distorted.x() == Catch::Approx(110.0));
+    REQUIRE(frame0[2].position_distorted.y() == Catch::Approx(210.0));
+    REQUIRE(frame0[3].position_distorted.x() == Catch::Approx(100.0));
+
+    // Frame 1: corner index 2 has confidence 0 -- filtered by min_confidence,
+    // the other three still come through unaffected.
+    std::vector<Observation> frame1;
+    for (auto const& o : seq.observations)
+        if (o.frame_idx == 1)
+            frame1.push_back(o);
+    REQUIRE(frame1.size() == 3);
+    REQUIRE(frame1[0].position_distorted.x() == Catch::Approx(101.0));
+    REQUIRE(frame1[1].position_distorted.x() == Catch::Approx(111.0));
+    REQUIRE(frame1[2].position_distorted.x() == Catch::Approx(101.0));
+    REQUIRE(frame1[2].position_distorted.y() == Catch::Approx(211.0));
+}
+
+TEST_CASE(
+    "SessionReader load_observations uses manifest width, not COCO-133, "
+    "for an object sequence's null-body_row placeholder",
+    "[session_reader]") {
+    // Frame 2 of seq_markers has no real 'markers' row -- its only row is a
+    // synthetic 'hand_l'-sourced one, forcing the "no base/primary row for
+    // this group" branch. Before this fix, that branch always synthesized a
+    // 133-wide (kFullBodyNKp) placeholder, so applying frame 2's 4-wide edit
+    // (matching this sequence's real pose_sequence_keypoints manifest width)
+    // threw "edit blob has 4 keypoints, expected 133" instead of applying.
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    auto cameras = reader.load_cameras_for_sequence("seq_markers");
+    auto skeleton = make_test_object_skeleton();
+
+    auto obs_set = reader.load_observations("seq_markers", cameras, skeleton, 0.1, 0);
+    auto const& seq = obs_set.sequences().begin()->second;
+
+    std::vector<Observation> frame2;
+    for (auto const& o : seq.observations)
+        if (o.frame_idx == 2)
+            frame2.push_back(o);
+    // Only the edited slot (0) clears min_confidence -- the other 3 slots
+    // of the synthesized placeholder stay confidence 0 and get filtered.
+    REQUIRE(frame2.size() == 1);
+    REQUIRE(frame2[0].position_distorted.x() == Catch::Approx(300.0));
+    REQUIRE(frame2[0].position_distorted.y() == Catch::Approx(301.0));
+}
+
+TEST_CASE("SessionReader load_unlabeled_candidates decodes a variable-N dot blob per frame",
+          "[session_reader]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    auto cameras = reader.load_cameras_for_sequence("seq_markers");
+    auto candidates = reader.load_unlabeled_candidates("seq_markers", cameras);
+
+    // pixels_are_undistorted defaults to 1 for this sequence, so position ==
+    // position_distorted -- both checked to confirm the field is actually
+    // populated, not left default-constructed.
+    std::vector<UnlabeledCandidate> frame0;
+    std::vector<UnlabeledCandidate> frame1;
+    for (auto const& c : candidates) {
+        REQUIRE(c.camera_id == cameras.at("cam1").id());
+        REQUIRE(c.position.isApprox(c.position_distorted));
+        if (c.frame_idx == 0)
+            frame0.push_back(c);
+        else if (c.frame_idx == 1)
+            frame1.push_back(c);
+    }
+
+    REQUIRE(frame0.size() == 3);
+    REQUIRE(frame0[0].position.x() == Catch::Approx(400.0));
+    REQUIRE(frame0[0].position.y() == Catch::Approx(500.0));
+    REQUIRE(frame0[0].area == Catch::Approx(12.5));
+    REQUIRE(frame0[0].compactness == Catch::Approx(0.90));
+    REQUIRE(frame0[0].major_axis == Catch::Approx(4.0));
+    REQUIRE(frame0[0].minor_axis == Catch::Approx(4.0));
+    REQUIRE(frame0[0].dir_x == Catch::Approx(0.0));
+    REQUIRE(frame0[0].dir_y == Catch::Approx(0.0));
+    REQUIRE(frame0[0].tracklet_id == 7);
+    REQUIRE(frame0[1].position.x() == Catch::Approx(410.0));
+    REQUIRE(frame0[1].tracklet_id == -1);
+    REQUIRE(frame0[2].position.x() == Catch::Approx(420.0));
+    // No per-candidate detector confidence exists in the blob -- always 1.0.
+    REQUIRE(frame0[0].confidence == Catch::Approx(1.0));
+
+    REQUIRE(frame1.size() == 1);
+    REQUIRE(frame1[0].position.x() == Catch::Approx(450.0));
+    REQUIRE(frame1[0].position.y() == Catch::Approx(460.0));
+    REQUIRE(frame1[0].area == Catch::Approx(8.0));
+    REQUIRE(frame1[0].compactness == Catch::Approx(0.80));
+    REQUIRE(frame1[0].dir_x == Catch::Approx(0.6));
+    REQUIRE(frame1[0].dir_y == Catch::Approx(0.8));
+    REQUIRE(frame1[0].tracklet_id == 7);
+
+    // seq_markers' own labeled 'markers'/'hand_l' rows must not leak in --
+    // load_unlabeled_candidates() is source='dots' only.
+    REQUIRE(candidates.size() == 4);
+}
+
+TEST_CASE("SessionReader load_unlabeled_candidates returns empty for a sequence with no dots rows",
+          "[session_reader]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    // seq1 (the plain person sequence used by the basic load_observations
+    // test below) has no source='dots' rows at all -- every sequence before
+    // the dot-detection write path exists looks like this.
+    auto cameras = reader.load_cameras_for_sequence("seq1");
+    auto candidates = reader.load_unlabeled_candidates("seq1", cameras);
+    REQUIRE(candidates.empty());
 }

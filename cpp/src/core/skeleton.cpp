@@ -53,7 +53,8 @@ uint32_t Skeleton::add_joint(std::string const& name, std::optional<uint32_t> pa
 }
 
 uint32_t Skeleton::add_marker(std::string const& name, uint32_t joint_index,
-                              Eigen::Vector3d const& local_pos, std::optional<int> coco_id) {
+                              Eigen::Vector3d const& local_pos, std::optional<int> coco_id,
+                              std::string const& track, std::string const& landmark) {
     // Check for duplicates
     for (auto const& existing : markers_) {
         if (existing.name == name) {
@@ -68,9 +69,21 @@ uint32_t Skeleton::add_marker(std::string const& name, uint32_t joint_index,
     }
 
     uint32_t index = static_cast<uint32_t>(markers_.size());
-    markers_.push_back(Marker{name, joint_index, local_pos, coco_id, ""});
+    markers_.push_back(Marker{name, joint_index, local_pos, coco_id, "", track, landmark});
 
     return index;
+}
+
+void Skeleton::add_input_track(std::string const& id, std::string const& type) {
+    input_tracks_.push_back(InputTrack{id, type});
+}
+
+InputTrack const* Skeleton::get_input_track(std::string const& id) const {
+    for (auto const& t : input_tracks_) {
+        if (t.id == id)
+            return &t;
+    }
+    return nullptr;
 }
 
 void Skeleton::set_joint_limits(uint32_t joint_index, std::array<Eigen::Vector2d, 3> const& limits,

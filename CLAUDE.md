@@ -157,7 +157,7 @@ uv run posetrak-mcp --db-path /path/to/session.db
 **Key schema notes for server development:**
 
 - `tracking_runs.active_camera_ids` — JSON array of camera **labels** (e.g. `"gopro-11_mini_01"`), not UUIDs. `get_run_cameras()` in `db.py` resolves these to `camera_instances.id` UUIDs so they match `extrinsic_entries` and `pose_observation_edits`.
-- `tracking_obs_results.obs_blob` — `float32[n_cam, n_mrk, 8]`: fields are `[actual_x, actual_y, pred_x, pred_y, mahal_dist, used (1=inlier), is_outlier, pad]`. NaN actual_x means no observation for that camera/marker slot.
+- `tracking_obs_results.obs_blob` — `float32[n_cam, n_mrk, 8]`: fields are `[actual_x, actual_y, pred_x, pred_y, mahal_dist, used (1=inlier), is_outlier, mode]`. NaN actual_x means no observation for that camera/marker slot. `mode` (0=POSITION, 1=VELOCITY, 2=PAIR_DIFF, matching `MeasurementMode`) says what `actual_x/y` and `pred_x/y` actually are: only `mode==0` (POSITION) means they're absolute undistorted pixels — VELOCITY means a frame-to-frame pixel delta, PAIR_DIFF a child-minus-parent offset. Always check `mode` before treating `actual_x/y` as a position; see `docs/roadmap/features/observation-results-semantics.md` for the real bugs this ambiguity has caused twice.
 - Always open session DBs read-only: `sqlite3.connect(f"file:{path}?mode=ro", uri=True)`.
 
 ### Python Package
@@ -166,7 +166,13 @@ The `python/` directory contains the installable `posetrak` Python package:
 
 - `python/posetrak/db/` — SQLite DB layer (install with `pip install -e .`)
 - `python/app/analysis/` — Marimo analysis scripts (formerly `notebooks/`)
-- `python/tools/` — standalone utility scripts
+- `python/tools/` — standalone utility scripts. Marker-mocap scripts are grouped by role:
+  `prototypes/` (exploratory; index says what absorbed each), `prototypes/superseded/`
+  (deleted when the replacing workstream lands), `gt/` (ground-truth labeling and metric
+  harness), `blender/` (Blender scene and 2D-track scripts). Scripts import each other as
+  `tools.<module>` with `python/` on `sys.path`, so a moved script needs its imports and
+  `sys.path` depth updated. Capture-specific results (calibrated attachment sets,
+  dot-augmented skeletons) live beside the session DB, not in `catalog/`.
 - `python/tests/` — pytest suite; run with `pytest python/tests/`
 - `python/pipeline/` — capture pipeline tools (calibration, pose extraction)
 
@@ -208,6 +214,19 @@ the pose/detection pipeline:
   row and copy the old run's rows onto it via `INSERT...SELECT` instead of
   mutating the original in place.
 
+**Objects and marker detection.** A tracked rigid prop is a `capture_objects` row
+(`marker_body_definition_id` names its geometry), the counterpart of `capture_persons`.
+`detection_runs.detector_type` is `'pose'` (default; every pre-existing row) or `'aruco'`
+(marker runs; reflective-dot detection currently rides in an `'aruco'` run, with its
+parameters under `dot_detection` in `config_json`). `detection_runs.capture_object_id` is
+NULL for person runs. `tracking_run_persons.capture_object_id` is set when a subject of a
+tracking run is an object; `person_id` is a subject index either way. A sequence whose
+`kp_blob` is not a person pose model's layout carries a `pose_sequence_keypoints` manifest
+(`keypoint_idx`, `name`, `source`); a sequence with no manifest rows keeps the layout
+implied by `pose_model`. `SessionReader` matches manifest `name` against `Marker::landmark`.
+See `docs/data-model-and-storage.md` §3 and
+`docs/roadmap/features/marker-based-mocap/productization-architecture-and-plan.md`.
+
 ### Design principle: automation vs. prior human edits
 
 When a new automated write-path can conflict with a prior human edit (e.g. an
@@ -227,6 +246,24 @@ for a worked example of both the failed first approach and why it failed.
 ## Code Style
 
 C++20, enforced via clang-format (pre-commit hook). All linear algebra uses Eigen. All string formatting uses `fmt`. Use `std::optional`, concepts, and ranges where natural.
+
+### Comments and design documents
+
+Source files and design documents must stay self-descriptive when read years
+from now by someone who does not know, or care, how the feature was developed.
+A comment explains the implementation and justifies a choice where the reason
+is not obvious. It does not narrate how the code got that way.
+
+- No dates, people's names, planning phase or step IDs, or references to a chat
+  or review discussion ("found that…", "the first version did…", "used to…",
+  "after a sweep against…") in application code or its tests. Development
+  history belongs in commit messages and status documents.
+- Do not point at `status.md` from source: many files share that name and they
+  will eventually be archived. Put the information in a design document under
+  `docs/roadmap/features/` or in the comment itself.
+- Findings and learnings are worth keeping, expressed generically: the failure
+  mode, the relevant numbers, and why the design follows from them.
+- Prototype scripts under `python/tools/prototypes/` are exempt.
 
 ## Git conventions
 

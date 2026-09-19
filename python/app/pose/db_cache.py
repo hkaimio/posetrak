@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import datetime
+import json
 import sqlite3
+import struct
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -60,6 +62,8 @@ def create_detection_run(
     pose_conf_threshold: float = 0.3,
     pose_input_width: int = 0,
     pose_input_height: int = 0,
+    detector_type: str = "pose",
+    config_json: str | None = None,
 ) -> str:
     run_id = generate_id()
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -68,14 +72,99 @@ def create_detection_run(
         "(id, shot_id, sync_config_id, trial_id, time_start_s, time_end_s, "
         " detector_model, pose_model, detector_version, pose_version, "
         " detector_conf, pose_conf_threshold, "
-        " pose_input_width, pose_input_height, status, created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'running',?)",
+        " pose_input_width, pose_input_height, status, created_at, "
+        " detector_type, config_json) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'running',?,?,?)",
         (run_id, shot_id, sync_config_id, trial_id, time_start_s, time_end_s,
          detector_model, pose_model, detector_version, pose_version,
          detector_conf, pose_conf_threshold,
-         pose_input_width, pose_input_height, now),
+         pose_input_width, pose_input_height, now,
+         detector_type, config_json),
     )
     session.commit()
+    return run_id
+
+
+def create_marker_detection_run(
+    session: sqlite3.Connection,
+    shot_id: str,
+    sync_config_id: str,
+    time_start_s: float,
+    time_end_s: float,
+    dictionary: str,
+    marker_ids: list[str],
+    min_marker_perimeter_rate: float | None = None,
+    frame_step: int = 1,
+    trial_id: str | None = None,
+    capture_object_id: str | None = None,
+    marker_body_definition_id: str | None = None,
+    dot_detection_config: dict | None = None,
+) -> str:
+    """Create a detection_runs row for an ArUco marker detection pass.
+
+    The standalone case gives *dictionary*/*marker_ids* directly, with no
+    `marker_body_definitions`/`capture_objects` row involved
+    (marker-mocap-design.md §7.1). `MarkerDetectionPipeline` driven through
+    `load_pipeline_for_capture_object` additionally passes
+    *capture_object_id* and *marker_body_definition_id* once a real
+    object/registered body drives the run. `config_json`'s
+    `marker_ids` is the corner-blob decode key for `detection_keypoints`
+    (§4.1) in both cases: a run's coded-marker corner slots are ordered
+    list-position-major by this list, so re-deriving the blob layout later
+    only ever needs this one field, not a second lookup -- even for a
+    marker-body-driven run, where *dictionary* itself is only a best-effort
+    single value (a body spanning more than one ArUco dictionary has no one
+    right answer for it; the per-marker dictionaries live in the marker
+    body definition itself, reachable via `marker_body_definition_id`).
+
+    `capture_object_id` also becomes `detection_runs.capture_object_id`
+    (not just a `config_json` field) so a run's object is directly
+    queryable -- `config_json.marker_ids` alone can't disambiguate two
+    `capture_objects` rows that reference the *same* marker body
+    definition (e.g. two physically-identical props in one capture),
+    mirroring why `tracking_run_persons.capture_object_id` (design §4.2)
+    is an explicit column rather than left as convention.
+
+    `dot_detection_config`, when given, is recorded verbatim under
+    `config_json["dot_detection"]` -- whatever dot-detection settings
+    (`MarkerDetectionPipeline`'s `dot_bg_subtract`/`dot_max_saturation`/
+    `dot_bg_sample_count`) were actually used for this run,
+    purely for later inspection/reproducibility, the same way every other
+    detector setting above is recorded.
+    """
+    config = {
+        "dictionary": dictionary,
+        "marker_ids": list(marker_ids),
+        "min_marker_perimeter_rate": min_marker_perimeter_rate,
+        "frame_step": frame_step,
+    }
+    if marker_body_definition_id is not None:
+        config["marker_body_definition_id"] = marker_body_definition_id
+    if capture_object_id is not None:
+        config["capture_object_id"] = capture_object_id
+    if dot_detection_config is not None:
+        # Recorded here (not a separate table) for the same reason every other
+        # detector setting above is -- so a run can be inspected/reproduced later.
+        # See dot_blob_detector.py's docstring for what these settings mean.
+        config["dot_detection"] = dot_detection_config
+    run_id = create_detection_run(
+        session,
+        shot_id=shot_id,
+        sync_config_id=sync_config_id,
+        time_start_s=time_start_s,
+        time_end_s=time_end_s,
+        detector_model=f"aruco:{dictionary}",
+        pose_model="",  # no pose model for a marker run; NOT NULL, so "" not NULL
+        trial_id=trial_id,
+        detector_type="aruco",
+        config_json=json.dumps(config),
+    )
+    if capture_object_id is not None:
+        session.execute(
+            "UPDATE detection_runs SET capture_object_id = ? WHERE id = ?",
+            (capture_object_id, run_id),
+        )
+        session.commit()
     return run_id
 
 
@@ -249,6 +338,261 @@ class DetectionBatchWriter:
             self._session.commit()
 
 
+# ---------------------------------------------------------------------------
+# Coded-marker (ArUco) keypoint writer
+# ---------------------------------------------------------------------------
+
+MARKER_TRACK_ID = 0       # one prop = one track (aruco-prop-tracking-design.md)
+MARKER_REGION_TYPE = "markers"
+
+# The tracker's measurement noise splits into two independent pieces
+# (Observation::measurement_noise_std(ep, ec) = ep*crop_scale + ec):
+# ep ("pose_noise_std") is the detection algorithm's own localization error,
+# scaled by crop_scale -- how much the algorithm's fixed input resolution
+# was stretched to cover the real-world crop, so a farther/bigger bbox
+# means more real pixels of error per network-input pixel. ec
+# ("calib_noise_std") is camera-specific error (extrinsics inaccuracy,
+# autofocus drift affecting intrinsics, ...) that applies regardless of
+# detection method. A coded ArUco corner is found by direct sub-pixel
+# corner refinement on the full-resolution frame -- there is no
+# fixed-input-resolution network stage for crop_scale to describe, and the
+# corner-finding error itself is negligible next to ec -- so crop_scale
+# should be ~0 for markers (letting ec alone dominate), not the person
+# pipeline's 1.0 default. Reusing that default would apply the full ep
+# contribution meant for a markerless pose network, under-trusting
+# sub-pixel-precise corners relative to a ~5-25px interpolated keypoint.
+_MARKER_CROP_SCALE = 0.0
+
+
+class MarkerKeypointWriter:
+    """Accumulates coded-marker corner rows and flushes to DB in batches.
+
+    Fixed-slot layout per marker-mocap-design.md §4.1: one row per (frame,
+    camera), track_id=0, region_type='markers'. The blob is
+    float32[4 * len(marker_ids), 3] (x, y, confidence), ordered
+    list-position-major by *marker_ids* with corners 0-3 within each
+    marker (real ``cv2.aruco`` corner order -- see
+    ``fiducial_markers.ArucoDetector``'s own docstring). A marker not seen
+    in a given frame keeps NaN x/y and confidence 0 at its slot -- exactly
+    an occluded keypoint, so the same NaN-handling code paths used for pose
+    keypoints apply unchanged.
+    """
+
+    def __init__(
+        self,
+        session: sqlite3.Connection,
+        detection_run_id: str,
+        shot_video_id: str,
+        marker_ids: list[str],
+    ) -> None:
+        self._session = session
+        self._run_id = detection_run_id
+        self._svid = shot_video_id
+        self._marker_ids = list(marker_ids)
+        self._slot_of = {mid: i for i, mid in enumerate(self._marker_ids)}
+        self._rows: list[tuple] = []
+
+    def add_frame(self, video_frame: int, detections: list) -> None:
+        """*detections* is the ``ArucoDetector.detect()`` result for this frame."""
+        n = len(self._marker_ids)
+        kp = np.full((4 * n, 3), np.nan, dtype=np.float32)
+        kp[:, 2] = 0.0  # confidence -- overwritten to 1.0 per corner actually seen
+        for det in detections:
+            slot = self._slot_of.get(det.marker_id)
+            if slot is None:
+                continue  # a marker outside this prop's configured id list -- ignore
+            for corner in det.corners:
+                idx = slot * 4 + corner.corner_index
+                kp[idx, 0] = corner.px
+                kp[idx, 1] = corner.py
+                kp[idx, 2] = 1.0
+        self._rows.append((
+            self._run_id, self._svid, video_frame, MARKER_TRACK_ID, MARKER_REGION_TYPE,
+            kp.tobytes(), _MARKER_CROP_SCALE,
+        ))
+        if len(self._rows) >= _BATCH_SIZE:
+            self._flush()
+
+    def _flush(self) -> None:
+        if self._rows:
+            self._session.executemany(
+                "INSERT OR REPLACE INTO detection_keypoints "
+                "(detection_run_id, shot_video_id, video_frame, track_id, region_type, "
+                " keypoints, noise_scale) "
+                "VALUES (?,?,?,?,?,?,?)",
+                self._rows,
+            )
+            self._rows.clear()
+            self._session.commit()
+
+    def finalise(self) -> None:
+        """Flush remaining rows."""
+        self._flush()
+
+
+# ---------------------------------------------------------------------------
+# Anonymous reflective-dot candidate writer -- see
+# docs/roadmap/features/marker-based-mocap/dot-assignment-architecture-design.md
+# ---------------------------------------------------------------------------
+
+DOT_TRACK_ID = 0       # dots are scene-wide, not tied to any one tracked
+                       # subject -- reuses the "one implicit subject" slot
+                       # MARKER_TRACK_ID already established for this table.
+DOT_REGION_TYPE = "dots"
+
+# Same reasoning as _MARKER_CROP_SCALE above: a dot's centroid comes from
+# thresholding + connected components directly on the full-resolution frame,
+# not a fixed-input-resolution network's output, so there is no crop_scale
+# to describe -- letting Observation::measurement_noise_std()'s calibration
+# term (ec) alone dominate, rather than double-counting a pose-network-style
+# detection error that doesn't apply here.
+_DOT_CROP_SCALE = 0.0
+
+# px, py, area, compactness, major_axis_px, minor_axis_px, dir_x, dir_y,
+# tracklet_id -- see encode_dot_candidates() for the blob layout these are
+# packed into.
+_DOT_CANDIDATE_FLOATS = 9
+
+
+def encode_dot_candidates(candidates: list) -> bytes:
+    """Encode one frame's dot_blob_detector.BlobCandidate list into the
+    'dots' blob format: a little-endian int32 candidate count, followed by
+    float32[count, 9] (px, py, area, compactness, major_axis_px,
+    minor_axis_px, dir_x, dir_y, tracklet_id). The major/minor axis pair
+    `resolve_dot_assignment()` (dot_assignment.cpp) uses to inflate a
+    motion-blur streak's measurement noise; dir_x/dir_y is the streak's own
+    (canonicalized, direction-ambiguous) unit axis (see
+    dot_blob_detector.py), feeding the streak-velocity design
+    (docs/roadmap/features/marker-based-mocap/streak-velocity-design.md);
+    tracklet_id (dot_tracklet.py) is a per-camera frame-to-frame identity
+    `resolve_dot_assignment()` uses to relax its own assignment gate for a
+    candidate continuing an already-established track -- stored as a float
+    (exact for any realistic per-capture tracklet count, well under 2^24) to
+    keep this one flat float32 array rather than a mixed-type layout.
+
+    Explicitly versioned via a leading count field, rather than inferring
+    N from raw byte length the way the original float32[N,4] format did:
+    byte-length inference is genuinely ambiguous once the per-candidate
+    width changes -- some real candidate counts make an old-format blob's
+    length also land on an exact multiple of a new, wider stride, decoding
+    as a different (wrong) N silently rather than failing loudly. A count
+    prefix removes the ambiguity outright, at the cost of earlier layouts
+    (float32[N,4], [N,6] and [N,8]) no longer being decodable. They are not
+    migrated: a run written in an older layout is re-detected.
+    """
+    arr = np.array(
+        [(c.cx, c.cy, c.area, c.compactness, c.major_axis_px, c.minor_axis_px,
+          c.dir_x, c.dir_y, c.tracklet_id)
+         for c in candidates],
+        dtype=np.float32,
+    ).reshape(len(candidates), _DOT_CANDIDATE_FLOATS)
+    return struct.pack("<i", len(candidates)) + arr.tobytes()
+
+
+def decode_dot_candidates(blob: bytes) -> np.ndarray:
+    """Decode a 'dots' blob (see encode_dot_candidates()) -> float32[N, 9]."""
+    if len(blob) < 4:
+        raise ValueError(f"dot candidate blob too short: {len(blob)} bytes")
+    (n,) = struct.unpack_from("<i", blob, 0)
+    expected_bytes = 4 + n * _DOT_CANDIDATE_FLOATS * 4
+    if n < 0 or len(blob) != expected_bytes:
+        raise ValueError(
+            f"dot candidate blob malformed, or written in an older "
+            f"format: header says {n} candidates ({expected_bytes} "
+            f"bytes expected), got {len(blob)} bytes -- re-run detection"
+        )
+    return np.frombuffer(blob, dtype=np.float32, offset=4).reshape(n, _DOT_CANDIDATE_FLOATS)
+
+
+class DotCandidateWriter:
+    """Accumulates anonymous reflective-dot candidate rows and flushes to DB
+    in batches.
+
+    Unlike MarkerKeypointWriter's fixed-slot layout, a frame's candidate
+    count is whatever the detector actually found (dot-assignment-
+    architecture-design.md §3) -- see encode_dot_candidates() for the blob
+    layout. Always writes a row even when N=0, so "this frame was
+    processed and saw nothing" stays distinguishable from "this frame was
+    never processed" -- the same reasoning MarkerKeypointWriter's
+    always-write-a-row behavior follows.
+    """
+
+    def __init__(
+        self,
+        session: sqlite3.Connection,
+        detection_run_id: str,
+        shot_video_id: str,
+    ) -> None:
+        self._session = session
+        self._run_id = detection_run_id
+        self._svid = shot_video_id
+        self._rows: list[tuple] = []
+
+    def add_frame(self, video_frame: int, candidates: list) -> None:
+        """*candidates* is the ``dot_blob_detector.detect_blobs()`` result
+        for this frame (a list of ``BlobCandidate``)."""
+        self._rows.append((
+            self._run_id, self._svid, video_frame, DOT_TRACK_ID, DOT_REGION_TYPE,
+            encode_dot_candidates(candidates), _DOT_CROP_SCALE,
+        ))
+        if len(self._rows) >= _BATCH_SIZE:
+            self._flush()
+
+    def _flush(self) -> None:
+        if self._rows:
+            self._session.executemany(
+                "INSERT OR REPLACE INTO detection_keypoints "
+                "(detection_run_id, shot_video_id, video_frame, track_id, region_type, "
+                " keypoints, noise_scale) "
+                "VALUES (?,?,?,?,?,?,?)",
+                self._rows,
+            )
+            self._rows.clear()
+            self._session.commit()
+
+    def finalise(self) -> None:
+        """Flush remaining rows."""
+        self._flush()
+
+
+def read_dot_candidates_for_run(
+    session: sqlite3.Connection,
+    detection_run_id: str,
+    shot_video_id: str,
+) -> dict[int, np.ndarray]:
+    """Return {video_frame: float32[N, 6]} for a dot-candidate detection run.
+
+    See decode_dot_candidates() for the blob layout.
+    """
+    rows = session.execute(
+        "SELECT video_frame, keypoints FROM detection_keypoints "
+        "WHERE detection_run_id=? AND shot_video_id=? AND track_id=? AND region_type=? "
+        "ORDER BY video_frame",
+        (detection_run_id, shot_video_id, DOT_TRACK_ID, DOT_REGION_TYPE),
+    ).fetchall()
+    return {row["video_frame"]: decode_dot_candidates(bytes(row["keypoints"])) for row in rows}
+
+
+def read_marker_keypoints_for_run(
+    session: sqlite3.Connection,
+    detection_run_id: str,
+    shot_video_id: str,
+) -> dict[int, np.ndarray]:
+    """Return {video_frame: float32[4*n_markers, 3]} for a coded-marker run."""
+    rows = session.execute(
+        "SELECT video_frame, keypoints FROM detection_keypoints "
+        "WHERE detection_run_id=? AND shot_video_id=? AND track_id=? AND region_type=? "
+        "ORDER BY video_frame",
+        (detection_run_id, shot_video_id, MARKER_TRACK_ID, MARKER_REGION_TYPE),
+    ).fetchall()
+    result = {}
+    for row in rows:
+        kp_bytes = bytes(row["keypoints"])
+        n = len(kp_bytes) // (3 * 4)
+        result[row["video_frame"]] = np.frombuffer(kp_bytes, dtype=np.float32).reshape(n, 3)
+    return result
+
+
 def read_detections_for_run(
     session: sqlite3.Connection,
     detection_run_id: str,
@@ -290,6 +634,7 @@ def read_observations_with_edits(
     session: sqlite3.Connection,
     sequence_id: str,
     camera_instance_id: str,
+    primary_source: str = BODY_SOURCE,
 ) -> dict[int, np.ndarray]:
     """Return {video_frame: float32[N,3]} for one camera, with pose_observation_edits applied.
 
@@ -300,12 +645,27 @@ def read_observations_with_edits(
     slots (bit set in kp_mask) have their x/y replaced by the edit values;
     if the edit marks a keypoint as outlier (is_outlier != 0) its confidence
     is zeroed.
+
+    *primary_source* (default `BODY_SOURCE`) names the source this
+    sequence's single "real" row uses as its base layer -- pass a
+    sequence's own source (e.g. 'markers' for a marker-based-mocap object
+    sequence) when it isn't 'body', so that sequence's row is correctly
+    treated as the base layer instead of a same-width zero body silently
+    overwriting it once any edit exists (see `merge_observation_sources`'s
+    docstring).
+
+    Rows with source `DOT_REGION_TYPE` ('dots') are excluded: they hold
+    anonymous reflective-dot candidates in a different blob layout
+    (float32[N,4]: px, py, area, compactness -- see `DotCandidateWriter`),
+    not the float32[N,3] named-keypoint layout every other source uses.
+    They aren't part of the per-subject keypoint display/edit this
+    function serves.
     """
     obs_rows = session.execute(
         "SELECT video_frame, source, kp_blob FROM pose_observations"
-        " WHERE sequence_id = ? AND camera_instance_id = ?"
+        " WHERE sequence_id = ? AND camera_instance_id = ? AND source != ?"
         " ORDER BY video_frame",
-        (sequence_id, camera_instance_id),
+        (sequence_id, camera_instance_id, DOT_REGION_TYPE),
     ).fetchall()
     if not obs_rows:
         return {}
@@ -329,7 +689,7 @@ def read_observations_with_edits(
         for r in edit_rows
     }
 
-    default_width = infer_body_width(by_frame.values())
+    default_width = infer_body_width(by_frame.values(), primary_source=primary_source)
     if default_width is None and edits:
         default_width = next(iter(edits.values()))[0].shape[0]
 
@@ -348,11 +708,12 @@ def read_observations_with_edits(
 
     result: dict[int, np.ndarray] = {}
     for frame, rows in by_frame.items():
-        kp = merge_observation_sources(rows, default_width=default_width)
+        kp = merge_observation_sources(rows, default_width=default_width, primary_source=primary_source)
         if kp is None:
-            # No 'body' row for this frame and no other frame in this camera
-            # had one either (default_width also came up empty) -- nothing
-            # establishes the true width, so fall back to whichever row is
+            # No primary-source row for this frame and no other frame in
+            # this camera had one either (default_width also came up
+            # empty) -- nothing establishes the true width, so fall back
+            # to whichever row is
             # present rather than dropping the frame.
             kp = rows[0][1]
         if frame in edits:
@@ -411,6 +772,7 @@ def update_single_keypoint_edit(
     new_x: float,
     new_y: float,
     is_outlier: bool = False,
+    source: str = BODY_SOURCE,
 ) -> None:
     """Update one keypoint slot in pose_observation_edits, preserving other slots.
 
@@ -421,25 +783,29 @@ def update_single_keypoint_edit(
     Works on ghost frames (no pose_observations row) by inferring the keypoint
     count from any other observation in the same camera.
 
-    The keypoint count is always inferred from a 'body' row: a frame may also
-    have 'hand_l'/'hand_r' rows (narrower, 21-point arrays) that must not be
-    mistaken for the frame's full keypoint width.
+    The keypoint count is inferred from a *source*-tagged row (default
+    `BODY_SOURCE`, i.e. 'body' — every existing person-panel call site):
+    a frame may also have 'hand_l'/'hand_r' rows (narrower, 21-point
+    arrays) that must not be mistaken for the frame's full keypoint width.
+    A sequence with no 'body' source at all (marker-based-mocap object
+    sequences, source='markers') passes its own *source* here instead,
+    since 'body' will never exist for it.
     """
     obs_row = session.execute(
         "SELECT kp_blob FROM pose_observations"
         " WHERE sequence_id = ? AND camera_instance_id = ? AND video_frame = ?"
         " AND source = ?",
-        (sequence_id, camera_instance_id, video_frame, BODY_SOURCE),
+        (sequence_id, camera_instance_id, video_frame, source),
     ).fetchone()
 
     if obs_row is not None:
         n_kp = len(bytes(obs_row["kp_blob"])) // (3 * 4)
     else:
-        # Ghost frame: infer n_kp from any other 'body' observation in this camera.
+        # Ghost frame: infer n_kp from any other same-source observation in this camera.
         any_obs = session.execute(
             "SELECT kp_blob FROM pose_observations"
             " WHERE sequence_id = ? AND camera_instance_id = ? AND source = ? LIMIT 1",
-            (sequence_id, camera_instance_id, BODY_SOURCE),
+            (sequence_id, camera_instance_id, source),
         ).fetchone()
         if any_obs is None:
             return  # no observations at all — cannot determine keypoint count

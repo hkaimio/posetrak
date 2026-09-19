@@ -20,6 +20,8 @@
 #include "posetrak/kinematics/forward_kinematics.hpp"
 #include "posetrak/kinematics/pinocchio_model_builder.hpp"
 #include "posetrak/kinematics/triangulation.hpp"
+#include "posetrak/tracking/dot_predict_profile.hpp"
+#include "posetrak/tracking/frame_step_profile.hpp"
 #include "posetrak/tracking/hierarchical_solver.hpp"
 #include "posetrak/tracking/multi_person_tracker.hpp"
 #include "posetrak/tracking/tracker.hpp"
@@ -473,8 +475,11 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
         // Initialization priority:
         //  1. Explicit python_state_path in config → load that state directly (useful for
         //  debugging)
-        //  2. Otherwise → run IK on first frame's triangulated observations (the normal path)
-        //  3. If IK initialization fails → fall back to rest pose with a warning
+        //  2. Otherwise → search forward from start_time for a window with enough observation
+        //  coverage, running IK/rigid-fit at each candidate (the normal path)
+        //  3. If no window in the search range initializes → a free-floating rigid prop has no
+        //  meaningful fallback, so fail loudly; an articulated skeleton falls back to rest pose
+        //  with a warning, same as always
         bool initialized = false;
 
         if (config.python_state_path.has_value()) {
@@ -502,13 +507,56 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
             if (!quiet) {
                 fmt::print("  Initializing from first-frame observations via IK...\n");
             }
-            initialized = tracker.initialize(first_frame_obs, config.start_time);
+            // Real multi-camera captures have sparse, independently-timed per-camera
+            // detections (a marker-based-mocap object especially), so the exact window
+            // at start_time commonly has no valid init coverage even though a window a
+            // second or two later does. Search forward rather than trying start_time once.
+            double const search_end =
+                std::min(end_time, config.start_time + config.init_search_window_s);
+            double init_timestamp = config.start_time;
+            for (double t = config.start_time; t < search_end; t += dt) {
+                auto obs = observations_set.get_all_in_range(t, t + dt);
+                if (tracker.initialize(obs, t)) {
+                    initialized = true;
+                    init_timestamp = t;
+                    break;
+                }
+            }
+
             if (initialized) {
-                if (!quiet) {
+                if (init_timestamp > config.start_time) {
+                    fmt::print(
+                        "  IK initialization successful at t={:.3f}s (searched forward {:.3f}s "
+                        "from the requested start time {:.3f}s -- no valid init window there)\n",
+                        init_timestamp, init_timestamp - config.start_time, config.start_time);
+                    config.start_time = init_timestamp;
+                    t_first_window = config.start_time + dt;
+                    first_frame_obs =
+                        observations_set.get_all_in_range(config.start_time, t_first_window);
+                    num_steps = static_cast<int>((end_time - config.start_time) / dt);
+                    if (num_steps <= 0) {
+                        throw std::runtime_error(
+                            "No time steps left to process after the initialization search "
+                            "shifted start_time forward -- check end_time");
+                    }
+                } else if (!quiet) {
                     fmt::print("  IK initialization successful\n");
                 }
+            } else if (skeleton.is_rigid_body()) {
+                throw std::runtime_error(fmt::format(
+                    "Rigid-body initialization failed across the entire search window "
+                    "[{:.3f}, {:.3f}) -- no window there had enough camera coverage "
+                    "(>= 3 triangulated markers, >= {} cameras, and a non-collinear layout) "
+                    "for a valid Kabsch/Umeyama fit. A rest-pose fallback is meaningless "
+                    "for a free-floating prop (unlike an articulated skeleton), so refusing "
+                    "to proceed rather than track from a silently wrong pose. Try a later "
+                    "--start-time, or widen [tracking.initialization] init_search_window_s.",
+                    config.start_time, search_end, tracker_config.min_cameras_for_init));
             } else {
-                fmt::print("  WARNING: IK initialization failed, falling back to rest pose\n");
+                fmt::print(
+                    "  WARNING: IK initialization failed across the search window "
+                    "[{:.3f}, {:.3f}), falling back to rest pose\n",
+                    config.start_time, search_end);
                 tracker.initialize_from_rest_pose(config.start_time);
                 initialized = true;
             }
@@ -912,7 +960,8 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                              double min_confidence, int person_id,
                              std::vector<std::string> const& active_joint_groups,
                              double override_start_time = std::numeric_limits<double>::quiet_NaN(),
-                             double override_end_time = std::numeric_limits<double>::quiet_NaN()) {
+                             double override_end_time = std::numeric_limits<double>::quiet_NaN(),
+                             std::optional<Eigen::Vector3d> const& seed_position = std::nullopt) {
     try {
         PersonSpec spec;
         spec.sequence_id = sequence_id;
@@ -931,15 +980,53 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
         opts.debug_init = debug_init;
         opts.smooth_output = smooth_output;
         opts.quiet = quiet;
+        opts.seed_position = seed_position;
 
         auto ctx = build_person_context(spec, opts, verbose);
 
         step_person_context_frame0(*ctx);
         for (int step = 1; step < ctx->num_steps; ++step) {
+            // Shared dot-assignment three-pass shape (design doc §5.2), only when
+            // this subject actually has unlabeled_points candidates queued this
+            // step -- every other step (including every step of a dot-free
+            // sequence, e.g. the sword's own ArUco corners) keeps calling the
+            // untouched step_person_context() below.
+            if (ctx->has_dot_track) {
+                using Clock = std::chrono::steady_clock;
+                using Ms = std::chrono::duration<double, std::milli>;
+
+                auto [t_start, t_end] = person_context_step_window(*ctx, step);
+                auto const t_bucket0 = Clock::now();
+                auto candidates_by_camera = bucket_candidates_by_camera(
+                    ctx->unlabeled_candidates_by_camera, t_start, t_end);
+                frame_step_profile::add_bucket_candidates_ms(Ms(Clock::now() - t_bucket0).count());
+                if (!candidates_by_camera.empty()) {
+                    step_person_context_predict(*ctx, step);
+                    std::vector<DotAssignmentSubject> subjects = {
+                        DotAssignmentSubject{0, ctx->tracker.get()}};
+                    double const t_effective = t_start + ctx->dt / 2.0;
+                    auto const t_assign0 = Clock::now();
+                    auto assignment = resolve_shared_dot_assignment(
+                        subjects, candidates_by_camera, ctx->tracker_config, step, t_effective);
+                    frame_step_profile::add_dot_assignment_total_ms(
+                        Ms(Clock::now() - t_assign0).count());
+                    frame_step_profile::add_step();
+                    std::vector<Observation> resolved;
+                    if (auto it = assignment.find(0); it != assignment.end()) {
+                        resolved = it->second.resolved;
+                    }
+                    step_person_context_update(*ctx, step, verbose, quiet, resolved);
+                    continue;
+                }
+            }
             step_person_context(*ctx, step, verbose, quiet);
         }
 
         finalize_person_context(*ctx, smooth_output, quiet, verbose);
+        dot_predict_profile::print_summary();
+        frame_step_profile::print_summary(dot_predict_profile::snapshot().sigma_gen_ms +
+                                          dot_predict_profile::snapshot().predict_loop_ms +
+                                          dot_predict_profile::snapshot().aggregate_ms);
 
         // Hierarchical solver child stages (existence-based toggle: a tracker_config_id
         // with tracker_config_stages rows runs hierarchically -- see
@@ -1048,6 +1135,7 @@ int main(int argc, char* argv[]) {
     std::vector<std::string> db_active_joint_groups;
     double db_start_time = std::numeric_limits<double>::quiet_NaN();
     double db_end_time = std::numeric_limits<double>::quiet_NaN();
+    std::vector<double> db_seed_position;  // see BuildPersonContextOptions::seed_position
     // Multi-person mode: repeated 4-value groups (sequence, skeleton, tracker_config,
     // person_id), flattened by CLI11's take_all() into one vector.
     std::vector<std::string> db_person_specs;
@@ -1090,6 +1178,14 @@ int main(int argc, char* argv[]) {
                           "first frame where min_cameras_for_init cameras are active)");
     track_cmd->add_option("--end-time", db_end_time,
                           "Override sequence end time in seconds (default: from sequence record)");
+    track_cmd
+        ->add_option("--seed-position", db_seed_position,
+                     "Externally-supplied initial root position (x y z, meters), bypassing "
+                     "the normal observation-based init search. Single-subject only (--person "
+                     "not supported) -- see BuildPersonContextOptions::seed_position for why "
+                     "this exists: a rigid body with only unlabeled_points (anonymous dot) "
+                     "markers has no cold-start path of its own.")
+        ->expected(3);
     track_cmd
         ->add_option("--person", db_person_specs,
                      "Track an additional person: --person <sequence> <skeleton> "
@@ -1150,10 +1246,15 @@ int main(int argc, char* argv[]) {
                            "and --tracker-config\n");
                 return 1;
             }
-            return run_track_from_db(db_path, db_sequence_id, db_skeleton_id, db_config_id,
-                                     db_output_dir, verbose, quiet, smooth_output, debug_output,
-                                     debug_init, db_min_confidence, db_person_id,
-                                     db_active_joint_groups, db_start_time, db_end_time);
+            std::optional<Eigen::Vector3d> seed_position;
+            if (!db_seed_position.empty()) {
+                seed_position =
+                    Eigen::Vector3d(db_seed_position[0], db_seed_position[1], db_seed_position[2]);
+            }
+            return run_track_from_db(
+                db_path, db_sequence_id, db_skeleton_id, db_config_id, db_output_dir, verbose,
+                quiet, smooth_output, debug_output, debug_init, db_min_confidence, db_person_id,
+                db_active_joint_groups, db_start_time, db_end_time, seed_position);
         } else {
             if (track_config.empty()) {
                 fmt::print(stderr, "Error: config file required when not using --session-db\n");

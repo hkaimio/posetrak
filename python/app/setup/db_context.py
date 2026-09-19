@@ -223,7 +223,7 @@ class SyncTable:
 # ---------------------------------------------------------------------------
 
 # Preference order for sync method selection in get_active_sync().
-_SYNC_METHOD_RANK: dict[str, int] = {"led-auto": 0, "manual-rough": 1}
+_SYNC_METHOD_RANK: dict[str, int] = {"led-graph": 0, "led-auto": 1, "manual-rough": 2}
 
 
 class DBContext:
@@ -780,8 +780,9 @@ class DBContext:
     def get_active_sync(self, shot_id: str) -> SyncTable | None:
         """Return a ``SyncTable`` for the best available sync config, or ``None``.
 
-        Prefers ``led-auto`` over ``manual-rough``; falls back to the most
-        recently inserted config if neither method is present.
+        Prefers ``led-graph`` (the pairwise LED sync dialog), then ``led-auto``,
+        then ``manual-rough``; falls back to the most
+        recently inserted config if none of these methods is present.
         """
         configs = self._conn.execute(
             "SELECT id, created_by FROM sync_configs WHERE shot_id = ? ORDER BY rowid",

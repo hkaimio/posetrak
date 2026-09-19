@@ -217,7 +217,7 @@ def test_key_d_steps_reference_forward(qapp) -> None:
     ps.shutdown()
 
 
-def test_key_left_steps_target_backward(qapp) -> None:
+def test_key_j_steps_target_backward(qapp) -> None:
     from PySide6.QtGui import QKeyEvent
     from PySide6.QtCore import QEvent
 
@@ -225,13 +225,13 @@ def test_key_left_steps_target_backward(qapp) -> None:
     ps.set_target("/fake/tgt.mp4", 200, "Cam B")
     ps.seek_target(50)
 
-    event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Left, Qt.KeyboardModifier.NoModifier)
+    event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_J, Qt.KeyboardModifier.NoModifier)
     ps.keyPressEvent(event)
     assert ps.target_frame == 49
     ps.shutdown()
 
 
-def test_key_right_steps_target_forward(qapp) -> None:
+def test_key_l_steps_target_forward(qapp) -> None:
     from PySide6.QtGui import QKeyEvent
     from PySide6.QtCore import QEvent
 
@@ -239,7 +239,7 @@ def test_key_right_steps_target_forward(qapp) -> None:
     ps.set_target("/fake/tgt.mp4", 200, "Cam B")
     ps.seek_target(50)
 
-    event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Right, Qt.KeyboardModifier.NoModifier)
+    event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_L, Qt.KeyboardModifier.NoModifier)
     ps.keyPressEvent(event)
     assert ps.target_frame == 51
     ps.shutdown()
@@ -259,7 +259,7 @@ def test_shift_a_steps_reference_by_10(qapp) -> None:
     ps.shutdown()
 
 
-def test_shift_right_steps_target_by_10(qapp) -> None:
+def test_shift_l_steps_target_by_10(qapp) -> None:
     from PySide6.QtGui import QKeyEvent
     from PySide6.QtCore import QEvent
 
@@ -267,7 +267,7 @@ def test_shift_right_steps_target_by_10(qapp) -> None:
     ps.set_target("/fake/tgt.mp4", 200, "Cam B")
     ps.seek_target(50)
 
-    event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Right, Qt.KeyboardModifier.ShiftModifier)
+    event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_L, Qt.KeyboardModifier.ShiftModifier)
     ps.keyPressEvent(event)
     assert ps.target_frame == 60
     ps.shutdown()

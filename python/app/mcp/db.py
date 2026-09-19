@@ -74,7 +74,15 @@ def connect_readonly(db_path: str | Path) -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 def decode_obs_blob(blob: bytes, n_cam: int, n_mrk: int) -> np.ndarray:
-    """Decode tracking_obs_results.obs_blob → float32[n_cam, n_mrk, 8]."""
+    """Decode tracking_obs_results.obs_blob → float32[n_cam, n_mrk, 8].
+
+    Fields: [actual_x, actual_y, pred_x, pred_y, mahal_dist, used, is_outlier, mode].
+    `actual_x/y`/`pred_x/y` are only absolute undistorted pixels when mode==0
+    (POSITION) -- mode==1 (VELOCITY) means a frame-to-frame pixel delta, mode==2
+    (PAIR_DIFF) a child-minus-parent offset. Always check mode before treating
+    actual_x/y as a position; see
+    docs/roadmap/features/observation-results-semantics.md.
+    """
     return np.frombuffer(bytes(blob), dtype=np.float32).reshape(n_cam, n_mrk, 8)
 
 

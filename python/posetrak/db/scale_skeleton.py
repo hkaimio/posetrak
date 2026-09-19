@@ -20,6 +20,34 @@ Shoulder width (upper_arm.L/R):
     sternoclavicular joints (clavicle origins); upper_arm.L/R are the
     far ends of the clavicles.  Scale the full offset vector of upper_arm.L/R
     by the ratio measured / template, preserving clavicle direction.
+
+Neck + head (neck1, neck2, head):
+    Not measured directly -- shoulder position moves too much with arm
+    motion for a stable time-averaged anchor (a time-range average of a
+    shoulder-anchored measurement carries a lot of variation). Measured
+    instead as ``hip_to_ear`` (hips to the
+    ear-midpoint, a rigid-to-the-skull landmark independent of arm pose),
+    with the neck+head segment's own length derived as
+    ``hip_to_ear - torso_height`` -- i.e. whatever's left over once the
+    already-measured spine segment is accounted for. Scale the Y-component
+    of neck1/neck2/head's offsets by that derived ratio, the same
+    single-ratio-across-a-multi-joint-chain approximation torso_height
+    already uses for spine1/spine2/shoulder.L/R.
+
+    Known imprecision, real but not a bug: both torso_height and the
+    template-side "head" length are Euclidean (hip-to-shoulder,
+    hip-to-head-joint) distances, not pure Y-sums, because spine/neck
+    offsets have real (if small) X/Z components alongside their dominant
+    Y one -- only Y actually gets scaled. torso_height's own target-vs-
+    result gap from this is small in absolute terms (well under 1cm on a
+    real skeleton) but "head" is a *difference* of two such Euclidean
+    distances, so the same absolute X/Z leakage lands on a much shorter
+    segment (~19cm vs ~45cm for torso) and shows up as a proportionally
+    bigger relative miss -- confirmed on a real skeleton, ~15% in a
+    deliberately-exaggerated synthetic test. Accepted rather than chasing
+    exact precision here, consistent with this module's existing Y-index-
+    only scaling philosophy elsewhere; revisit only if real-world scaled
+    skeletons show a head segment visibly off from its own target.
 """
 
 from __future__ import annotations
@@ -98,19 +126,42 @@ def template_measurements(joints: list[dict]) -> dict[str, float]:
     def mid(a: str, b: str) -> np.ndarray:
         return (jp[a] + jp[b]) / 2.0
 
+    torso_height = float(np.linalg.norm(
+        mid("shoulder.L", "shoulder.R") - mid("thigh.L", "thigh.R")
+    ))
+    # hip_to_ear proxy: the "head" joint itself, not the MRK-ear.L/R markers --
+    # _fk_rest_pose only resolves joints, and the markers' own fixed offset
+    # from "head" isn't part of what's being scaled here anyway (same
+    # approximation body_measurements.py's own template-side "head" measurement
+    # already uses). Falls back to 0.0 if "head" or either thigh joint is
+    # missing (a bare prop skeleton, say), same guard dist() uses everywhere
+    # else in this function.
+    if "head" in jp and "thigh.L" in jp and "thigh.R" in jp:
+        hip_to_head_joint = float(np.linalg.norm(jp["head"] - mid("thigh.L", "thigh.R")))
+    else:
+        hip_to_head_joint = 0.0
+
     return {
         "femur": (dist("thigh.L", "shin.L") + dist("thigh.R", "shin.R")) / 2,
         "shin": (dist("shin.L", "foot.L") + dist("shin.R", "foot.R")) / 2,
         "upper_arm": (dist("upper_arm.L", "forearm.L") + dist("upper_arm.R", "forearm.R")) / 2,
         "lower_arm": (dist("forearm.L", "hand.L") + dist("forearm.R", "hand.R")) / 2,
-        "torso_height": float(np.linalg.norm(
-            mid("shoulder.L", "shoulder.R") - mid("thigh.L", "thigh.R")
-        )),
+        "torso_height": torso_height,
         # shoulder_width = distance between glenohumeral joints (upper_arm.L/R),
         # matching the OpenPose shoulder keypoint positions used in body_measurements.py.
         # shoulder.L/R are the sternoclavicular joints (clavicle origins); upper_arm.L/R
         # are where the upper arm actually attaches.
         "shoulder_width": dist("upper_arm.L", "upper_arm.R"),
+        # Derived, not an independent measurement: see the module docstring's
+        # "Neck + head" section. hip_to_head_joint approximates hip_to_ear;
+        # subtracting torso_height leaves just the neck+head chain's own length.
+        "head": hip_to_head_joint - torso_height,
+        # Raw counterpart of "head" above (not torso-subtracted) -- lets
+        # callers that generically look up a template value per MEAS_KEYS
+        # entry (skeleton_scaling_panel.py's "Orig"/"New" card display) find
+        # a sensible current-skeleton value under the same key the UI and
+        # scale_skeleton_yaml() use for the user-measured input.
+        "hip_to_ear": hip_to_head_joint,
     }
 
 
@@ -139,6 +190,11 @@ _LIMB_CHILD_TO_MEASURE: dict[str, str] = {
 # Joints whose Y-component (index 1) is scaled for torso height.
 _TORSO_HEIGHT_JOINTS = ("spine1", "spine2", "shoulder.L", "shoulder.R")
 
+# Joints whose Y-component (index 1) is scaled for the neck+head segment
+# (see the module docstring's "Neck + head" section -- driven by the
+# derived hip_to_ear - torso_height length, not measured directly).
+_NECK_HEAD_JOINTS = ("neck1", "neck2", "head")
+
 
 def scale_skeleton_yaml(
     yaml_content: str,
@@ -153,8 +209,13 @@ def scale_skeleton_yaml(
     measurements:
         Dict mapping measurement key → value in metres.
         Recognised keys: femur, shin, upper_arm, lower_arm,
-        torso_height, shoulder_width.
+        torso_height, shoulder_width, hip_to_ear.
         Missing keys are silently ignored (that dimension is left unscaled).
+        hip_to_ear is raw (hip-to-ear-midpoint), not the neck+head segment
+        length itself -- this function subtracts torso_height from it
+        internally (see the module docstring's "Neck + head" section), so
+        pass the actually-measured hip_to_ear distance here, not a
+        pre-subtracted value.
 
     Returns
     -------
@@ -190,6 +251,20 @@ def scale_skeleton_yaml(
             j = by_name[jname]
             off = list(j.get("offset") or [0.0, 0.0, 0.0])
             j["offset"] = [off[0], off[1] * torso_r, off[2]]
+
+    # --- Neck + head: derive the segment length from hip_to_ear - torso_height
+    # (not measured directly -- see module docstring), then scale Y-component
+    # of neck1/neck2/head the same way torso_height scales its own chain.
+    if "hip_to_ear" in measurements and tmpl.get("head", 0.0) > 1e-9:
+        measured_torso = measurements.get("torso_height", tmpl["torso_height"])
+        measured_head = measurements["hip_to_ear"] - measured_torso
+        head_r = measured_head / tmpl["head"]
+        for jname in _NECK_HEAD_JOINTS:
+            if jname not in by_name:
+                continue
+            j = by_name[jname]
+            off = list(j.get("offset") or [0.0, 0.0, 0.0])
+            j["offset"] = [off[0], off[1] * head_r, off[2]]
 
     return _dump_yaml(skel)
 
@@ -248,14 +323,23 @@ def scaling_summary(
     scaled_m = template_measurements(scaled_joints)
 
     keys = [k for k in ("femur", "shin", "upper_arm", "lower_arm",
-                        "torso_height", "shoulder_width") if k in tmpl]
+                        "torso_height", "shoulder_width", "head") if k in tmpl]
     lines = [
         f"{'Measurement':<18} {'Template':>10} {'Target':>10} {'Result':>10}",
         "-" * 52,
     ]
     for k in keys:
         t = tmpl[k] * 100
-        tgt = measurements.get(k, float("nan")) * 100
+        if k == "head":
+            # "head" is derived (hip_to_ear - torso_height), not a direct
+            # measurements[] entry -- see scale_skeleton_yaml()'s own docstring.
+            if "hip_to_ear" in measurements:
+                measured_torso = measurements.get("torso_height", tmpl["torso_height"])
+                tgt = (measurements["hip_to_ear"] - measured_torso) * 100
+            else:
+                tgt = float("nan")
+        else:
+            tgt = measurements.get(k, float("nan")) * 100
         res = scaled_m[k] * 100
         lines.append(f"{k:<18} {t:>9.1f}cm {tgt:>9.1f}cm {res:>9.1f}cm")
     return "\n".join(lines)

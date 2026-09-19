@@ -22,6 +22,7 @@ from collections import defaultdict
 
 import numpy as np
 
+from app.pose.db_cache import DOT_REGION_TYPE
 from posetrak.db.observation_merge import (
     infer_body_width,
     merge_observation_sources,
@@ -58,11 +59,15 @@ def read_timeline_status(
     detections default to STATUS_GREEN (segmentation is a refinement signal,
     not a requirement — see *Status signal* in the design doc).
     """
+    # 'dots' rows hold anonymous reflective-dot candidates in a different
+    # blob layout (float32[N,4]: px, py, area, compactness -- see
+    # DotCandidateWriter), not the float32[N,3] named-keypoint layout every
+    # other source uses, and aren't part of this per-keypoint timeline.
     obs_rows = session.execute(
         "SELECT video_frame, source, kp_blob FROM pose_observations"
-        " WHERE sequence_id = ? AND camera_instance_id = ?"
+        " WHERE sequence_id = ? AND camera_instance_id = ? AND source != ?"
         " ORDER BY video_frame",
-        (sequence_id, camera_instance_id),
+        (sequence_id, camera_instance_id, DOT_REGION_TYPE),
     ).fetchall()
 
     edit_rows = session.execute(

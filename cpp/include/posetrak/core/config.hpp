@@ -47,6 +47,63 @@ struct TrackerConfig {
     double calib_noise_std = 5.0;      ///< Calibration error (pixels in original video)
     double outlier_threshold = 5.991;  ///< Chi-squared threshold (95% for 2-DOF)
 
+    /// @brief Max squared-Mahalanobis cost for a candidate-to-slot pairing to be
+    /// accepted by the shared dot-assignment phase (marker-based-mocap design
+    /// doc's dot-assignment-architecture-design.md §7/§8). Separate from
+    /// outlier_threshold, which gates an already-labeled Observation after the
+    /// fact -- this gates candidate-to-slot *assignment* before an Observation
+    /// even exists, so it typically wants its own, looser value: an
+    /// unresolved slot costs nothing downstream, but an artificially tight
+    /// gate here would discard real candidates the outlier-rejection stage
+    /// could otherwise have used. Same chi-squared-threshold units and
+    /// 2-DOF convention as outlier_threshold's own default.
+    double dot_assignment_gate_mahalanobis = 9.21;  ///< Chi-squared threshold (99% for 2-DOF)
+
+    /// @brief Divides a candidate-to-slot pairing's squared-Mahalanobis cost when the
+    /// candidate's own tracklet_id (dot_tracklet.MotionGatedLinker) matches the
+    /// tracklet that resolved into that exact (subject, camera, marker) slot *last*
+    /// frame -- see dot_assignment.hpp's own doc comment on resolve_dot_assignment()'s
+    /// matching parameter for the full mechanism. Real data from a fast-swing capture
+    /// found only ~4-6% of raw candidates
+    /// survive dot_assignment_gate_mahalanobis unmodified during fast motion, with
+    /// zero rejected at the later outlier_threshold check -- the attrition is
+    /// entirely here, which is what this exists to relax, but only for a pairing with
+    /// independent tracklet-continuity evidence behind it, not universally the way
+    /// raising dot_assignment_gate_mahalanobis itself would (a documented anti-pattern
+    /// in this project: widening a gate before fixing correspondence made a known
+    /// failure window worse once before). 1.0 (default) is a no-op divide -- every
+    /// existing config is unaffected until this is deliberately raised.
+    double dot_tracklet_gate_multiplier = 1.0;
+
+    // === Streak-derived dot velocity ===
+    // See docs/roadmap/features/marker-based-mocap/streak-velocity-design.md §3/§4.
+    // A motion-blur streak's own length/axis is a real, otherwise-unused frame-internal
+    // velocity signal for exactly the fast-motion moments the constant-velocity process
+    // model struggles with most. Disabled by default (unvalidated in live tracking as
+    // of introduction -- see the design doc's real, positive offline validation, which
+    // this enables acting on).
+    bool dot_streak_velocity_enabled = false;
+    /// Rolling sample window (per camera) for the k=exposure_time/frame_time estimate.
+    int dot_streak_k_window = 200;
+    /// Minimum samples in the window before k is trusted enough to emit a
+    /// streak-derived VELOCITY observation for that camera.
+    int dot_streak_k_min_samples = 20;
+    /// "Only dots with actual movement" gate: a resolved candidate's frame-to-frame
+    /// displacement must be at least this many pixels to be admitted into the k
+    /// estimate at all (a near-zero displacement makes k's denominator noise-dominated
+    /// -- see the design doc's ratio-of-sums rationale for why this matters less than
+    /// it would for a naive mean-of-ratios estimate, but it still isn't zero).
+    double dot_streak_min_displacement_px = 3.0;
+    /// Minimum major_axis-minor_axis elongation for a candidate to count as a real
+    /// streak at all -- matches resolve_dot_assignment()'s own streak-noise-inflation
+    /// gate, so a marginal blob isn't treated as a streak by one mechanism and a round
+    /// dot by the other.
+    double dot_streak_min_elongation_px = 1.0;
+    /// noise_std_override for the emitted streak-derived VELOCITY observation. An open
+    /// empirical question (design doc §5) -- no principled default yet, same honest
+    /// caveat as edited_kp_noise_std below.
+    double dot_streak_velocity_noise_std = 10.0;
+
     // === Adaptive process noise (Phase 1 — velocity-driven per-DOF scaling) ===
     // See docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md.
     // 0.0 gain = disabled (exact pre-Phase-1 static process noise).
@@ -54,6 +111,16 @@ struct TrackerConfig {
     double process_noise_vel_ref_joint = 1.0;   ///< Reference velocity for joint DOFs (rad/s)
     double process_noise_vel_gain_root = 0.0;   ///< Velocity gain for root DOFs
     double process_noise_vel_ref_root = 1.0;    ///< Reference velocity for root DOFs (m/s, rad/s)
+    /// Cap on the per-DOF variance-domain multiplier `(1 + gain*|v|/ref)^2` applied by
+    /// both the joint and root velocity gains above. A config field, not a fixed
+    /// constant, because it can bind: on a sword-swing capture the root angular
+    /// velocity exceeded the gain=4/ref_root=2 saturation point (~1.08 rad/s) for a
+    /// third of the whole run, including 100% of a known bad-tracking window, so the
+    /// mechanism meant to widen the dot-assignment gate during fast motion couldn't
+    /// widen any further right when it mattered most. Being a field lets it be
+    /// tuned/swept per capture without a rebuild. 10.0 (the original fixed value)
+    /// keeps every existing config's behavior unchanged.
+    double process_noise_vel_max_multiplier = 10.0;
     /// Literal joint names (e.g. "spine1", "thigh.L") the joint gain applies to.
     /// Empty (default) = all joints. Added after finding a body-wide gain
     /// over-loosens fast-but-normal limb motion (arms) while barely engaging for
@@ -130,6 +197,12 @@ struct TrackerConfig {
     double ik_tolerance = 0.01;    ///< IK convergence tolerance (meters)
     int min_cameras_for_init = 2;  ///< Minimum cameras required for triangulation
 
+    /// @brief Max Kabsch/Umeyama fit RMS residual (meters) for a root-only (rigid-body)
+    /// skeleton's analytic initialization (marker-mocap algorithms doc §4) to be accepted.
+    /// Above this, initialize() rejects the frame and the existing retry-on-a-later-frame
+    /// loop tries again, same as the human-skeleton IK-residual check.
+    double rigid_init_max_residual_m = 0.02;
+
     // Layout selection
     std::vector<std::string> active_joint_groups;  ///< Joint groups to track (empty = all)
 
@@ -189,6 +262,20 @@ struct TrackerConfig {
     double prismatic_process_noise_std =
         0.0001;  ///< σ for prismatic DOFs in calibration mode (m/√s)
 
+    // === Per-marker confidence-threshold override (experimental, not yet DB/TOML-committed) ===
+    // ViTPose's raw confidence for
+    // nose/ear.L/ear.R stays elevated enough to pass the normal
+    // min_confidence gate even when the marker is on the occluded back side
+    // of the head, because occlusion only *lowers* confidence, it doesn't
+    // zero it out. Empty confidence_threshold_marker_names = disabled (every
+    // marker uses the single global min_confidence passed into
+    // load_observations(), unchanged from today). When non-empty, a keypoint
+    // whose skeleton marker name appears in this list is gated by
+    // confidence_threshold_override instead of the global value; every other
+    // marker is unaffected.
+    std::vector<std::string> confidence_threshold_marker_names;
+    double confidence_threshold_override = 0.0;
+
     // === Debug ===
     /// Print per-marker 3D errors (prior and posterior vs triangulated) for the first N frames.
     int debug_init_frames = 0;
@@ -218,6 +305,16 @@ struct TrackerAppConfig {
     double pose_noise_std = 0.0;   ///< Pose estimation error (pixels in model input image)
     double calib_noise_std = 2.0;  ///< Calibration error (pixels in original video)
     double outlier_threshold = 4.0;
+    double dot_assignment_gate_mahalanobis = 9.21;  ///< See TrackerConfig's own field doc comment.
+    double dot_tracklet_gate_multiplier = 1.0;      ///< See TrackerConfig's own field doc comment.
+
+    // === Streak-derived dot velocity === (see TrackerConfig's own field doc comments)
+    bool dot_streak_velocity_enabled = false;
+    int dot_streak_k_window = 200;
+    int dot_streak_k_min_samples = 20;
+    double dot_streak_min_displacement_px = 3.0;
+    double dot_streak_min_elongation_px = 1.0;
+    double dot_streak_velocity_noise_std = 10.0;
 
     // === Adaptive process noise (Phase 1 — velocity-driven per-DOF scaling) ===
     // 0.0 gain = disabled (exact pre-Phase-1 static process noise).
@@ -225,6 +322,7 @@ struct TrackerAppConfig {
     double process_noise_vel_ref_joint = 1.0;
     double process_noise_vel_gain_root = 0.0;
     double process_noise_vel_ref_root = 1.0;
+    double process_noise_vel_max_multiplier = 10.0;  ///< See TrackerConfig's own field doc comment.
     std::vector<std::string> process_noise_vel_joint_names;
     std::vector<VelocityNoiseScope> process_noise_vel_scopes;
 
@@ -253,6 +351,11 @@ struct TrackerAppConfig {
     // === Trusted keypoint edits (Phase 0) ===
     double edited_kp_noise_std = 0.0;
 
+    // === Per-marker confidence-threshold override (experimental) ===
+    // See TrackerConfig's own field doc comment.
+    std::vector<std::string> confidence_threshold_marker_names;
+    double confidence_threshold_override = 0.0;
+
     // === Initialization ===
     std::optional<std::filesystem::path> python_state_path;  // Optional: use Python state for init
     int ik_max_iterations = 1000;
@@ -262,6 +365,21 @@ struct TrackerAppConfig {
     double init_joint_std = 0.1;
     double init_velocity_std = 0.1;
     int min_cameras_for_init = 2;
+    double rigid_init_max_residual_m = 0.02;
+
+    /// @brief How far past start_time to search for a window with enough
+    /// observation coverage to initialize, when the window at start_time
+    /// itself doesn't have it. Real multi-camera captures with sparse,
+    /// independently-timed per-camera detections (marker-based-mocap
+    /// objects especially) commonly
+    /// have no valid init window at exactly start_time; without a search,
+    /// initialize() fails there and the CLI either falls back to a rest
+    /// pose (meaningless for a free-floating rigid prop -- see
+    /// Skeleton::is_rigid_body()) or, for an articulated skeleton, still
+    /// starts from a worse guess than a few frames later would have given.
+    /// 0.0 disables the search (only start_time itself is tried, the
+    /// original behaviour).
+    double init_search_window_s = 2.0;
 
     // === UKF parameters ===
     double ukf_alpha = 0.5;
@@ -337,10 +455,19 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.pose_noise_std = pose_noise_std;
     tc.calib_noise_std = calib_noise_std;
     tc.outlier_threshold = outlier_threshold;
+    tc.dot_assignment_gate_mahalanobis = dot_assignment_gate_mahalanobis;
+    tc.dot_tracklet_gate_multiplier = dot_tracklet_gate_multiplier;
+    tc.dot_streak_velocity_enabled = dot_streak_velocity_enabled;
+    tc.dot_streak_k_window = dot_streak_k_window;
+    tc.dot_streak_k_min_samples = dot_streak_k_min_samples;
+    tc.dot_streak_min_displacement_px = dot_streak_min_displacement_px;
+    tc.dot_streak_min_elongation_px = dot_streak_min_elongation_px;
+    tc.dot_streak_velocity_noise_std = dot_streak_velocity_noise_std;
     tc.process_noise_vel_gain_joint = process_noise_vel_gain_joint;
     tc.process_noise_vel_ref_joint = process_noise_vel_ref_joint;
     tc.process_noise_vel_gain_root = process_noise_vel_gain_root;
     tc.process_noise_vel_ref_root = process_noise_vel_ref_root;
+    tc.process_noise_vel_max_multiplier = process_noise_vel_max_multiplier;
     tc.process_noise_vel_joint_names = process_noise_vel_joint_names;
     tc.process_noise_vel_scopes = process_noise_vel_scopes;
     tc.pose_reg_joint_names = pose_reg_joint_names;
@@ -358,6 +485,8 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.nis_feedback_threshold = nis_feedback_threshold;
     tc.nis_feedback_max_multiplier = nis_feedback_max_multiplier;
     tc.edited_kp_noise_std = edited_kp_noise_std;
+    tc.confidence_threshold_marker_names = confidence_threshold_marker_names;
+    tc.confidence_threshold_override = confidence_threshold_override;
     tc.ukf_alpha = ukf_alpha;
     tc.ukf_beta = ukf_beta;
     tc.ukf_kappa = ukf_kappa;
@@ -368,6 +497,7 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.ik_max_iterations = ik_max_iterations;
     tc.ik_tolerance = ik_tolerance;
     tc.min_cameras_for_init = min_cameras_for_init;
+    tc.rigid_init_max_residual_m = rigid_init_max_residual_m;
     tc.active_joint_groups = active_joint_groups;
     tc.velocity_mode_camera_ids = velocity_mode_camera_ids;
     tc.velocity_measurement_noise_std = velocity_measurement_noise_std;

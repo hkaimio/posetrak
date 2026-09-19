@@ -98,3 +98,16 @@ __marimo__/
 # Compiled Inno Setup installers (built artifacts, not checked in --
 # see packaging/windows/posetrak.iss)
 packaging/windows/output/
+
+# Scratch output (annotated frames, CSVs, etc.) from ad-hoc analysis scripts --
+# not project source, not meant to be committed.
+scratch/
+
+# Blender's own cache/backup output (physics bake caches, auto-save backups) --
+# written directly into whatever directory a .blend file lives in, including
+# the repo root for the pen/pad Blender export/animation tools -- generated,
+# not source, and (found 2026-09-17) large enough in file count to break the
+# reuse-lint pre-commit hook's whole-tree license-header scan if left tracked.
+blendcache_*/
+*.blend1
+*.blend2

@@ -132,3 +132,116 @@ TEST_CASE("apply_keypoint_edits: size mismatch throws", "[blob_codec]") {
                                            mask.data(), static_cast<int>(mask.size())),
                       std::runtime_error);
 }
+
+// ---------------------------------------------------------------------------
+// decode_dot_candidates -- variable-N reflective-dot candidate blob decode,
+// the decode_keypoints() sibling for anonymous dot detections (see
+// docs/roadmap/features/marker-based-mocap/dot-assignment-architecture-design.md)
+// ---------------------------------------------------------------------------
+
+// Count-prefixed format: int32 candidate count, then
+// float32[count, 9] (px, py, area, compactness, major_axis, minor_axis,
+// dir_x, dir_y, tracklet_id) -- see db_cache.py's encode_dot_candidates() for
+// the full versioning rationale (a byte-length-only scheme is ambiguous once
+// the per-candidate width can change between format versions).
+static std::vector<uint8_t> encode_dot_candidates(std::vector<std::array<float, 9>> const& vals) {
+    auto const n = static_cast<int32_t>(vals.size());
+    std::vector<uint8_t> out(sizeof(int32_t) + vals.size() * 9 * sizeof(float));
+    std::memcpy(out.data(), &n, sizeof(int32_t));
+    for (size_t i = 0; i < vals.size(); ++i) {
+        std::memcpy(out.data() + sizeof(int32_t) + i * 9 * sizeof(float), vals[i].data(),
+                    9 * sizeof(float));
+    }
+    return out;
+}
+
+TEST_CASE("decode_dot_candidates: round-trips N=0 (empty blob)", "[blob_codec]") {
+    auto blob = encode_dot_candidates({});
+    auto result = decode_dot_candidates(blob.data(), static_cast<int>(blob.size()));
+    REQUIRE(result.empty());
+}
+
+TEST_CASE("decode_dot_candidates: round-trips a handful of candidates", "[blob_codec]") {
+    auto blob = encode_dot_candidates({
+        {10.5f, 20.5f, 32.0f, 0.87f, 6.4f, 6.4f, 0.0f, 0.0f, -1.0f},
+        {100.0f, 200.0f, 45.5f, 0.91f, 7.6f, 7.6f, 0.0f, 0.0f, -1.0f},
+        // an elongated (streak) candidate, with a canonicalized direction and a real tracklet_id
+        {5.25f, 6.75f, 8.0f, 0.62f, 25.0f, 5.0f, 0.6f, 0.8f, 3.0f},
+    });
+    auto result = decode_dot_candidates(blob.data(), static_cast<int>(blob.size()));
+    REQUIRE(result.size() == 3);
+    REQUIRE(result[0].px == Catch::Approx(10.5f));
+    REQUIRE(result[0].py == Catch::Approx(20.5f));
+    REQUIRE(result[0].area == Catch::Approx(32.0f));
+    REQUIRE(result[0].compactness == Catch::Approx(0.87f));
+    REQUIRE(result[0].major_axis == Catch::Approx(6.4f));
+    REQUIRE(result[0].minor_axis == Catch::Approx(6.4f));
+    REQUIRE(result[0].dir_x == Catch::Approx(0.0f));
+    REQUIRE(result[0].dir_y == Catch::Approx(0.0f));
+    REQUIRE(result[0].tracklet_id == Catch::Approx(-1.0f));
+    REQUIRE(result[2].px == Catch::Approx(5.25f));
+    REQUIRE(result[2].compactness == Catch::Approx(0.62f));
+    REQUIRE(result[2].major_axis == Catch::Approx(25.0f));
+    REQUIRE(result[2].minor_axis == Catch::Approx(5.0f));
+    REQUIRE(result[2].dir_x == Catch::Approx(0.6f));
+    REQUIRE(result[2].dir_y == Catch::Approx(0.8f));
+    REQUIRE(result[2].tracklet_id == Catch::Approx(3.0f));
+}
+
+TEST_CASE("decode_dot_candidates: round-trips several-tens scale", "[blob_codec]") {
+    // The design doc's own scaling target (sec 7): "several tens per
+    // scene", not the single-digit-to-a-dozen count the first draft
+    // assumed.
+    constexpr int n = 47;
+    std::vector<std::array<float, 9>> vals(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        vals[static_cast<size_t>(i)] = {static_cast<float>(i),
+                                        static_cast<float>(i) * 2.0f,
+                                        30.0f,
+                                        0.8f,
+                                        6.0f,
+                                        6.0f,
+                                        0.0f,
+                                        0.0f,
+                                        -1.0f};
+    }
+    auto blob = encode_dot_candidates(vals);
+    auto result = decode_dot_candidates(blob.data(), static_cast<int>(blob.size()));
+    REQUIRE(result.size() == static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        REQUIRE(result[static_cast<size_t>(i)].px == Catch::Approx(static_cast<float>(i)));
+        REQUIRE(result[static_cast<size_t>(i)].py == Catch::Approx(static_cast<float>(i) * 2.0f));
+    }
+}
+
+TEST_CASE("decode_dot_candidates: byte count not matching the declared header count throws",
+          "[blob_codec]") {
+    auto blob = encode_dot_candidates({{1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 0.0f, 0.0f, -1.0f}});
+    blob.push_back(0);  // one stray byte -- header still says 1 candidate, length now wrong
+    REQUIRE_THROWS_AS(decode_dot_candidates(blob.data(), static_cast<int>(blob.size())),
+                      std::runtime_error);
+}
+
+TEST_CASE("decode_dot_candidates: blob shorter than the count prefix throws", "[blob_codec]") {
+    std::vector<uint8_t> bad_blob(2, 0);  // shorter than the int32 header itself
+    REQUIRE_THROWS_AS(decode_dot_candidates(bad_blob.data(), static_cast<int>(bad_blob.size())),
+                      std::runtime_error);
+}
+
+TEST_CASE(
+    "decode_dot_candidates: a legacy float32[N,6] blob (still count-prefixed) is "
+    "rejected, not silently misdecoded",
+    "[blob_codec]") {
+    // The legacy float32[N,6] format already had a count-prefix header --
+    // just a narrower 6-floats-per-candidate payload, without
+    // the streak direction. Decoding it with the new 8-floats-per-candidate
+    // stride must fail on the byte-count mismatch, not silently reinterpret
+    // the trailing bytes as a shorter candidate list.
+    constexpr int32_t n = 3;
+    std::vector<uint8_t> blob(sizeof(int32_t) + static_cast<size_t>(n) * 6 * sizeof(float));
+    std::memcpy(blob.data(), &n, sizeof(int32_t));
+    std::vector<float> payload(static_cast<size_t>(n) * 6, 1.0f);
+    std::memcpy(blob.data() + sizeof(int32_t), payload.data(), payload.size() * sizeof(float));
+    REQUIRE_THROWS_AS(decode_dot_candidates(blob.data(), static_cast<int>(blob.size())),
+                      std::runtime_error);
+}

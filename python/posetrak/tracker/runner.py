@@ -64,8 +64,16 @@ def default_binary_path() -> Path:
     """Return the tracker binary path.
 
     Prefers ~/.posetrak/posetrak-tracker (installed location) and falls back
-    to optbuild/cli/posetrak-tracker (developer build). Both get a ``.exe``
+    to optbuild/cpp/cli/posetrak-tracker (developer build). Both get a ``.exe``
     suffix on Windows, where the built binary actually has one.
+
+    Trap: if a ~/.posetrak install exists at all, it silently wins even when it's a stale copy predating a
+    real C++ change (a call from a standalone script, not the GUI, has no
+    "rebuild first" reminder in its way) -- it doesn't fail loudly, it just
+    runs the old logic and produces a wrong or crashing result for reasons
+    that don't obviously point back to "wrong binary". Pass an explicit
+    ``binary_path=`` pointing at optbuild when validating a fresh C++
+    change from a script.
     """
     user_bin = Path.home() / ".posetrak" / _tracker_binary_name()
     if user_bin.exists():

@@ -59,6 +59,14 @@ struct Observation {
     /// threshold and cross-camera consistency), regardless of its computed mahalanobis_distance
     /// -- mahalanobis_distance is still computed and recorded for diagnostics either way.
     bool force_inlier = false;
+    /// Per-camera frame-to-frame identity from an anonymous dot candidate's own
+    /// tracklet_id (dot_tracklet.MotionGatedLinker, resolve_dot_assignment() in
+    /// dot_assignment.cpp) -- -1 (default) for any Observation not built from an
+    /// anonymous dot candidate. Stashed here so Tracker::update_step() can record
+    /// it into prev_dot_tracklet_ids_ the same way it already records
+    /// obs.position into prev_observations_, for the *next* frame's gate
+    /// relaxation to compare against.
+    int tracklet_id = -1;
 
     /// @brief Compute measurement noise std from split pose + calibration error model.
     /// @param ep Pose estimation error (pixels in model input image)
@@ -84,9 +92,15 @@ struct Observation {
 
 /// @brief Sequence of observations from a single camera
 struct ObservationSequence {
-    int camera_id;                          ///< Camera identifier
-    std::string camera_name;                ///< Camera name
-    std::vector<Observation> observations;  ///< All observations
+    int camera_id;            ///< Camera identifier
+    std::string camera_name;  ///< Camera name
+    /// All observations, sorted by timestamp (non-decreasing -- several
+    /// observations from the same frame legitimately share a timestamp).
+    /// get_in_range() binary-searches on this invariant; anything that
+    /// builds an ObservationSequence directly (bypassing the loaders in
+    /// session_reader.cpp / observation_loader.cpp, which already
+    /// guarantee it) must preserve it.
+    std::vector<Observation> observations;
 
     /// @brief Query observations in time range [t_start, t_end)
     /// @param t_start Start time (inclusive)

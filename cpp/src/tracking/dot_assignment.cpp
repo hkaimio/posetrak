@@ -9,6 +9,11 @@
 
 namespace posetrak {
 
+namespace {
+// Cost of pairing a candidate with a subject that does not own it: far above any gate.
+constexpr double kNotOwnedCost = 1e9;
+}  // namespace
+
 std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
     std::vector<SubjectDotPredictions> const& subjects,
     std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
@@ -77,6 +82,13 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
                             }
                         }
                     }
+                }
+
+                // A candidate a subject's own sequence does not hold is out of
+                // reach for that subject. The cost only needs to lose to the
+                // solver's padding cost, which is just above the gate.
+                if (col.subject_id < 64 && !((row_cand.subject_mask >> col.subject_id) & 1U)) {
+                    mahal_sq = kNotOwnedCost;
                 }
 
                 cost[static_cast<size_t>(r) * static_cast<size_t>(n_cols) +
@@ -187,6 +199,52 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
     }
 
     return result;
+}
+
+void append_unique_candidates(std::vector<UnlabeledCandidate>& dest,
+                              std::vector<UnlabeledCandidate> const& src, std::uint64_t owner_bit) {
+    size_t const n_existing = dest.size();
+    for (auto const& c : src) {
+        UnlabeledCandidate* duplicate_of = nullptr;
+        for (size_t i = 0; i < n_existing && duplicate_of == nullptr; ++i) {
+            auto& d = dest[i];
+            if (d.frame_idx == c.frame_idx && d.timestamp == c.timestamp &&
+                d.tracklet_id == c.tracklet_id &&
+                d.position_distorted.x() == c.position_distorted.x() &&
+                d.position_distorted.y() == c.position_distorted.y()) {
+                duplicate_of = &d;
+            }
+        }
+        if (duplicate_of != nullptr) {
+            duplicate_of->subject_mask |= owner_bit;
+        } else {
+            dest.push_back(c);
+            dest.back().subject_mask = owner_bit;
+        }
+    }
+}
+
+std::string find_dot_config_disagreement(std::vector<TrackerConfig const*> const& configs) {
+    if (configs.size() < 2)
+        return {};
+    TrackerConfig const& a = *configs.front();
+    for (size_t i = 1; i < configs.size(); ++i) {
+        TrackerConfig const& b = *configs[i];
+#define POSETRAK_CHECK_DOT_FIELD(field) \
+    if (a.field != b.field)             \
+        return #field;
+        POSETRAK_CHECK_DOT_FIELD(dot_assignment_gate_mahalanobis)
+        POSETRAK_CHECK_DOT_FIELD(dot_tracklet_gate_multiplier)
+        POSETRAK_CHECK_DOT_FIELD(calib_noise_std)
+        POSETRAK_CHECK_DOT_FIELD(dot_streak_velocity_enabled)
+        POSETRAK_CHECK_DOT_FIELD(dot_streak_k_window)
+        POSETRAK_CHECK_DOT_FIELD(dot_streak_k_min_samples)
+        POSETRAK_CHECK_DOT_FIELD(dot_streak_min_displacement_px)
+        POSETRAK_CHECK_DOT_FIELD(dot_streak_min_elongation_px)
+        POSETRAK_CHECK_DOT_FIELD(dot_streak_velocity_noise_std)
+#undef POSETRAK_CHECK_DOT_FIELD
+    }
+    return {};
 }
 
 std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(

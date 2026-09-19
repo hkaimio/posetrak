@@ -37,6 +37,8 @@
 #include "posetrak/tracking/marker_prediction.hpp"
 #include "posetrak/tracking/streak_k_accumulator.hpp"
 #include "posetrak/tracking/tracker.hpp"
+#include <cstdint>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -201,6 +203,28 @@ struct DotAssignmentSubject {
     /// the caller drives, before this function runs).
     Tracker* tracker;
 };
+
+/// @brief Merges the candidates of one subject (*owner_bit* = 1 << subject id)
+/// into the shared pool *dest*.
+///
+/// Several subjects' sequences may each hold a copy of the same detection
+/// run's dot rows. Merged naively, one physical dot becomes several
+/// candidates and the joint assignment can hand it to each subject in turn.
+/// Copies of one detection are byte-identical, so a candidate is a duplicate
+/// when frame, timestamp, distorted position and tracklet id all match. A
+/// duplicate is not added again; its owner is added to the existing
+/// candidate's subject_mask. Every other candidate is added owned by this
+/// subject alone. Only entries present in *dest* before the call are compared,
+/// so a single subject's own list is never merged with itself.
+void append_unique_candidates(std::vector<UnlabeledCandidate>& dest,
+                              std::vector<UnlabeledCandidate> const& src, std::uint64_t owner_bit);
+
+/// @brief Names the first TrackerConfig setting used by the shared dot
+/// assignment on which *configs* disagree, or an empty string when they all
+/// agree. The shared solve takes these settings from one config for every
+/// subject, so a disagreement would silently favour whichever subject came
+/// first.
+std::string find_dot_config_disagreement(std::vector<TrackerConfig const*> const& configs);
 
 /// @brief Thin Tracker-calling wrapper around resolve_dot_assignment(): for
 /// every subject, calls predict_dot_slot_predictions() once per camera_id

@@ -1063,9 +1063,11 @@ static int run_multi_person_track_from_db(std::string const& db_path,
                                           bool smooth_output, bool debug_output, bool debug_init,
                                           double min_confidence,
                                           std::vector<std::string> const& active_joint_groups,
-                                          double override_start_time, double override_end_time) {
+                                          double override_start_time, double override_end_time,
+                                          std::optional<Eigen::Vector3d> const& seed_position) {
     try {
         BuildPersonContextOptions opts;
+        opts.seed_position = seed_position;
         opts.db_path = db_path;
         opts.min_confidence = min_confidence;
         opts.active_joint_groups = active_joint_groups;
@@ -1181,10 +1183,11 @@ int main(int argc, char* argv[]) {
     track_cmd
         ->add_option("--seed-position", db_seed_position,
                      "Externally-supplied initial root position (x y z, meters), bypassing "
-                     "the normal observation-based init search. Single-subject only (--person "
-                     "not supported) -- see BuildPersonContextOptions::seed_position for why "
-                     "this exists: a rigid body with only unlabeled_points (anonymous dot) "
-                     "markers has no cold-start path of its own.")
+                     "the normal observation-based init search. With --person it applies to "
+                     "the one subject that has only unlabeled_points (anonymous dot) markers "
+                     "and so has no cold-start path of its own (it is an error if there is "
+                     "none, or more than one) -- see "
+                     "BuildPersonContextOptions::seed_position.")
         ->expected(3);
     track_cmd
         ->add_option("--person", db_person_specs,
@@ -1235,9 +1238,15 @@ int main(int argc, char* argv[]) {
                 spec.person_id = std::stoi(db_person_specs[i + 3]);
                 specs.push_back(spec);
             }
-            return run_multi_person_track_from_db(
-                db_path, specs, db_output_dir, verbose, quiet, smooth_output, debug_output,
-                debug_init, db_min_confidence, db_active_joint_groups, db_start_time, db_end_time);
+            std::optional<Eigen::Vector3d> multi_seed;
+            if (!db_seed_position.empty()) {
+                multi_seed =
+                    Eigen::Vector3d(db_seed_position[0], db_seed_position[1], db_seed_position[2]);
+            }
+            return run_multi_person_track_from_db(db_path, specs, db_output_dir, verbose, quiet,
+                                                  smooth_output, debug_output, debug_init,
+                                                  db_min_confidence, db_active_joint_groups,
+                                                  db_start_time, db_end_time, multi_seed);
         } else if (!db_path.empty()) {
             // DB mode: validate required DB args
             if (db_sequence_id.empty() || db_skeleton_id.empty() || db_config_id.empty()) {

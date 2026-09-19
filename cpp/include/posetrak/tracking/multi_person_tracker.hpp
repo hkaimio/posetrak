@@ -118,6 +118,12 @@ struct BuildPersonContextOptions {
     /// useful for a skeleton where orientation is genuinely unobserved, same
     /// as initialize_rigid_body()'s own single-marker branch).
     std::optional<Eigen::Vector3d> seed_position;
+    /// When set, *seed_position* applies only to a subject that cannot
+    /// initialise from observations (a dots-only subject: it has a dot track
+    /// and no labeled observations). MultiPersonTracker sets this when it
+    /// tracks several subjects, so a person that initialises normally is
+    /// unaffected by the seed meant for a prop.
+    bool seed_only_dots_only_subjects = false;
 };
 
 /// @brief Owns everything needed to track one person through a sequence and record
@@ -150,6 +156,10 @@ struct PersonContext {
     /// queued. False for every existing person and the sword's own ArUco-only
     /// skeleton -- those keep calling step_person_context() exactly as today.
     bool has_dot_track = false;
+
+    /// True when this subject was initialised from BuildPersonContextOptions::
+    /// seed_position.
+    bool initialized_from_seed = false;
 
     /// Anonymous reflective-dot candidates for this person's whole sequence,
     /// loaded once (like *observations*) when has_dot_track is true; empty

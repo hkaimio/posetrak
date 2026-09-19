@@ -286,7 +286,7 @@ def test_finalise_object_rejects_non_marker_run(session):
         session, shot_id=_SHOT_ID, sync_config_id=_SYNC_ID, time_start_s=0.0, time_end_s=1.0,
         detector_model="yolox-x", pose_model="rtmpose-l-133kp",
     )
-    with pytest.raises(ValueError, match="not a marker run"):
+    with pytest.raises(ValueError, match="not a marker or imported 2D run"):
         finalise_object_to_db(session, run_id)
 
 

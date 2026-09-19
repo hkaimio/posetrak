@@ -318,6 +318,73 @@ def _run_pose_detection(
     click.echo(result.detection_run_id)
 
 
+@detect_group.command("import-2d")
+@click.option("--capture", required=True, help="Capture ID (prefix accepted).")
+@click.option("--sync", required=True, help="Sync config ID (prefix accepted).")
+@click.option("--trial", default=None, help="Trial ID (prefix accepted) to record on the run.")
+@click.option("--object", "object_ref", default=None,
+              help="Bind the run to this capture object (name or ID prefix), so that "
+                   "`sequence finalise-object` can make its sequence.")
+@click.option(
+    "--camera", "tracks", nargs=2, multiple=True, required=True, metavar="LABEL CSV",
+    type=(str, click.Path(exists=True, dir_okay=False, path_type=Path)),
+    help="A track file for the camera with this label. Repeat for several cameras, and for "
+         "several tracks of one camera.",
+)
+@click.option("--source", default="external", show_default=True,
+              help="The tool the tracks come from, recorded on the run (e.g. blender).")
+@click.pass_context
+def cmd_import_2d(
+    ctx: click.Context,
+    capture: str,
+    sync: str,
+    trial: str | None,
+    object_ref: str | None,
+    tracks: tuple[tuple[str, Path], ...],
+    source: str,
+) -> None:
+    """Import 2D point tracks made in another tool as a detection run.
+
+    Each CSV file is one track of one camera, with a header row and the columns
+    video_frame, pixel_x and pixel_y (raw image pixels, origin top left): the
+    output of python/tools/blender/blender_export_2d_tracks.py imports as it is.
+    The points become anonymous dot candidates, so the run works wherever a dots
+    run does. The run ID is printed to stdout.
+
+    Example:
+
+        posetrak -s session.db detect import-2d --capture <id> --sync <id> \
+            --object ball --source blender \
+            --camera gopro13_01 ball-gopro13_01.csv --camera gopro13_01 ball-gopro13_01-b.csv
+    """
+    from posetrak.detection.external_import import import_external_2d
+
+    session_path: str | None = ctx.obj.get("session")
+    if session_path is None:
+        fail("--session / POSETRAK_SESSION_DB is required for 'detect import-2d'.")
+    try:
+        session = open_session(Path(session_path))
+    except (FileNotFoundError, ValueError) as exc:
+        fail(str(exc))
+    try:
+        capture_id = resolve_id_prefix(session, "captures", capture)
+        sync_id = resolve_id_prefix(session, "sync_configs", sync)
+        trial_id = resolve_id_prefix(session, "trials", trial) if trial else None
+        object_id = _resolve_capture_object(session, capture_id, object_ref) if object_ref else None
+        result = import_external_2d(
+            session, capture_id, sync_id, list(tracks),
+            trial_id=trial_id, capture_object_id=object_id, source=source,
+        )
+    except ValueError as exc:
+        fail(str(exc))
+
+    for label, n in sorted(result.rows_by_camera.items()):
+        click.echo(f"  {label}: {n} frames", err=True)
+    if result.skipped_no_timestamp:
+        click.echo(f"Skipped {result.skipped_no_timestamp} points on frames without a sync timestamp.", err=True)
+    click.echo(result.detection_run_id)
+
+
 # ---------------------------------------------------------------------------
 # detect list
 # ---------------------------------------------------------------------------

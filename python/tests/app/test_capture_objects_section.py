@@ -2,8 +2,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for CaptureObjectsSection (marker-based-mocap design doc §7.1
-sub-phase 1c): CapturePanel's "Objects" list -- add/rename/remove against a
+"""Tests for CaptureObjectsSection (marker-based-mocap design doc §7.1):
+CapturePanel's "Objects" list -- add/rename/remove against a
 real session DB. Mirrors test_capture_persons_section.py's approach --
 private _on_*() handlers are called directly for the Qt-native-dialog
 cases (QInputDialog/QMessageBox can't be driven headlessly), while _on_add

@@ -163,8 +163,7 @@ def test_detect_blobs_rejects_a_streak_too_long_to_be_realistic_blur() -> None:
 
 
 def test_detect_blobs_accepts_a_wide_area_streak_that_shape_alone_would_pass() -> None:
-    """The real 2026-09-06 bug: `area` used to be checked *before* shape, so
-    a legitimately dot-width streak whose raw pixel count happens to exceed
+    """Shape is classified before `area`: a legitimately dot-width streak whose raw pixel count happens to exceed
     max_area=400 (its area scales with length, not just width) was
     discarded before its shape was ever considered. This one is 55x8 --
     area=440, over max_area, but a real streak by every shape criterion
@@ -238,7 +237,7 @@ def test_detect_blobs_max_saturation_rejects_a_skin_toned_highlight() -> None:
 
 
 def test_detect_blobs_blacklist_mode_recovers_a_marker_subtract_mode_fuses_away() -> None:
-    """The real 2026-09-08 bug: a marker sitting on a subject occupying a
+    """A marker sitting on a subject occupying a
     pose the background model's samples didn't cover reads as one large,
     connected, non-round blob under 'subtract' mode (the subject's own
     limb + the marker fused together, both crossing the same residual
@@ -278,7 +277,7 @@ def test_detect_blobs_blacklist_mode_rejects_a_spot_thats_always_bright() -> Non
 
 
 def test_detect_blobs_max_saturation_survives_a_saturated_backdrops_edge_bleed() -> None:
-    """The real 2026-09-08 bug: a genuinely white/near-neutral marker's own
+    """A genuinely white/near-neutral marker's own
     contour mask includes its anti-aliased boundary pixels, which blend
     with whatever is directly behind it -- on a highly saturated backdrop
     (e.g. a patterned fabric a person-worn marker is sewn onto) that alone

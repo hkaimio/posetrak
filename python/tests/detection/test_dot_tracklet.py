@@ -2,9 +2,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for MotionGatedLinker (see dot_tracklet.py's own module docstring
-for the Phase B investigation this exists to act on, and status.md's
-2026-09-11 entries for the real-data validation that shaped its gates)."""
+"""Tests for MotionGatedLinker (see dot_tracklet.py's module docstring for
+the problem it solves and why its gates are tight)."""
 from __future__ import annotations
 
 from posetrak.detection.dot_blob_detector import BlobCandidate
@@ -103,8 +102,7 @@ def test_two_candidates_prefer_the_nearer_tracklet_match() -> None:
 
 
 def test_an_occluded_track_coasts_past_a_stale_distractor() -> None:
-    """The real bug this linker exists to fix (status.md 2026-09-11): a
-    tracklet moving steadily, then occluded for a couple of frames, must
+    """The bug this linker exists to fix: a tracklet moving steadily, then occluded for a couple of frames, must
     NOT jump onto a different, stationary candidate that happens to sit
     near its *last seen* pixel -- it should keep predicting forward along
     its own established velocity and pick up its own continuation
@@ -131,8 +129,8 @@ def test_an_occluded_track_coasts_past_a_stale_distractor() -> None:
 
 
 def test_coasting_does_not_compound_across_multiple_missed_frames() -> None:
-    """Regression for a real bug found on full-capture data (status.md,
-    2026-09-11): `last_frame` must advance on every coast step, not only
+    """Regression for a bug seen on full-capture data: `last_frame` must
+    advance on every coast step, not only
     on a real match -- otherwise the next predict() computes dt as time-
     since-last-*match* and reapplies it on top of state that was already
     advanced by the previous coast, compounding quadratically instead of
@@ -140,8 +138,8 @@ def test_coasting_does_not_compound_across_multiple_missed_frames() -> None:
     predict close to its true constant-velocity position (~160,100) with
     a correspondingly tight gate -- not run far past it (~310+,100) with
     a gate so wide it would accept nearly any nearby candidate, including
-    a distant, unrelated real marker (exactly the "big jump" failure
-    Harri found reviewing the full capture). The earlier 2-frame-gap test
+    a distant, unrelated real marker (the "big jump" failure seen when
+    reviewing a full capture). The earlier 2-frame-gap test
     above didn't run long enough to expose this -- the compounding is
     small until several consecutive misses accumulate."""
     linker = MotionGatedLinker(birth_gate_px=20.0, max_missed=10)
@@ -162,9 +160,8 @@ def test_coasting_does_not_compound_across_multiple_missed_frames() -> None:
 
 
 def test_two_close_simultaneous_tracks_do_not_swap_identity() -> None:
-    """The second failure mode found validating this linker (status.md
-    2026-09-11, gopro13_02#283): two simultaneously visible, closely-
-    spaced real markers moving in parallel must not have their ids
+    """A second failure mode of motion gating alone: two simultaneously
+    visible, closely-spaced real markers moving in parallel must not have their ids
     ping-pong between frames just because a Hungarian solver's tie-break
     happens to flip. Both should keep their own id across an ambiguous
     step rather than have identities cross."""

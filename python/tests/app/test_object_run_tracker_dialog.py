@@ -2,10 +2,10 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for ObjectRunTrackerDialog (marker-based-mocap design doc §7.1
-sub-phase 1f) -- the GUI entry point for running the tracker against a
-finalised marker-mocap object sequence, previously reachable only via the
-CLI directly.
+"""Tests for ObjectRunTrackerDialog (marker-based-mocap design doc §7.1)
+-- the GUI entry point for running the tracker against a finalised
+marker-mocap object sequence, which is otherwise reachable only via the
+CLI.
 
 Pure widget-construction and path-building assertions -- actually launching
 the tracker subprocess follows this file's existing convention (see

@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for ArUco marker detection (design phase 1a).
+"""Tests for ArUco marker detection.
 
 See docs/roadmap/features/marker-based-mocap/marker-mocap-design.md §7.1.
 Two layers, matching test_detection_pipeline.py's split between DB-layer
@@ -191,8 +191,7 @@ def test_marker_keypoint_writer_layout_and_missing_marker(session):
 
 def test_marker_keypoint_writer_uses_near_zero_noise_scale(session):
     """noise_scale (-> Observation::crop_scale) must be ~0 for markers, not
-    the person pipeline's 1.0 default (code review finding #4, status.md
-    2026-08-31 entry): a coded ArUco corner is found by direct sub-pixel
+    the person pipeline's 1.0 default: a coded ArUco corner is found by direct sub-pixel
     corner refinement on the full-resolution frame, with no fixed-input-
     resolution network stage for crop_scale to describe -- letting it stay
     1.0 gave marker observations the same detection-algorithm-error
@@ -450,7 +449,7 @@ def _synthetic_dim_dot_frames(path, first_frame, last_frame):
 def test_pipeline_bg_subtract_finds_a_dim_highlight_raw_threshold_misses(session):
     """dot_bg_subtract=True + a low dot_threshold recovers a dim highlight
     that the default raw-brightness path (threshold=235) never sees at all
-    -- the real 2026-09-06 finding this pipeline wiring exists for."""
+    -- the finding this pipeline wiring exists for."""
     ids = _TEST_IDS
     with patch("posetrak.detection.marker_pipeline.iter_frames", _synthetic_dim_dot_frames):
         without_bg = MarkerDetectionPipeline(
@@ -497,7 +496,7 @@ def _synthetic_fused_blob_frames(path, first_frame, last_frame):
 
 
 def test_pipeline_background_mode_blacklist_recovers_a_marker_subtract_fuses_away(session):
-    """The real 2026-09-08 pipeline-level wiring check: 'subtract' mode
+    """Pipeline-level wiring check: 'subtract' mode
     fuses the marker into the surrounding atypical-pose blob and loses it
     (same failure as dot_blob_detector.py's own unit test, checked here at
     the pipeline level to confirm background_mode is actually threaded
@@ -535,9 +534,9 @@ def test_pipeline_background_mode_blacklist_recovers_a_marker_subtract_fuses_awa
 
 def test_pipeline_dot_threshold_by_camera_overrides_the_global_default(session):
     """A camera-specific threshold in dot_threshold_by_camera should win
-    over dot_threshold for that camera -- the real 2026-09-08 finding that
-    different cameras' sensors/tone-mapping cap real markers at very
-    different absolute brightness levels."""
+    over dot_threshold for that camera -- different cameras'
+    sensors/tone-mapping cap real markers at very different absolute
+    brightness levels."""
     ids = _TEST_IDS
     with patch("posetrak.detection.marker_pipeline.iter_frames", _synthetic_dim_dot_frames):
         pipeline = MarkerDetectionPipeline(
@@ -557,8 +556,7 @@ def test_pipeline_dot_threshold_by_camera_overrides_the_global_default(session):
 def test_pipeline_passes_per_camera_max_saturation_and_blacklist_frac(session):
     """dot_max_saturation_by_camera / dot_blacklist_frac_by_camera override
     their scalar defaults for a specific camera, exactly like
-    dot_threshold_by_camera above -- the 2026-09-11 finding (person-marker
-    redesign phase P-D, status.md) that a real capture mixing camera
+    dot_threshold_by_camera above -- a real capture mixing camera
     models needs both overridden per camera too (one camera's markers
     render meaningfully colour-tinted; the glare veto tuned on a
     reflective-prop capture proved too tight for person-worn markers).
@@ -666,7 +664,7 @@ def test_real_detector_output_writes_through_correctly(session):
 
 
 # ---------------------------------------------------------------------------
-# Marker-body-driven mode (design phase 1c) -- rig_config constructor path
+# Marker-body-driven mode -- rig_config constructor path
 # and the load_pipeline_for_capture_object factory.
 # ---------------------------------------------------------------------------
 

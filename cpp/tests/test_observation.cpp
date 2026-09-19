@@ -133,9 +133,7 @@ TEST_CASE("ObservationSequence time queries", "[observation]") {
     }
 }
 
-TEST_CASE(
-    "ObservationSequence::get_in_range() with duplicate timestamps (2026-09-13 binary-search fix)",
-    "[observation]") {
+TEST_CASE("ObservationSequence::get_in_range() with duplicate timestamps", "[observation]") {
     // Real usage always has several observations (one per keypoint) sharing
     // one exact timestamp per frame -- get_in_range() went from a linear
     // scan to a binary search (std::lower_bound) that relies on the

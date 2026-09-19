@@ -65,7 +65,7 @@ test_sources = files(
   # DB result writer (hierarchical solver read-modify-write patching)
   'test_result_writer.cpp',
 
-  # Marker-based mocap: dot assignment (design doc's Phase C2)
+  # Marker-based mocap: dot assignment
   'test_assignment.cpp',
   'test_marker_prediction.cpp',
   'test_tracker_predict_update_split.cpp',

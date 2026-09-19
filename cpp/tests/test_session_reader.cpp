@@ -552,11 +552,11 @@ static void create_fixture_db() {
                       edit_blob, mask);
     }
 
-    // ---------- Marker-based-mocap object sequence (design doc §7.1 sub-phase
-    // 1f) -- source='markers', no 'body' row ever, resolved via
+    // ---------- Marker-based-mocap object sequence (design doc §7.1) --
+    // source='markers', no 'body' row ever, resolved via
     // pose_sequence_keypoints instead of a COCO id. Regression fixture for the
     // "primary-source row is whichever row isn't a recognized overlay, not
-    // hardcoded to the literal name 'body'" fix (status.md, 2026-08-30). ----------
+    // hardcoded to the literal name 'body'" fix. ----------
     exec_sql(db,
              "INSERT INTO pose_observation_sequences "
              "(id,shot_id,sync_config_id,time_start_s,time_end_s) "
@@ -640,7 +640,7 @@ static void create_fixture_db() {
         // scene-wide, not tied to a tracked subject, but pose_observations'
         // primary key still requires one. A different candidate count per
         // frame (3, then 1) exercises the variable-N blob width. ----------
-        // Count-prefixed format (2026-09-06): int32 candidate count, then
+        // Count-prefixed format: int32 candidate count, then
         // float32[count, 9] (px, py, area, compactness, major_axis,
         // minor_axis, dir_x, dir_y, tracklet_id) -- see db_cache.py's
         // encode_dot_candidates().
@@ -1044,13 +1044,13 @@ TEST_CASE("SessionReader load_observations lets hand_l.refined override hand_l",
 }
 
 // ---------------------------------------------------------------------------
-// Marker-based-mocap object sequences (design doc §7.1 sub-phase 1f):
+// Marker-based-mocap object sequences (design doc §7.1):
 // source='markers' rows, resolved via pose_sequence_keypoints instead of a
 // COCO id. Regression test for the exact bug this fix addresses: the
 // primary/base-layer row used to be found by literal name =='body', so an
 // object sequence's 'markers' row was never recognised as the base layer and
 // every one of its keypoints was silently discarded (mirrors the Python-side
-// observation_merge.py bug, status.md 2026-08-30).
+// observation_merge.py bug).
 // ---------------------------------------------------------------------------
 
 TEST_CASE("SessionReader load_observations resolves a manifest-bound (markers-source) sequence",

@@ -717,8 +717,8 @@ TEST_CASE(
 }
 
 // ---------------------------------------------------------------------------
-// Rigid-body initialization (marker-mocap algorithms doc §4.2, design §7.1
-// sub-phase 1f): a root-only skeleton (a prop generated from a marker body
+// Rigid-body initialization (marker-mocap algorithms doc §4.2, design §7.1):
+// a root-only skeleton (a prop generated from a marker body
 // definition, design §5.3) uses a closed-form Kabsch/Umeyama fit instead of
 // triangulation + IK.
 // ---------------------------------------------------------------------------

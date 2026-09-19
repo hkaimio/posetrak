@@ -348,8 +348,7 @@ TEST_CASE("predict_dot_slot_predictions() predicts an unlabeled_points marker on
 
 TEST_CASE(
     "predict_dot_slot_predictions() on a non-rigid-body skeleton uses the general/"
-    "articulated sigma-point path (dot-assignment-architecture-design.md §6, built "
-    "2026-09-12)",
+    "articulated sigma-point path (dot-assignment-architecture-design.md §6)",
     "[tracker][predict_dot_slot_predictions]") {
     auto fx = make_articulated_fixture(2);
 
@@ -411,7 +410,7 @@ TEST_CASE(
 
 TEST_CASE(
     "predict_dot_slot_predictions_all_cameras() matches calling predict_dot_slot_predictions() "
-    "once per camera (2026-09-13 cross-camera batching perf fix)",
+    "once per camera",
     "[tracker][predict_dot_slot_predictions]") {
     auto fx = make_articulated_fixture(2);
 

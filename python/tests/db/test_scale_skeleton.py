@@ -4,9 +4,8 @@
 
 """Tests for posetrak/db/scale_skeleton.py.
 
-No prior test coverage existed for this module (found 2026-09-14, while
-adding hip_to_ear-derived neck+head scaling) -- these cover the
-pre-existing limb/torso/shoulder-width scaling plus the new one, on a
+These cover the limb/torso/shoulder-width scaling plus the
+hip_to_ear-derived neck+head scaling, on a
 small synthetic skeleton rather than a real multi-hundred-joint one.
 """
 

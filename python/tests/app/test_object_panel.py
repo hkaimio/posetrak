@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for ObjectPanel / ObjectCropGridWidget (marker-based-mocap design
-doc §7.1 sub-phase 1e).
+doc §7.1).
 
 Builds a real finalised object sequence via the actual pipeline helpers
 (create_marker_detection_run -> MarkerKeypointWriter -> finalise_object_to_db)

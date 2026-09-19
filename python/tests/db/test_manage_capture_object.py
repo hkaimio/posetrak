@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for posetrak/db/manage_capture_object.py (design phase 1c)."""
+"""Tests for posetrak/db/manage_capture_object.py."""
 
 from __future__ import annotations
 

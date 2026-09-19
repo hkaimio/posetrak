@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for RunDetectionDialog's object/marker-detection mode
-(marker-based-mocap design doc §7.1 sub-phase 1c).
+(marker-based-mocap design doc §7.1).
 
 Mirrors test_run_detection_dialog.py's approach for the segmentation bbox
 source: the actual MarkerDetectionPipeline execution needs a real video

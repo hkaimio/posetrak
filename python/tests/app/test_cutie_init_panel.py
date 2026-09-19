@@ -99,7 +99,7 @@ def test_persons_union_detection_track_assignments(qapp, capture_db):
 
 
 def test_persons_union_capture_objects(qapp, capture_db):
-    """A non-person prop (2026-09-17: a ball tracked purely by segmentation-
+    """A non-person prop (e.g. a ball tracked purely by segmentation-
     mask centroid, no coded pattern) registered as a capture_objects row is
     selectable here too, the same way a capture_persons row is -- foreign
     keys are off in this fixture (matching every other test here), so the

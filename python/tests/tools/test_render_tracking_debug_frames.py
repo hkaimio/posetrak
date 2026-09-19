@@ -3,10 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for render_tracking_debug_frames.py's _nearest_state_row() --
-this module had no test coverage at all before (a standalone visualization
-tool, same "no unit tests for the DB-loading parts" precedent as
-calibrate_rigid_marker_body.py), but the one real bug found in it
-(2026-09-05) was serious enough to cover directly: RTS-smoothed
+a standalone visualization tool, with no unit tests for its DB-loading parts
+(same precedent as calibrate_rigid_marker_body.py), but one failure mode is
+serious enough to cover directly: RTS-smoothed
 tracking_results rows use a *different* tracker_step numbering than raw
 ones (smoothing only ever covers steps that were actually tracked, so a
 gap-heavy run's smoothed index runs ahead of the raw one by however many
@@ -103,8 +102,8 @@ def test_nearest_state_row_returns_none_with_no_matching_run():
 
 
 # ---------------------------------------------------------------------------
-# _robust_bounds() -- the crop-window fix (2026-09-05): a strict min/max over
-# a whole clip's points let a single wild outlier (a false-positive raw-dot
+# _robust_bounds() -- the crop-window fix: a strict min/max over
+# a whole clip's points lets a single wild outlier (a false-positive raw-dot
 # candidate anywhere in frame, or a predicted marker reprojected far from the
 # subject during high state uncertainty) blow up the crop for the entire
 # clip, exactly the moments this tool exists to zoom in on.
@@ -129,9 +128,9 @@ def test_robust_bounds_falls_back_to_min_max_with_too_few_points():
 
 
 # ---------------------------------------------------------------------------
-# _sequential_frame_lookup() -- the grid-render performance fix (2026-09-05):
+# _sequential_frame_lookup() -- the grid-render performance fix:
 # _grab_frame() reopens and reseeks the whole video container on every call,
-# which made a 6-camera grid render extremely slow (I/O-bound repeated
+# which makes a 6-camera grid render extremely slow (I/O-bound repeated
 # seeking through external-drive 4K footage) despite near-zero CPU use.
 # _sequential_frame_lookup() should decode each camera's needed range with
 # exactly one pass, not one open-and-seek per requested timestamp.

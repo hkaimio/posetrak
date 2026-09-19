@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for calibrate_rigid_marker_body.py's reflective-dot calibration
-pieces (Phase C1, see
+pieces (see
 docs/roadmap/features/marker-based-mocap/reflective-dot-detection-design.md
 §3.1): triangulate_point_multi_view() and cluster_dot_samples(). The rest
 of the script (DB loading, ArUco corner calibration) is exercised only by

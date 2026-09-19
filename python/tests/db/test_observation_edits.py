@@ -263,7 +263,7 @@ def test_update_single_keypoint_edit_uses_body_row_width(multi_source_session):
 
 
 # ---------------------------------------------------------------------------
-# primary_source (marker-based-mocap design doc §7.1 sub-phase 1e): a
+# primary_source (marker-based-mocap design doc §7.1): a
 # sequence whose real source is never 'body' -- an object sequence's
 # source='markers' -- needs its own primary_source passed through both
 # read_observations_with_edits and update_single_keypoint_edit.
@@ -305,9 +305,9 @@ def test_read_with_primary_source_returns_real_row_unedited(markers_source_sessi
 
 
 def test_edit_one_slot_leaves_others_at_their_real_values(markers_source_session):
-    """Regression test for the exact bug found building ObjectPanel
-    (status.md, 2026-08-30): once an edit exists anywhere in the camera,
-    merge_observation_sources used to synthesize a same-width *zero* body
+    """Regression test for a bug seen in ObjectPanel: once an edit exists
+    anywhere in the camera, merge_observation_sources synthesized a
+    same-width *zero* body
     for every frame whose real source wasn't literally 'body' -- silently
     discarding the real 'markers' row's untouched slots instead of merging
     onto them, the moment default_width happened to become known (here,

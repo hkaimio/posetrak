@@ -106,11 +106,10 @@ TEST_CASE("resolve_dot_assignment: candidate beyond the gate resolves to nothing
 }
 
 // ---------------------------------------------------------------------------
-// Tracklet gate relaxation (2026-09-06) -- see dot_assignment.hpp's own doc
-// comment on resolve_dot_assignment()'s dot_tracklet_gate_multiplier/
-// prev_tracklet_ids parameters, and status.md's 2026-09-06 Phase B entry for
-// the real-data finding that motivated it (only ~4-6% of raw candidates
-// survive this gate during a fast swing, unmodified).
+// Tracklet gate relaxation -- see dot_assignment.hpp's own doc comment on
+// resolve_dot_assignment()'s dot_tracklet_gate_multiplier/prev_tracklet_ids
+// parameters. Real data motivated it: only ~4-6% of raw candidates survive
+// this gate during a fast swing, unmodified.
 // ---------------------------------------------------------------------------
 
 TEST_CASE(
@@ -687,8 +686,8 @@ TEST_CASE(
 // ---------------------------------------------------------------------------
 // A streaked dot's POSITION and VELOCITY Observations share one (camera,
 // marker, frame) triple -- the exact case that broke UnscentedKalmanFilter::
-// update()'s internal bookkeeping (observation-results-semantics.md's
-// 2026-09-05 entry) because it previously matched observations by that triple
+// update()'s internal bookkeeping (see observation-results-semantics.md)
+// because it matched observations by that triple
 // alone, which no longer uniquely identifies one.
 // ---------------------------------------------------------------------------
 

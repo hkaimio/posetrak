@@ -299,7 +299,7 @@ ObservationResult make_result(std::string const& marker_name, int camera_id,
 
 // ---------------------------------------------------------------------------
 // write_obs_results() -- streak-velocity-design.md §4's dual-Observation-
-// per-slot fix (observation-results-semantics.md's 2026-09-05 entry).
+// per-slot fix (see observation-results-semantics.md).
 // ---------------------------------------------------------------------------
 
 TEST_CASE(
@@ -346,8 +346,8 @@ TEST_CASE(
     "ResultWriter::write_obs_results: POSITION wins the slot over a VELOCITY "
     "sibling for the same (camera, marker), regardless of vector order",
     "[result_writer][write_obs_results]") {
-    // This is the exact bug streak velocity introduced (observation-results-
-    // semantics.md's 2026-09-05 entry): a streaked dot's POSITION and VELOCITY
+    // This is the exact bug streak velocity introduced (see observation-results-
+    // semantics.md): a streaked dot's POSITION and VELOCITY
     // Observations share one (camera, marker) diagnostic slot; before this fix,
     // whichever was last in the vector silently won, so a VELOCITY observation's
     // own pixel *delta* (a small number, e.g. dx=12) could overwrite a real

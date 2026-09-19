@@ -2,16 +2,16 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for posetrak.skeleton.marker_body_to_skeleton (design phase 1b).
+"""Tests for posetrak.skeleton.marker_body_to_skeleton.
 
 See docs/roadmap/features/marker-based-mocap/marker-mocap-design.md §7.1.
-Validated per that sub-phase's own criterion: the generated YAML is diffed
+The generated YAML is diffed
 against a hand-verified expected structure, then loaded through the
 existing SkeletonLayout parser (used elsewhere for FK/visualization) to
 confirm it is a valid root-only, no-extra-joints skeleton with the right
 marker count -- SkeletonLayout is the closest thing to "the existing
 SkeletonLoader unit-test harness" available on the Python side; the C++
-SkeletonLoader itself is exercised once sub-phase 1f binds input_tracks.
+SkeletonLoader itself is exercised by the C++ tests that bind input_tracks.
 """
 from __future__ import annotations
 
@@ -344,7 +344,7 @@ def test_generated_yaml_symmetry_axis_survives_yaml_round_trip():
     text = generate_prop_skeleton_yaml(config)
     parsed = yaml.safe_load(text)
     assert parsed["joints"][0]["locked_dofs"]["axis"] == [0.0, 1.0, 0.0]
-    # SkeletonLayout doesn't know about locked_dofs yet (tracker-side
-    # consumption is a later sub-phase) -- it must simply ignore the extra
+    # SkeletonLayout doesn't know about locked_dofs (tracker-side
+    # consumption is separate) -- it must simply ignore the extra
     # key rather than error, same as any other unrecognized field.
     SkeletonLayout(text)

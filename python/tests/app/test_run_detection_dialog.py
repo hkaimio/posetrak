@@ -300,7 +300,7 @@ def test_on_seg_queue_done_finalises_without_manual_stitching(qapp, capture_db, 
 
 # ---------------------------------------------------------------------------
 # Marker (object) detection run auto-finalisation (marker-based-mocap design
-# doc §7.1 1d/1e ordering note). Regression coverage for the bug where a
+# doc §7.1). Regression coverage for the bug where a
 # completed marker run left the object stuck: no pose_observation_sequence
 # was ever created, and the only UI reachable from the run was the person
 # stitching tab, which has nothing to show for an object and no way to

@@ -139,7 +139,7 @@ TEST_CASE("apply_keypoint_edits: size mismatch throws", "[blob_codec]") {
 // docs/roadmap/features/marker-based-mocap/dot-assignment-architecture-design.md)
 // ---------------------------------------------------------------------------
 
-// Count-prefixed format (2026-09-06): int32 candidate count, then
+// Count-prefixed format: int32 candidate count, then
 // float32[count, 9] (px, py, area, compactness, major_axis, minor_axis,
 // dir_x, dir_y, tracklet_id) -- see db_cache.py's encode_dot_candidates() for
 // the full versioning rationale (a byte-length-only scheme is ambiguous once
@@ -229,11 +229,11 @@ TEST_CASE("decode_dot_candidates: blob shorter than the count prefix throws", "[
 }
 
 TEST_CASE(
-    "decode_dot_candidates: a pre-2026-09-05 float32[N,6] blob (still count-prefixed) is "
+    "decode_dot_candidates: a legacy float32[N,6] blob (still count-prefixed) is "
     "rejected, not silently misdecoded",
     "[blob_codec]") {
-    // The pre-2026-09-05 format already had a count-prefix header (added
-    // 2026-09-04) -- just a narrower 6-floats-per-candidate payload, without
+    // The legacy float32[N,6] format already had a count-prefix header --
+    // just a narrower 6-floats-per-candidate payload, without
     // the streak direction. Decoding it with the new 8-floats-per-candidate
     // stride must fail on the byte-count mismatch, not silently reinterpret
     // the trailing bytes as a shorter candidate list.

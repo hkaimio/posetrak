@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for SessionTreeWidget's object-sequence listing (marker-based-
-mocap design doc §7.1 sub-phase 1e): a finalised object sequence must show
+mocap design doc §7.1): a finalised object sequence must show
 up under its own OBJECT_TRACK branch, labeled by the capture_objects row's
 name, and must never appear (or be mistaken for a person) under the
 PERSON_TRACK branch built by _add_person_tracks.

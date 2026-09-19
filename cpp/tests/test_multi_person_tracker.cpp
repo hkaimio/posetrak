@@ -557,8 +557,7 @@ bool states_bitwise_equal(State const& a, State const& b) {
 // indirectly by every other test in this file continuing to pass unchanged
 // (none of the existing fixtures have an unlabeled_points track, so
 // has_dot_track stays false and the ordinary step_person_context() path is
-// all that runs) -- see status.md for the real end-to-end validation this
-// wiring was built for.
+// all that runs).
 // ---------------------------------------------------------------------------
 
 TEST_CASE("person_context_step_window computes the same window step_person_context() uses",
@@ -592,7 +591,7 @@ TEST_CASE("bucket_candidates_by_camera groups by camera within the time window",
           "[multi_person_tracker][dot_assignment]") {
     // Input is pre-split by camera and sorted by timestamp within each --
     // the contract bucket_candidates_by_camera() documents and its own
-    // binary search (2026-09-13 perf fix) depends on; real callers always
+    // binary search depends on; real callers always
     // pass PersonContext::unlabeled_candidates_by_camera, which
     // build_person_context() builds with exactly this shape.
     std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates_by_camera;

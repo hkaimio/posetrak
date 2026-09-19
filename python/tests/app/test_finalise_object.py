@@ -3,12 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for app.pose.finalise.finalise_object_to_db (marker-based-mocap
-design doc §4.3, §7.1 sub-phase 1d).
+design doc §4.3, §7.1).
 
-See status.md's 2026-08-30 entry for why finalisation is sub-phase 1d
-(before review, 1e) rather than the original 1d/1e order: an object has
-no track-to-person stitching decision to make, so finalisation is
-automatic/immediate rather than gated behind a review step.
+An object has no track-to-person stitching decision to make, so
+finalisation is automatic/immediate rather than gated behind a review
+step.
 """
 from __future__ import annotations
 

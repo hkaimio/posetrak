@@ -174,12 +174,12 @@ def test_infer_body_width_returns_none_when_no_frame_has_a_body_row():
 
 
 # ---------------------------------------------------------------------------
-# primary_source (marker-based-mocap design doc §7.1 sub-phase 1e): a
+# primary_source (marker-based-mocap design doc §7.1): a
 # sequence whose real source is never 'body' (e.g. 'markers' for an object)
 # must have its own row treated as the base layer, not silently replaced by
 # a synthesized zero body the moment default_width happens to be known from
-# something unrelated (an edit's own shape, in the real bug this was found
-# from -- read_observations_with_edits, status.md's 2026-08-30 note).
+# something unrelated (an edit's own shape -- see
+# read_observations_with_edits).
 # ---------------------------------------------------------------------------
 
 

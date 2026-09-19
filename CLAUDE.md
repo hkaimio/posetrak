@@ -247,6 +247,24 @@ for a worked example of both the failed first approach and why it failed.
 
 C++20, enforced via clang-format (pre-commit hook). All linear algebra uses Eigen. All string formatting uses `fmt`. Use `std::optional`, concepts, and ranges where natural.
 
+### Comments and design documents
+
+Source files and design documents must stay self-descriptive when read years
+from now by someone who does not know, or care, how the feature was developed.
+A comment explains the implementation and justifies a choice where the reason
+is not obvious. It does not narrate how the code got that way.
+
+- No dates, people's names, planning phase or step IDs, or references to a chat
+  or review discussion ("found that…", "the first version did…", "used to…",
+  "after a sweep against…") in application code or its tests. Development
+  history belongs in commit messages and status documents.
+- Do not point at `status.md` from source: many files share that name and they
+  will eventually be archived. Put the information in a design document under
+  `docs/roadmap/features/` or in the comment itself.
+- Findings and learnings are worth keeping, expressed generically: the failure
+  mode, the relevant numbers, and why the design follows from them.
+- Prototype scripts under `python/tools/prototypes/` are exempt.
+
 ## Git conventions
 
 The project uses pre-commit hooks to ensure consistency of Git commit. Always make sure that pre-commit is isntalled before creating commit in new workarea.

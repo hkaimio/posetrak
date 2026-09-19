@@ -767,3 +767,68 @@ def test_load_pipeline_for_capture_object_dot_only_body_raises(session):
             session, capture_object_id=object_id, sync_config_id=_TEST_IDS["sync_id"],
             time_start_s=0.0, time_end_s=1.0,
         )
+
+
+def test_dots_only_run_writes_dot_candidates_and_no_coded_marker_rows(session):
+    ids = _TEST_IDS
+    with patch("posetrak.detection.marker_pipeline.iter_frames", _synthetic_dot_frames):
+        pipeline = MarkerDetectionPipeline(
+            session, shot_id=ids["shot_id"], sync_config_id=ids["sync_id"],
+            time_start_s=0.0, time_end_s=2.0,
+            detect_dots_for_cameras={ids["cam_id"]}, detect_coded=False,
+        )
+        result = pipeline.run()
+
+    assert result.status == "complete"
+    candidates = read_dot_candidates_for_run(session, result.detection_run_id, ids["svid"])
+    assert candidates[0].shape == (1, 9)
+    assert read_marker_keypoints_for_run(session, result.detection_run_id, ids["svid"]) == {}
+    config = json.loads(session.execute(
+        "SELECT config_json FROM detection_runs WHERE id=?", (result.detection_run_id,)
+    ).fetchone()["config_json"])
+    assert config["marker_ids"] == []
+    assert config["dot_detection"]["cameras"] == [ids["cam_id"]]
+
+
+def test_dots_only_run_without_a_dot_camera_is_rejected(session):
+    ids = _TEST_IDS
+    with pytest.raises(ValueError, match="detect_dots_for_cameras"):
+        MarkerDetectionPipeline(
+            session, shot_id=ids["shot_id"], sync_config_id=ids["sync_id"],
+            time_start_s=0.0, time_end_s=1.0, detect_coded=False,
+        )
+
+
+def test_dots_only_run_binds_to_a_dot_only_object(session):
+    ids = _TEST_IDS
+    body_id = import_marker_body_str(session, _DOT_ONLY_BODY_YAML, name="Dot Prop")
+    object_id = create_capture_object(session, ids["shot_id"], "dot-prop-A", body_id)
+
+    with patch("posetrak.detection.marker_pipeline.iter_frames", _synthetic_dot_frames):
+        pipeline = load_pipeline_for_capture_object(
+            session, capture_object_id=object_id, sync_config_id=ids["sync_id"],
+            time_start_s=0.0, time_end_s=1.0,
+            detect_dots_for_cameras={ids["cam_id"]}, detect_coded=False,
+        )
+        result = pipeline.run()
+
+    row = session.execute(
+        "SELECT capture_object_id, detector_type FROM detection_runs WHERE id=?",
+        (result.detection_run_id,),
+    ).fetchone()
+    assert (row["capture_object_id"], row["detector_type"]) == (object_id, "aruco")
+    assert read_dot_candidates_for_run(session, result.detection_run_id, ids["svid"])[0].shape == (1, 9)
+
+
+def test_dots_only_run_skips_cameras_that_are_not_dot_cameras(session):
+    ids = _TEST_IDS
+    other = MarkerDetectionPipeline(
+        session, shot_id=ids["shot_id"], sync_config_id=ids["sync_id"],
+        time_start_s=0.0, time_end_s=1.0, detect_dots_for_cameras={"some-other-camera"}, detect_coded=False,
+    )
+    named = MarkerDetectionPipeline(
+        session, shot_id=ids["shot_id"], sync_config_id=ids["sync_id"],
+        time_start_s=0.0, time_end_s=1.0, detect_dots_for_cameras={ids["cam_id"]}, detect_coded=False,
+    )
+    assert other.cameras == []
+    assert [c.camera_instance_id for c in named.cameras] == [ids["cam_id"]]

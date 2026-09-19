@@ -26,6 +26,10 @@ consumes ``FiducialDetection`` objects, so it works unchanged either way):
   scene (marker-mocap-algorithms.md §1.1). ``marker_ids`` is derived from the
   config, not given directly.
 
+Either mode can skip coded-marker detection altogether (``detect_coded=False``)
+and run only the reflective-dot detector, for props and persons that carry no
+coded marker. No ``markers`` rows are written for such a run.
+
 Either mode can additionally run anonymous reflective-dot blob detection
 per camera (see ``__init__``'s ``detect_dots_for_cameras``) -- an
 orthogonal, opt-in add-on to whichever coded-marker detector is already
@@ -115,7 +119,9 @@ class _DetectorSpec:
     rig_config: MarkerRigConfig | None = None
 
 
-def _build_detector(spec: _DetectorSpec):
+def _build_detector(spec: _DetectorSpec | None):
+    if spec is None:
+        return None
     if spec.rig_config is not None:
         return MarkerRigDetector(
             spec.rig_config, dictionary=spec.dictionary, min_marker_perimeter_rate=spec.min_marker_perimeter_rate,
@@ -168,9 +174,11 @@ def _process_camera_core(
         cam.file_path, first_frame, last_frame, frame_step,
     )
 
-    writer = MarkerKeypointWriter(
-        conn, detection_run_id=run_id, shot_video_id=cam.shot_video_id, marker_ids=marker_ids,
-    )
+    writer = None
+    if detector is not None:
+        writer = MarkerKeypointWriter(
+            conn, detection_run_id=run_id, shot_video_id=cam.shot_video_id, marker_ids=marker_ids,
+        )
     dot_writer = None
     dot_background = None
     dot_linker = None
@@ -194,8 +202,9 @@ def _process_camera_core(
             if (video_frame - first_frame) % frame_step != 0:
                 continue
 
-            detections = detector.detect(img, video_id=cam.camera_instance_id, frame_idx=video_frame)
-            writer.add_frame(video_frame, detections)
+            if writer is not None:
+                detections = detector.detect(img, video_id=cam.camera_instance_id, frame_idx=video_frame)
+                writer.add_frame(video_frame, detections)
 
             if dot_writer is not None:
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -217,7 +226,8 @@ def _process_camera_core(
             if on_progress:
                 on_progress(frames_done, total, cam.label or cam.camera_instance_id)
     finally:
-        writer.finalise()
+        if writer is not None:
+            writer.finalise()
         if dot_writer is not None:
             dot_writer.finalise()
 
@@ -235,7 +245,7 @@ class _CameraJob:
     cam: "MarkerCameraInfo"
     marker_ids: list[str]
     frame_step: int
-    detector_spec: _DetectorSpec
+    detector_spec: _DetectorSpec | None   # None: no coded-marker detection
     detect_dots: bool
     dot_cfg: _DotDetectionConfig
     first_frame: int
@@ -303,8 +313,17 @@ class MarkerDetectionPipeline:
         dot_max_saturation: float = 255.0,
         dot_max_saturation_by_camera: dict[str, float] | None = None,
         dot_bg_sample_count: int = 40,
+        detect_coded: bool = True,
     ) -> None:
         """See the class docstring for the two ways to drive this pipeline.
+
+        detect_coded: False skips coded-marker detection and runs only the
+            reflective-dot detector, so *detect_dots_for_cameras* must name at
+            least one camera. *marker_ids* and *rig_config* are then not needed
+            (a *rig_config* is ignored) and no coded-marker rows are written.
+            Only the named cameras are decoded. The run is still recorded as
+            a marker run, with an empty ``marker_ids`` list. Pass *capture_object_id* and
+            *marker_body_definition_id* to bind it to an object.
 
         detect_dots_for_cameras: camera_instance_ids to additionally run
             anonymous reflective-dot blob detection on, alongside the coded-
@@ -373,7 +392,15 @@ class MarkerDetectionPipeline:
             dot_threshold_by_camera; absent from the dict means "use the
             scalar".
         """
-        if rig_config is not None:
+        if not detect_coded:
+            if not detect_dots_for_cameras:
+                raise ValueError(
+                    "a run without coded-marker detection has nothing to do unless "
+                    "detect_dots_for_cameras names at least one camera"
+                )
+            marker_ids = []
+            rig_config = None
+        elif rig_config is not None:
             if not rig_config.marker_corners:
                 raise ValueError(
                     f"marker body {rig_config.rig_id!r} has no coded markers to detect "
@@ -412,7 +439,9 @@ class MarkerDetectionPipeline:
         self._dot_max_saturation = dot_max_saturation
         self._dot_max_saturation_by_camera = dot_max_saturation_by_camera or {}
         self._dot_bg_sample_count = dot_bg_sample_count
-        if rig_config is not None:
+        if not detect_coded:
+            self._detector = None
+        elif rig_config is not None:
             self._detector = MarkerRigDetector(
                 rig_config, dictionary=dictionary, min_marker_perimeter_rate=min_marker_perimeter_rate,
             )
@@ -422,6 +451,9 @@ class MarkerDetectionPipeline:
                 min_marker_perimeter_rate=min_marker_perimeter_rate,
             )
         self._cameras, self._sync_table = self._load_cameras()
+        if not detect_coded:
+            # Without a coded-marker pass a camera that is not a dot camera has nothing to do.
+            self._cameras = [c for c in self._cameras if c.camera_instance_id in self._detect_dots_for_cameras]
 
     # ------------------------------------------------------------------
     # Public
@@ -589,7 +621,9 @@ class MarkerDetectionPipeline:
             bg_sample_count=self._dot_bg_sample_count,
         )
 
-    def _detector_spec(self) -> _DetectorSpec:
+    def _detector_spec(self) -> _DetectorSpec | None:
+        if self._detector is None:
+            return None
         rig_config = self._detector.config if isinstance(self._detector, MarkerRigDetector) else None
         return _DetectorSpec(
             dictionary=self._dictionary, min_marker_perimeter_rate=self._min_marker_perimeter_rate,
@@ -744,6 +778,7 @@ def load_pipeline_for_capture_object(
     dot_max_saturation: float = 255.0,
     dot_max_saturation_by_camera: dict[str, float] | None = None,
     dot_bg_sample_count: int = 40,
+    detect_coded: bool = True,
 ) -> MarkerDetectionPipeline:
     """Build a ``MarkerDetectionPipeline`` for an existing ``capture_objects``
     row -- resolves its marker body definition, loads the resolved rig
@@ -754,11 +789,13 @@ def load_pipeline_for_capture_object(
     detect_dots_for_cameras, dot_bg_subtract, dot_threshold,
     dot_threshold_by_camera, dot_background_mode, dot_blacklist_frac,
     dot_blacklist_frac_by_camera, dot_blacklist_radius_px, dot_max_saturation,
-    dot_max_saturation_by_camera, dot_bg_sample_count:
+    dot_max_saturation_by_camera, dot_bg_sample_count, detect_coded:
         forwarded to ``MarkerDetectionPipeline`` unchanged -- see its own
         docstring. The GUI's run-detection dialog does not yet expose a way
         to set any of these (no UI wiring exists for it yet); a caller
-        building the pipeline directly can already use them.
+        building the pipeline directly can already use them. With
+        ``detect_coded=False`` the marker body need not carry coded markers
+        (a dot-only body), and its geometry is not loaded.
 
     Raises
     ------
@@ -778,7 +815,9 @@ def load_pipeline_for_capture_object(
     if body_row is None or body_row["yaml_content"] is None:
         raise ValueError(f"marker_body_definitions row not found or empty: {body_id!r}")
 
-    rig_config = load_marker_body_yaml(body_row["yaml_content"], rig_id=body_id)
+    rig_config = (
+        load_marker_body_yaml(body_row["yaml_content"], rig_id=body_id) if detect_coded else None
+    )
 
     return MarkerDetectionPipeline(
         session,
@@ -804,4 +843,5 @@ def load_pipeline_for_capture_object(
         dot_max_saturation=dot_max_saturation,
         dot_max_saturation_by_camera=dot_max_saturation_by_camera,
         dot_bg_sample_count=dot_bg_sample_count,
+        detect_coded=detect_coded,
     )

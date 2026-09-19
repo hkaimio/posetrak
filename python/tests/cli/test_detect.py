@@ -346,3 +346,221 @@ class TestDetectShow:
         """detect show without --session exits non-zero."""
         result = _invoke(["detect", "show", "abc123"])
         assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# detect run --type aruco / dots
+# ---------------------------------------------------------------------------
+
+_ONE_MARKER_BODY_YAML = """\
+name: test-bokken
+units: meters
+markers:
+  - name: hilt
+    type: aruco
+    dictionary: DICT_4X4_50
+    id: "3"
+    size: 0.05
+    center: [0.0, 0.0, 0.0]
+    normal: [0.0, 0.0, 1.0]
+    up: [0.0, 1.0, 0.0]
+"""
+_DOT_ONLY_BODY_YAML = (
+    "name: dot-prop\nunits: meters\nmarkers:\n  - name: a\n    type: reflective_dot\n    center: [0,0,0]\n"
+)
+
+
+def _dot_frames(path, first_frame, last_frame):
+    """A dark frame with one bright dot at (50, 60) on every frame."""
+    import cv2
+
+    for i in range(first_frame, last_frame):
+        frame = np.full((300, 300, 3), 20, dtype=np.uint8)
+        cv2.circle(frame, (50, 60), 6, (250, 250, 250), thickness=-1)
+        yield i, frame
+
+
+def _run_markers(session_path: Path, capture_id: str, sync_id: str, *extra: str):
+    """Invoke ``detect run`` for a marker run over the seeded capture, with only the frame source faked."""
+    with patch("posetrak.detection.marker_pipeline.iter_frames", _dot_frames):
+        return _invoke(
+            ["detect", "run", "--capture", capture_id, "--sync", sync_id, "--start", "0", "--end", "1", *extra],
+            session_path,
+        )
+
+
+def _last_run(session_path: Path) -> sqlite3.Row:
+    conn = sqlite3.connect(str(session_path))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM detection_runs ORDER BY created_at DESC LIMIT 1").fetchone()
+    conn.close()
+    return row
+
+
+class TestDetectRunMarkers:
+    def test_dots_run_stores_dots_and_no_coded_markers(
+        self, seeded_session_db_path: Path, capture_id: str, sync_id: str
+    ) -> None:
+        from app.pose.db_cache import read_dot_candidates_for_run, read_marker_keypoints_for_run
+
+        result = _run_markers(
+            seeded_session_db_path, capture_id, sync_id, "--type", "dots", "--dots-camera", "cam1",
+        )
+
+        assert result.exit_code == 0, result.output
+        run = _last_run(seeded_session_db_path)
+        assert run["id"] in result.output.split()
+        assert run["detector_type"] == "aruco"
+        assert run["capture_object_id"] is None
+        config = json.loads(run["config_json"])
+        assert config["marker_ids"] == []
+        conn = sqlite3.connect(str(seeded_session_db_path))
+        conn.row_factory = sqlite3.Row
+        video_id = conn.execute("SELECT id FROM capture_videos").fetchone()["id"]
+        assert read_dot_candidates_for_run(conn, run["id"], video_id)[0].shape == (1, 9)
+        assert read_marker_keypoints_for_run(conn, run["id"], video_id) == {}
+        conn.close()
+
+    def test_unbound_aruco_run_records_marker_ids_and_dictionary(
+        self, seeded_session_db_path: Path, capture_id: str, sync_id: str
+    ) -> None:
+        result = _run_markers(
+            seeded_session_db_path, capture_id, sync_id,
+            "--type", "aruco", "--marker-ids", "3, 7", "--dictionary", "DICT_5X5_50", "--frame-step", "2",
+        )
+
+        assert result.exit_code == 0, result.output
+        config = json.loads(_last_run(seeded_session_db_path)["config_json"])
+        assert config["marker_ids"] == ["3", "7"]
+        assert config["dictionary"] == "DICT_5X5_50"
+        assert config["frame_step"] == 2
+        assert "dot_detection" not in config
+
+    def test_per_camera_dot_settings_are_recorded_by_camera_id(
+        self, seeded_session_db_path: Path, capture_id: str, sync_id: str
+    ) -> None:
+        result = _run_markers(
+            seeded_session_db_path, capture_id, sync_id,
+            "--type", "dots", "--dots-camera", "cam1", "--dot-background-mode", "blacklist",
+            "--dot-threshold", "200", "--dot-threshold-by-camera", "cam1=180",
+            "--dot-max-saturation-by-camera", "cam1=120", "--dot-blacklist-frac-by-camera", "cam1=0.9",
+        )
+
+        assert result.exit_code == 0, result.output
+        dots = json.loads(_last_run(seeded_session_db_path)["config_json"])["dot_detection"]
+        assert dots["background_mode"] == "blacklist"
+        assert dots["threshold"] == 200
+        (camera_id,) = dots["cameras"]
+        assert dots["threshold_by_camera"] == {camera_id: 180}
+        assert dots["max_saturation_by_camera"] == {camera_id: 120.0}
+        assert dots["blacklist_frac_by_camera"] == {camera_id: 0.9}
+
+    def test_object_bound_aruco_run_with_dots(
+        self, seeded_session_db_path: Path, capture_id: str, sync_id: str
+    ) -> None:
+        from posetrak.db.db import open_session
+        from posetrak.db.manage_capture_object import create_capture_object
+        from posetrak.db.manage_marker_body import import_marker_body_str
+
+        session = open_session(seeded_session_db_path)
+        body_id = import_marker_body_str(session, _ONE_MARKER_BODY_YAML, name="Test Bokken")
+        object_id = create_capture_object(session, capture_id, "bokken-A", body_id)
+        session.close()
+
+        by_name = _run_markers(
+            seeded_session_db_path, capture_id, sync_id,
+            "--type", "aruco", "--object", "bokken-A", "--dots-camera", "cam1",
+        )
+        by_prefix = _run_markers(
+            seeded_session_db_path, capture_id, sync_id, "--type", "aruco", "--object", object_id[:8],
+        )
+
+        assert by_name.exit_code == 0, by_name.output
+        assert by_prefix.exit_code == 0, by_prefix.output
+        conn = sqlite3.connect(str(seeded_session_db_path))
+        rows = conn.execute("SELECT capture_object_id, config_json FROM detection_runs").fetchall()
+        conn.close()
+        assert [r[0] for r in rows] == [object_id, object_id]
+        assert json.loads(rows[0][1])["marker_ids"] == ["3"]
+        assert "dot_detection" in json.loads(rows[0][1])
+
+    def test_dots_run_may_bind_to_a_dot_only_object(
+        self, seeded_session_db_path: Path, capture_id: str, sync_id: str
+    ) -> None:
+        from posetrak.db.db import open_session
+        from posetrak.db.manage_capture_object import create_capture_object
+        from posetrak.db.manage_marker_body import import_marker_body_str
+
+        session = open_session(seeded_session_db_path)
+        body_id = import_marker_body_str(session, _DOT_ONLY_BODY_YAML, name="Dot Prop")
+        object_id = create_capture_object(session, capture_id, "ball", body_id)
+        session.close()
+
+        result = _run_markers(
+            seeded_session_db_path, capture_id, sync_id,
+            "--type", "dots", "--object", "ball", "--dots-camera", "cam1",
+        )
+
+        assert result.exit_code == 0, result.output
+        assert _last_run(seeded_session_db_path)["capture_object_id"] == object_id
+
+    @pytest.mark.parametrize(
+        ("args", "message"),
+        [
+            (["--type", "aruco"], "--object, or --marker-ids"),
+            (["--type", "dots"], "at least one --dots-camera"),
+            (["--type", "dots", "--dots-camera", "cam1", "--marker-ids", "3"], "--marker-ids: only for --type aruco"),
+            (["--type", "aruco", "--marker-ids", "3", "--dot-threshold", "100"], "--dot-threshold: only used with --dots-camera"),
+            (["--type", "dots", "--dots-camera", "cam1", "--conf", "0.5"], "--conf: only for --type pose"),
+            (["--type", "dots", "--dots-camera", "nope"], "no camera_instances with label 'nope'"),
+            (["--type", "dots", "--dots-camera", "cam1", "--dot-threshold-by-camera", "cam1"], "expected LABEL=VALUE"),
+            (["--type", "dots", "--dots-camera", "cam1", "--dot-threshold-by-camera", "cam1=high"], "bad value"),
+            (["--type", "aruco", "--object", "nope"], "no capture object 'nope' in this capture (objects: none)"),
+            (["--dots-camera", "cam1"], "--dots-camera: only for --type aruco or dots"),
+            (["--object", "x", "--frame-step", "2"], "--object, --frame-step: only for --type aruco or dots"),
+        ],
+    )
+    def test_invalid_option_combinations_are_rejected_before_any_run(
+        self, seeded_session_db_path: Path, capture_id: str, sync_id: str, args: list[str], message: str
+    ) -> None:
+        result = _run_markers(seeded_session_db_path, capture_id, sync_id, *args)
+
+        assert result.exit_code != 0
+        assert message in result.output
+        assert _last_run(seeded_session_db_path) is None
+
+    def test_marker_ids_with_an_object_are_rejected(
+        self, seeded_session_db_path: Path, capture_id: str, sync_id: str
+    ) -> None:
+        from posetrak.db.db import open_session
+        from posetrak.db.manage_capture_object import create_capture_object
+        from posetrak.db.manage_marker_body import import_marker_body_str
+
+        session = open_session(seeded_session_db_path)
+        body_id = import_marker_body_str(session, _ONE_MARKER_BODY_YAML, name="Test Bokken")
+        create_capture_object(session, capture_id, "bokken-A", body_id)
+        session.close()
+
+        result = _run_markers(
+            seeded_session_db_path, capture_id, sync_id,
+            "--type", "aruco", "--object", "bokken-A", "--marker-ids", "3",
+        )
+
+        assert result.exit_code != 0
+        assert "--marker-ids: taken from the marker body when --object is given" in result.output
+
+    def test_cli_defaults_match_the_pipeline_defaults(self) -> None:
+        """The dot options repeat the pipeline's defaults so --help can show them; they must not drift."""
+        import inspect
+
+        from posetrak.cli.detect import cmd_run
+        from posetrak.detection.marker_pipeline import MarkerDetectionPipeline
+
+        pipeline_defaults = {
+            n: p.default for n, p in inspect.signature(MarkerDetectionPipeline.__init__).parameters.items()
+        }
+        for option in cmd_run.params:
+            if option.name.startswith("dot_") and option.name in pipeline_defaults and not option.multiple:
+                assert option.default == pipeline_defaults[option.name], option.name
+        assert {o.name: o.default for o in cmd_run.params}["dictionary"] == pipeline_defaults["dictionary"]
+        assert {o.name: o.default for o in cmd_run.params}["frame_step"] == pipeline_defaults["frame_step"]

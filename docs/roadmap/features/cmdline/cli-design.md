@@ -172,6 +172,12 @@ posetrak detect run --type aruco|dots --capture ID --sync ID --start S --end S \
   # named by --dots-camera. dots: dots only, no coded-marker pass. Options that belong to
   # another run type are rejected. Stored as detector_type='aruco' either way.
 
+posetrak detect import-2d --capture ID --sync ID [--trial ID] [--object NAME|ID] [--source S]                           --camera LABEL CSV [--camera LABEL CSV]...
+  # 2D point tracks made in another tool (Blender's Movie Clip Editor) as an external_2d run of
+  # anonymous dot candidates. CSV columns: video_frame, pixel_x, pixel_y (raw pixels, origin top
+  # left); blender_export_2d_tracks.py's output imports as it is. Several tracks of one camera get
+  # separate tracklet ids. Bound to an object with --object, the run finalises like a dots run.
+
 posetrak detect list [--capture ID]
 posetrak detect show ID
 ```

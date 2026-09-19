@@ -15,7 +15,7 @@ working path read them by this relative path:
 
 | File | Read by |
 |---|---|
-| `ball.single-reflective-dot.*.yaml` | `python/tools/finalize_ball_blender_detection.py`, `finalize_ball_cutie_detection.py` |
+| `ball.single-reflective-dot.*.yaml` | `python/tools/finalize_ball_cutie_detection.py`; import it as the ball's marker body with `posetrak marker-body import` |
 | `pen.calibrated.*.yaml`, `pad.calibrated.*.yaml` | nothing; the script that read them is replaced by `posetrak marker-body import`, `capture object add` and `sequence finalise-object --object` |
 
 Remove them in the change that deletes those scripts (`posetrak sequence

@@ -770,6 +770,36 @@ connected components of the gate graph); both are internal to
 - Import: `posetrak detect import-2d --camera <label> <csv>…` →
   `external_2d` run. Blender-side exporter stays a Blender script under
   `python/tools/blender/`.
+
+  > **Built (2026-09-19)**, anonymous layout only (`posetrak/detection/external_import.py`).
+  > CSV columns are `video_frame`, `pixel_x`, `pixel_y`; the exporter's output imports
+  > unchanged. A point outside the video's own frame range is an error, since it means
+  > the export's frame numbering differs from the video's, and timestamps come from the
+  > sync configuration rather than from existing rows. A camera may have several files
+  > (a track restarted after an occlusion); each gets its own tracklet id, which is what
+  > the hand-restarted ball tracks had. `config_json` is
+  > `{"layout": "anonymous", "source": …, "files": [{"camera", "file"}]}`.
+  > `sequence finalise-object` accepts an `external_2d` run bound to an object.
+  >
+  > *Labeled layout (not implemented; format fixed here).* `config_json["layout"] =
+  > "labeled"` and `config_json["label_map"]`, external track name → PoseTrak landmark
+  > name (`{"Track.003": "hilt:c2"}`). The run would carry the fixed-slot corner rows
+  > plus a `pose_sequence_keypoints` manifest, like a marker run, and a track missing
+  > from the map would be imported as anonymous rather than dropped. Files would name the
+  > track, so the CSV would gain a `track` column. Nothing reads `layout` yet.
+  >
+  > *Sequence assembly changed with it.* A sequence holds one `dots` row per camera and
+  > frame, so dots from several runs can share a sequence only when they cover different
+  > cameras. `sequence add-dots` therefore takes `--camera` (repeatable), refuses a camera
+  > the sequence already has dots for, and `--replace` swaps exactly those cameras. The
+  > ball is one imported run on three cameras plus the automatic dots of a fourth:
+  > `detect import-2d --object`, `sequence finalise-object`, `sequence add-dots --camera`.
+  > Checked on the 2026-09-06 capture: importing the three Blender tracks gives 1003
+  > rows, identical in position and tracklet id to the 1003 the earlier ball script wrote.
+  > `add-dots` has no time filter, so the automatic camera's dots come for the whole run
+  > rather than the throws' span; tracking is limited by its own time range.
+  > `finalize_ball_blender_detection.py` is deleted; `finalize_ball_cutie_detection.py`
+  > stays until the segmentation centroids have a home.
 - Export: `posetrak track export-2d <run> --source predicted|observed`
   writes per-camera CSV in the same convention, so a run can be handed to
   an external tool for correction and re-imported (the "reverse

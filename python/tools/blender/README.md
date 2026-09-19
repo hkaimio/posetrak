@@ -42,9 +42,10 @@ run to Blender" is worth doing only if it turns out to be cheap.
 
 `blender_export_2d_tracks.py` exports each movie clip's tracking curves as
 one CSV per clip and track, in posetrak's pixel convention (raw distorted
-pixels, origin top-left, Y down). The planned importer is
-`posetrak detect import-2d` (plan §3.10); until it lands the CSVs are
-imported by `python/tools/finalize_ball_blender_detection.py`.
+pixels, origin top-left, Y down). Import them with `posetrak detect import-2d`,
+one `--camera LABEL CSV` per track; the CSVs need no conversion. The run is
+bound to a capture object with `--object`, and `posetrak sequence
+finalise-object` makes the object's sequence from it.
 
 Note: `OUTPUT_DIR` at the top of `blender_export_2d_tracks.py` is a
 hardcoded path; edit it before running.

@@ -11,6 +11,7 @@
 
 #include <sqlite3.h>
 
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <string>
@@ -65,6 +66,12 @@ struct SequenceMetadata {
 /// (see docs/roadmap/features/marker-based-mocap/dot-assignment-architecture-design.md).
 /// Deliberately not an Observation: there is no marker_id yet.
 struct UnlabeledCandidate {
+    /// Subjects (bit i = subject i) allowed to claim this candidate. All bits
+    /// set, the default, means anyone; a multi-subject run narrows it to the
+    /// subjects whose own sequences hold this candidate, so a prop tracked
+    /// from hand-placed points is not led astray by another subject's
+    /// automatic detections on the same camera.
+    std::uint64_t subject_mask = ~std::uint64_t{0};
     int camera_id;
     int frame_idx;
     double timestamp;

@@ -665,3 +665,219 @@ class TestTrackRunPersons:
     def test_run_persons_no_session(self) -> None:
         result = _invoke(["track", "run-persons", "--trial", "abc", "--persons", "Alice"])
         assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# track run-persons with capture objects
+# ---------------------------------------------------------------------------
+
+
+def _seed_object_in_trial(
+    db_path: Path,
+    trial_id: str,
+    *,
+    name: str = "ball",
+    time_range: tuple[float, float] = (2.0, 8.0),
+    n_sequences: int = 1,
+) -> dict:
+    """Add a capture object and *n_sequences* finalised object sequences to an
+    existing trial (see _seed_trial_with_person); returns object_id, skel_id,
+    seq_ids."""
+    import datetime as dt
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    capture_id = conn.execute("SELECT capture_id FROM trials WHERE id = ?", (trial_id,)).fetchone()["capture_id"]
+    sync_id = conn.execute("SELECT id FROM sync_configs LIMIT 1").fetchone()["id"]
+
+    skel_id = generate_id()
+    conn.execute(
+        "INSERT INTO skeletons (id, name, yaml_content, created_at) VALUES (?, 'BallSkel', '{}', ?)",
+        (skel_id, now),
+    )
+    object_id = generate_id()
+    conn.execute(
+        "INSERT INTO capture_objects (id, capture_id, name, marker_body_definition_id, created_at)"
+        " VALUES (?, ?, ?, 'body-def', ?)",
+        (object_id, capture_id, name, now),
+    )
+    seq_ids = []
+    for _ in range(n_sequences):
+        dr_id = generate_id()
+        conn.execute(
+            "INSERT INTO detection_runs"
+            " (id, shot_id, sync_config_id, trial_id, time_start_s, time_end_s, detector_model,"
+            "  pose_model, created_at, capture_object_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, 'aruco:DICT_4X4_50', '', ?, ?)",
+            (dr_id, capture_id, sync_id, trial_id, *time_range, now, object_id),
+        )
+        seq_id = generate_id()
+        conn.execute(
+            "INSERT INTO pose_observation_sequences"
+            " (id, shot_id, sync_config_id, time_start_s, time_end_s, detection_run_id)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (seq_id, capture_id, sync_id, *time_range, dr_id),
+        )
+        seq_ids.append(seq_id)
+    conn.commit()
+    conn.close()
+    return {"object_id": object_id, "skel_id": skel_id, "seq_ids": seq_ids}
+
+
+class TestResolveTrialObjects:
+    def test_resolves_object_sequence_and_explicit_skeleton(self, seeded_session_db_path: Path) -> None:
+        from posetrak.cli.track import resolve_trial_objects
+
+        info = _seed_trial_with_person(seeded_session_db_path)
+        obj = _seed_object_in_trial(seeded_session_db_path, info["trial_id"])
+        conn = sqlite3.connect(str(seeded_session_db_path))
+        conn.row_factory = sqlite3.Row
+
+        resolved = resolve_trial_objects(conn, info["trial_id"], [("ball", obj["skel_id"][:8], (1.0, 2.0, 3.0))])
+
+        assert len(resolved) == 1
+        assert resolved[0].sequence_id == obj["seq_ids"][0]
+        assert resolved[0].skeleton_id == obj["skel_id"]
+        assert resolved[0].seed_position == (1.0, 2.0, 3.0)
+        assert (resolved[0].time_start_s, resolved[0].time_end_s) == (2.0, 8.0)
+
+    def test_unknown_object_is_reported(self, seeded_session_db_path: Path) -> None:
+        from posetrak.cli.track import resolve_trial_objects
+
+        info = _seed_trial_with_person(seeded_session_db_path)
+        obj = _seed_object_in_trial(seeded_session_db_path, info["trial_id"])
+        conn = sqlite3.connect(str(seeded_session_db_path))
+        conn.row_factory = sqlite3.Row
+
+        with pytest.raises(ValueError, match="No object named 'pen'"):
+            resolve_trial_objects(conn, info["trial_id"], [("pen", obj["skel_id"], None)])
+
+    def test_two_sequences_for_one_object_are_ambiguous(self, seeded_session_db_path: Path) -> None:
+        from posetrak.cli.track import resolve_trial_objects
+
+        info = _seed_trial_with_person(seeded_session_db_path)
+        obj = _seed_object_in_trial(seeded_session_db_path, info["trial_id"], n_sequences=2)
+        conn = sqlite3.connect(str(seeded_session_db_path))
+        conn.row_factory = sqlite3.Row
+
+        with pytest.raises(ValueError, match="Ambiguous"):
+            resolve_trial_objects(conn, info["trial_id"], [("ball", obj["skel_id"], None)])
+
+    def test_object_without_a_sequence_in_the_trial_is_reported(self, seeded_session_db_path: Path) -> None:
+        from posetrak.cli.track import resolve_trial_objects
+
+        info = _seed_trial_with_person(seeded_session_db_path)
+        obj = _seed_object_in_trial(seeded_session_db_path, info["trial_id"], n_sequences=0)
+        conn = sqlite3.connect(str(seeded_session_db_path))
+        conn.row_factory = sqlite3.Row
+
+        with pytest.raises(ValueError, match="No finalised sequence"):
+            resolve_trial_objects(conn, info["trial_id"], [("ball", obj["skel_id"], None)])
+
+
+class TestRunPersonsWithObjects:
+    @patch("posetrak.cli.track.run_multi_person_tracker")
+    @patch("posetrak.cli.track.default_binary_path")
+    def test_person_and_object_are_tracked_together_over_the_common_range(
+        self, mock_bin, mock_run, seeded_session_db_path: Path, tmp_path: Path
+    ) -> None:
+        from posetrak.tracker.runner import MultiPersonResult
+
+        mock_bin.return_value = tmp_path / "fake"
+        (tmp_path / "fake").touch()
+        mock_run.return_value = MultiPersonResult(exit_code=0, run_ids=[generate_id(), generate_id()])
+
+        info = _seed_trial_with_person(seeded_session_db_path)   # person sequence 0..10 s
+        obj = _seed_object_in_trial(seeded_session_db_path, info["trial_id"], time_range=(2.0, 8.0))
+        result = _invoke(
+            [
+                "track", "run-persons", "--trial", info["trial_id"], "--persons", "Alice",
+                "--object", f"ball={obj['skel_id'][:8]}@0.1,-0.9,1.0",
+                "--output-dir", str(tmp_path / "out"),
+            ],
+            seeded_session_db_path,
+        )
+
+        assert result.exit_code == 0, result.output
+        person_specs = mock_run.call_args.args[1]
+        assert [s.sequence_id for s in person_specs] == [info["seq_ids"][0], obj["seq_ids"][0]]
+        assert person_specs[1].skeleton_id == obj["skel_id"]
+        assert mock_run.call_args.kwargs["start_time"] == 2.0
+        assert mock_run.call_args.kwargs["end_time"] == 8.0
+        assert [s.seed_position for s in person_specs] == [None, (0.1, -0.9, 1.0)]
+
+    @patch("posetrak.cli.track.run_multi_person_tracker")
+    @patch("posetrak.cli.track.default_binary_path")
+    def test_explicit_start_and_end_override_the_common_range(
+        self, mock_bin, mock_run, seeded_session_db_path: Path, tmp_path: Path
+    ) -> None:
+        from posetrak.tracker.runner import MultiPersonResult
+
+        mock_bin.return_value = tmp_path / "fake"
+        (tmp_path / "fake").touch()
+        mock_run.return_value = MultiPersonResult(exit_code=0, run_ids=[generate_id(), generate_id()])
+
+        info = _seed_trial_with_person(seeded_session_db_path)
+        obj = _seed_object_in_trial(seeded_session_db_path, info["trial_id"], time_range=(2.0, 8.0))
+        result = _invoke(
+            [
+                "track", "run-persons", "--trial", info["trial_id"], "--persons", "Alice",
+                "--object", f"ball={obj['skel_id'][:8]}", "--start-time", "3.0", "--end-time", "4.0",
+                "--output-dir", str(tmp_path / "out"),
+            ],
+            seeded_session_db_path,
+        )
+        assert result.exit_code == 0, result.output
+        assert mock_run.call_args.kwargs["start_time"] == 3.0
+        assert mock_run.call_args.kwargs["end_time"] == 4.0
+
+    def test_no_subjects_is_an_error(self, seeded_session_db_path: Path) -> None:
+        info = _seed_trial_with_person(seeded_session_db_path)
+        result = _invoke(["track", "run-persons", "--trial", info["trial_id"]], seeded_session_db_path)
+        assert result.exit_code != 0
+        assert "at least one subject" in result.output
+
+    def test_malformed_objects_option_is_an_error(self, seeded_session_db_path: Path) -> None:
+        info = _seed_trial_with_person(seeded_session_db_path)
+        result = _invoke(
+            ["track", "run-persons", "--trial", info["trial_id"], "--object", "ball"],
+            seeded_session_db_path,
+        )
+        assert result.exit_code != 0
+        assert "NAME=SKELETON" in result.output
+
+    def test_malformed_object_position_is_an_error(self, seeded_session_db_path: Path) -> None:
+        info = _seed_trial_with_person(seeded_session_db_path)
+        result = _invoke(
+            ["track", "run-persons", "--trial", info["trial_id"], "--object", "ball=abcd@1,2"],
+            seeded_session_db_path,
+        )
+        assert result.exit_code != 0
+        assert "X,Y,Z" in result.output
+
+    @patch("posetrak.cli.track.run_multi_person_tracker")
+    @patch("posetrak.cli.track.default_binary_path")
+    def test_each_object_carries_its_own_seed(
+        self, mock_bin, mock_run, seeded_session_db_path: Path, tmp_path: Path
+    ) -> None:
+        from posetrak.tracker.runner import MultiPersonResult
+
+        mock_bin.return_value = tmp_path / "fake"
+        (tmp_path / "fake").touch()
+        mock_run.return_value = MultiPersonResult(exit_code=0, run_ids=[generate_id()] * 3)
+
+        info = _seed_trial_with_person(seeded_session_db_path)
+        first = _seed_object_in_trial(seeded_session_db_path, info["trial_id"], time_range=(2.0, 8.0), name="ball")
+        second = _seed_object_in_trial(seeded_session_db_path, info["trial_id"], time_range=(2.0, 8.0), name="sword")
+        result = _invoke(
+            [
+                "track", "run-persons", "--trial", info["trial_id"], "--persons", "Alice",
+                "--object", f"ball={first['skel_id'][:8]}@1,2,3",
+                "--object", f"sword={second['skel_id'][:8]}",
+                "--output-dir", str(tmp_path / "out"),
+            ],
+            seeded_session_db_path,
+        )
+        assert result.exit_code == 0, result.output
+        assert [s.seed_position for s in mock_run.call_args.args[1]] == [None, (1.0, 2.0, 3.0), None]

@@ -427,12 +427,28 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
     double const search_end = std::min(end_time, start_time + kInitSearchWindowS);
     double init_timestamp = start_time;
     bool initialized = false;
-    if (opts.seed_position.has_value()) {
-        // See BuildPersonContextOptions::seed_position's own doc comment --
-        // an anonymous-dot-only rigid body has no observation-based cold
-        // start at all, so skip the search loop entirely.
+    // A subject with only anonymous dots has no labeled observations to
+    // initialise from (PersonSpec::seed_position explains why).
+    if (ctx->has_dot_track && ctx->observations.empty()) {
+        if (ctx->skeleton.unlabeled_points_marker_count() > 1) {
+            throw std::runtime_error(fmt::format(
+                "Subject '{}' has {} anonymous-dot markers and no coded marker: initialising a "
+                "body from several dots needs its position and orientation, and a seed gives "
+                "only position. Not supported yet; add a coded (ArUco) marker to the body.",
+                spec.skeleton_id, ctx->skeleton.unlabeled_points_marker_count()));
+        }
+        if (!spec.seed_position.has_value()) {
+            throw std::runtime_error(fmt::format(
+                "Subject '{}' has only anonymous-dot markers and cannot initialise from "
+                "observations: give it a seed position (--seed-position X Y Z for a single "
+                "subject, --subject-seed INDEX X Y Z when tracking several).",
+                spec.skeleton_id));
+        }
+    }
+    if (spec.seed_position.has_value()) {
+        // Skip the observation-based search loop entirely.
         int num_dof = ctx->skeleton.total_dof_count();
-        State seed_state(*opts.seed_position, Eigen::Quaterniond::Identity(),
+        State seed_state(*spec.seed_position, Eigen::Quaterniond::Identity(),
                          Eigen::VectorXd::Zero(num_dof), Eigen::Vector3d::Zero(),
                          Eigen::Vector3d::Zero(), Eigen::VectorXd::Zero(num_dof));
         ctx->tracker->initialize_from_state(seed_state, start_time);
@@ -442,7 +458,7 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
             fmt::print(
                 "  Initialized from externally-supplied seed position ({:.3f}, {:.3f}, "
                 "{:.3f}) at t={:.3f}s\n",
-                opts.seed_position->x(), opts.seed_position->y(), opts.seed_position->z(),
+                spec.seed_position->x(), spec.seed_position->y(), spec.seed_position->z(),
                 start_time);
         }
     } else {
@@ -1177,9 +1193,28 @@ std::vector<Observation> build_cross_person_anchors(
 MultiPersonTracker::MultiPersonTracker(std::vector<PersonSpec> const& specs,
                                        BuildPersonContextOptions const& opts, bool verbose)
     : opts_(opts), verbose_(verbose) {
+    if (specs.size() > 64)
+        throw std::runtime_error("At most 64 subjects can be tracked together");
     persons_.reserve(specs.size());
     for (auto const& spec : specs) {
         persons_.push_back(build_person_context(spec, opts_, verbose_));
+    }
+
+    // The shared dot assignment takes its settings from one config, so
+    // dot-bearing subjects must agree on them.
+    {
+        std::vector<TrackerConfig const*> dot_configs;
+        for (auto const& ctx : persons_) {
+            if (ctx->has_dot_track)
+                dot_configs.push_back(&ctx->tracker_config);
+        }
+        std::string const field = find_dot_config_disagreement(dot_configs);
+        if (!field.empty()) {
+            throw std::runtime_error(fmt::format(
+                "Subjects that track dots share one dot assignment, but their tracker configs "
+                "disagree on '{}'. Use tracker configs that agree on the dot-assignment settings.",
+                field));
+        }
     }
 
     marker_name_to_id_.resize(persons_.size());
@@ -1347,11 +1382,11 @@ void MultiPersonTracker::run() {
             }
 
             // One combined candidate pool per camera across every participating
-            // subject -- see dot-assignment-architecture-design.md §5.4 on why
-            // this naive concatenation (not a real de-duplication) is a known,
-            // explicitly-deferred limitation for the case of two subjects' own
-            // detection runs both finding the same physical dot. No real
-            // multi-subject-with-dots capture exists yet to need that fix.
+            // subject. Subjects may each hold a copy of the same detection run's
+            // dot rows: a candidate two sequences share is merged into one that
+            // both subjects may claim, so the joint assignment arbitrates it
+            // (dot-assignment-architecture-design.md §5.4). A candidate only one
+            // subject's sequence holds can only be claimed by that subject.
             std::vector<DotAssignmentSubject> subjects;
             std::unordered_map<int, std::vector<UnlabeledCandidate>> combined_candidates;
             for (int idx : order) {
@@ -1361,15 +1396,13 @@ void MultiPersonTracker::run() {
                 subjects.push_back(
                     DotAssignmentSubject{idx, persons_[static_cast<size_t>(idx)]->tracker.get()});
                 for (auto const& [cam_id, cands] : it->second) {
-                    auto& dest = combined_candidates[cam_id];
-                    dest.insert(dest.end(), cands.begin(), cands.end());
+                    append_unique_candidates(combined_candidates[cam_id], cands,
+                                             std::uint64_t{1} << idx);
                 }
             }
-            // Gate config is whichever participating subject comes first in
-            // *order* -- a real per-subject-config reconciliation isn't
-            // designed here (§5.2 sketches one shared config for the whole
-            // resolve call); in practice every subject shares the same
-            // dot_assignment_gate_mahalanobis value today.
+            // The dot-assignment settings come from the first participating
+            // subject; the constructor has already checked that every
+            // dot-bearing subject agrees on them.
             int const config_idx = subjects.front().subject_id;
             auto& config_ctx = *persons_[static_cast<size_t>(config_idx)];
             auto [t_start, t_end] = person_context_step_window(config_ctx, step);

@@ -82,3 +82,30 @@ def test_devbuild_binary_path_matches_cpp_reorg_layout():
     real build output location."""
     assert _DEVBUILD_BINARY == _REPO_ROOT / "optbuild" / "cpp" / "cli" / _tracker_binary_name()
     assert _REPO_ROOT.name == "posetrak"
+
+
+def test_build_multi_person_args_gives_each_seeded_subject_its_own_seed():
+    persons = [
+        PersonRunSpec(sequence_id="s0", skeleton_id="k", config_id="c", person_id=0),
+        PersonRunSpec(sequence_id="s1", skeleton_id="k", config_id="c", person_id=0,
+                      seed_position=(0.5, -1.0, 1.25)),
+        PersonRunSpec(sequence_id="s2", skeleton_id="k", config_id="c", person_id=0,
+                      seed_position=(2.0, 3.0, 4.0)),
+    ]
+    args = _build_multi_person_args(
+        Path("posetrak-tracker"), Path("session.db"), persons, Path("out"),
+        start_time=None, end_time=None, smooth=True,
+    )
+
+    seeds = [args[i + 1:i + 5] for i, a in enumerate(args) if a == "--subject-seed"]
+    assert seeds == [["1", "0.5", "-1.0", "1.25"], ["2", "2.0", "3.0", "4.0"]]
+    assert args[-1] == "--smooth"
+
+
+def test_build_multi_person_args_omits_seed_when_no_subject_has_one():
+    persons = [PersonRunSpec(sequence_id="s", skeleton_id="k", config_id="c", person_id=0)]
+    args = _build_multi_person_args(
+        Path("posetrak-tracker"), Path("session.db"), persons, Path("out"),
+        start_time=None, end_time=None, smooth=False,
+    )
+    assert "--subject-seed" not in args

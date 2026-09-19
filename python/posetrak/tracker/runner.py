@@ -49,6 +49,9 @@ class PersonRunSpec:
     skeleton_id: str
     config_id: str
     person_id: int
+    # Initial root position (x, y, z in metres). Required for a subject that has
+    # only anonymous-dot markers, which cannot initialise from observations.
+    seed_position: tuple[float, float, float] | None = None
 
 
 @dataclass
@@ -205,6 +208,9 @@ def _build_multi_person_args(
     ]
     for p in persons:
         args += ["--person", p.sequence_id, p.skeleton_id, p.config_id, str(p.person_id)]
+    for index, p in enumerate(persons):
+        if p.seed_position is not None:
+            args += ["--subject-seed", str(index), *[str(v) for v in p.seed_position]]
     if start_time is not None:
         args += ["--start-time", str(start_time)]
     if end_time is not None:

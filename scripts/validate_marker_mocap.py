@@ -54,6 +54,19 @@ Case fields (all but ``name``, ``session`` and ``baseline_run`` are optional):
                          sequence is tagged ``validation:<case name>`` so a
                          later run with ``--reuse-detection`` can skip the
                          detection and track it again
+    subjects             instead of baseline_run: a list of {"name", "baseline_run",
+                         optional "seed_from_baseline"} tracked together. Each
+                         subject is also tracked alone over the same
+                         start_time/end_time window, the joint run must match
+                         the solo runs, and no observed pixel may be used by
+                         two subjects at the same time (a physical candidate
+                         claimed twice). Needs start_time and end_time so the
+                         subjects share one time range
+    duplicate_pool       {"donor": <subject>, "into": <subject>, "cameras":
+                         [labels]}: repeat the joint run with a copy of the
+                         donor's dot candidates on those cameras added to the
+                         receiving subject's sequence, and check again that no
+                         candidate is claimed twice
     expect               numbers the re-run must meet:
         tracked_pct          percentage of steps tracked
         lost_max             most steps lost
@@ -216,6 +229,167 @@ def run_tracker(binary: Path, db: Path, recipe: dict, out_dir: Path, log_path: P
     return proc.returncode, parse_tracker_output(text.replace("\r", "\n")), elapsed
 
 
+def run_joint_tracker(binary: Path, db: Path, recipes: list[dict],
+                      window: tuple[float, float], out_dir: Path, log_path: Path) -> tuple[int, list[str], float]:
+    """One tracker process over several subjects; returns exit code, run ids in subject order, seconds."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    args = [str(binary), "track", "--session-db", str(db), "--output-dir", str(out_dir)]
+    for r in recipes:
+        args += ["--person", r["sequence"], r["skeleton"], r["config"], str(r["person_id"])]
+    args += ["--start-time", str(window[0]), "--end-time", str(window[1]), "--smooth"]
+    for index, r in enumerate(recipes):
+        if r.get("seed_position"):
+            args += ["--subject-seed", str(index), *[str(v) for v in r["seed_position"]]]
+    started = time.time()
+    proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    elapsed = time.time() - started
+    text = (proc.stdout + proc.stderr).replace("\r", "\n")
+    log_path.write_text(text, encoding="utf-8")
+    return proc.returncode, re.findall(r"tracking_run_id:\s*(\S+)", text), elapsed
+
+
+def used_pixels(conn: sqlite3.Connection, run_id: str) -> dict[tuple[float, str], set[tuple[float, float]]]:
+    """Observed pixels a run used, keyed by (timestamp, camera): position-mode observations only."""
+    run = conn.execute("SELECT active_camera_ids FROM tracking_runs WHERE id = ?", (run_id,)).fetchone()
+    cameras = json.loads(run["active_camera_ids"])
+    timestamps = {
+        r["tracker_step"]: round(r["timestamp_s"], 5)
+        for r in conn.execute(
+            "SELECT tracker_step, timestamp_s FROM tracking_results WHERE run_id = ? AND is_smoothed = 0", (run_id,))
+    }
+    out: dict[tuple[float, str], set[tuple[float, float]]] = {}
+    for row in conn.execute("SELECT tracker_step, obs_blob FROM tracking_obs_results WHERE run_id = ?", (run_id,)):
+        arr = np.frombuffer(bytes(row["obs_blob"]), dtype=np.float32)
+        if row["tracker_step"] not in timestamps or len(arr) % (len(cameras) * 8):
+            continue
+        arr = arr.reshape(len(cameras), -1, 8)
+        for ci, camera in enumerate(cameras):
+            block = arr[ci]
+            ok = (block[:, 5] == 1) & np.isfinite(block[:, 0]) & (block[:, 7] == 0)
+            if ok.any():
+                out.setdefault((timestamps[row["tracker_step"]], camera), set()).update(
+                    (round(float(x), 3), round(float(y), 3)) for x, y in block[ok, :2])
+    return out
+
+
+def double_claims(conn: sqlite3.Connection, run_ids: list[str]) -> int:
+    """Number of (timestamp, camera, pixel) uses shared by two or more of *run_ids*."""
+    seen: dict[tuple, int] = {}
+    for run_id in run_ids:
+        for key, pixels in used_pixels(conn, run_id).items():
+            for pixel in pixels:
+                seen[key + pixel] = seen.get(key + pixel, 0) + 1
+    return sum(1 for n in seen.values() if n > 1)
+
+
+def clone_sequence_with_donor_dots(db: Path, target_sequence: str, donor_sequence: str,
+                                   camera_labels: list[str], window: tuple[float, float], tag: str) -> str:
+    """Copy *target_sequence* and add *donor_sequence*'s dot rows on *camera_labels* to the copy."""
+    import uuid
+
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    try:
+        new_id = str(uuid.uuid4())
+        columns = [r["name"] for r in conn.execute("PRAGMA table_info(pose_observation_sequences)")]
+        row = conn.execute("SELECT * FROM pose_observation_sequences WHERE id = ?", (target_sequence,)).fetchone()
+        values = [new_id if c == "id" else (tag if c == "notes" else row[c]) for c in columns]
+        conn.execute(
+            f"INSERT INTO pose_observation_sequences ({','.join(columns)}) VALUES ({','.join('?' * len(columns))})", values)
+        conn.execute(
+            "INSERT INTO pose_observations (sequence_id, camera_instance_id, video_frame, timestamp_s, person_id,"
+            " source, detection_run_id, kp_blob, noise_scale)"
+            " SELECT ?, camera_instance_id, video_frame, timestamp_s, person_id, source, detection_run_id,"
+            " kp_blob, noise_scale FROM pose_observations WHERE sequence_id = ?", (new_id, target_sequence))
+        conn.execute(
+            "INSERT INTO pose_sequence_keypoints (sequence_id, keypoint_idx, name, source)"
+            " SELECT ?, keypoint_idx, name, source FROM pose_sequence_keypoints WHERE sequence_id = ?",
+            (new_id, target_sequence))
+        labels = ",".join("?" * len(camera_labels))
+        conn.execute(
+            "INSERT INTO pose_observations (sequence_id, camera_instance_id, video_frame, timestamp_s, person_id,"
+            " source, detection_run_id, kp_blob, noise_scale)"
+            " SELECT ?, po.camera_instance_id, po.video_frame, po.timestamp_s, po.person_id, po.source,"
+            " po.detection_run_id, po.kp_blob, po.noise_scale FROM pose_observations po"
+            " JOIN camera_instances ci ON ci.id = po.camera_instance_id"
+            f" WHERE po.sequence_id = ? AND po.source = 'dots' AND ci.label IN ({labels})"
+            " AND po.timestamp_s BETWEEN ? AND ?",
+            (new_id, donor_sequence, *camera_labels, *window))
+        conn.commit()
+        return new_id
+    finally:
+        conn.close()
+
+
+def run_joint_case(case: dict, db: Path, binary: Path, work: Path) -> tuple[list[tuple[str, bool, str]], dict]:
+    """Solo runs, the joint run, and the shared-pool checks of a multi-subject case."""
+    name = case["name"]
+    window = (case["start_time"], case["end_time"])
+    tol = {**DEFAULT_TOLERANCE, **case.get("tolerance", {})}
+    checks: list[tuple[str, bool, str]] = []
+    conn = open_readonly(db)
+    recipes, subject_names = [], []
+    for subject in case["subjects"]:
+        base = conn.execute("SELECT * FROM tracking_runs WHERE id LIKE ?", (subject["baseline_run"] + "%",)).fetchone()
+        recipes.append({"sequence": base["observation_sequence_id"], "skeleton": base["skeleton_id"],
+                        "config": base["tracker_config_id"], "person_id": 0,
+                        "start_time": window[0], "end_time": window[1], "smooth": True,
+                        "seed_position": first_root_position(conn, base["id"]) if subject.get("seed_from_baseline") else None})
+        subject_names.append(subject["name"])
+    conn.close()
+
+    solo = {}
+    for subject, recipe in zip(subject_names, recipes):
+        code, parsed, _ = run_tracker(binary, db, recipe, work / "out" / f"{name}-{subject}-solo",
+                                      work / f"{name}-{subject}-solo.log")
+        checks.append((f"solo run {subject}", code == 0 and bool(parsed.get("run_id")), f"exit {code}"))
+        solo[subject] = parsed.get("run_id")
+
+    def joint_and_checks(label: str, joint_recipes: list[dict]) -> list[str]:
+        code, run_ids, seconds = run_joint_tracker(binary, db, joint_recipes, window,
+                                                   work / "out" / f"{name}-{label}", work / f"{name}-{label}.log")
+        ok = code == 0 and len(run_ids) == len(joint_recipes)
+        checks.append((f"{label} run", ok, f"exit {code}, {len(run_ids)} runs in {seconds:.0f}s"))
+        if not ok:
+            return []
+        conn = open_readonly(db)
+        claims = double_claims(conn, run_ids)
+        checks.append((f"{label}: candidates used by two subjects", claims == 0, str(claims)))
+        conn.close()
+        return run_ids
+
+    joint_ids = joint_and_checks("joint", recipes)
+    if joint_ids and all(solo.values()):
+        conn = open_readonly(db)
+        for subject, joint_id in zip(subject_names, joint_ids):
+            j, s = run_metrics(conn, joint_id), run_metrics(conn, solo[subject])
+            allowed = max(2, 0.02 * s["steps_tracked"])
+            checks.append((f"{subject}: tracked steps joint vs solo", abs(j["steps_tracked"] - s["steps_tracked"]) <= allowed,
+                           f"{j['steps_tracked']} vs {s['steps_tracked']}"))
+            if j["nis_mean"] is not None and s["nis_mean"] is not None:
+                checks.append((f"{subject}: mean NIS/dof joint vs solo",
+                               abs(j["nis_mean"] - s["nis_mean"]) <= tol["nis_rel"] * s["nis_mean"],
+                               f"{j['nis_mean']:.3f} vs {s['nis_mean']:.3f}"))
+            for camera, value in sorted(j["reproj_median_px"].items()):
+                ref = s["reproj_median_px"].get(camera)
+                if ref is not None:
+                    allowed_px = max(tol["reproj_px"], tol["reproj_rel"] * ref)
+                    checks.append((f"{subject}: reproj median {camera} joint vs solo",
+                                   abs(value - ref) <= allowed_px, f"{value:.1f}px vs {ref:.1f}px (+/- {allowed_px:.1f})"))
+        conn.close()
+
+    dup = case.get("duplicate_pool")
+    if dup:
+        donor = subject_names.index(dup["donor"])
+        into = subject_names.index(dup["into"])
+        variant = clone_sequence_with_donor_dots(db, recipes[into]["sequence"], recipes[donor]["sequence"],
+                                                 dup["cameras"], window, f"validation:{name}:duplicate")
+        variant_recipes = [dict(r) for r in recipes]
+        variant_recipes[into]["sequence"] = variant
+        joint_and_checks("duplicate-pool", variant_recipes)
+    return checks, {"joint": joint_ids, "solo": solo}
+
+
 def redetect(db: Path, detection_run: str, case_name: str) -> tuple[str, float]:
     """Repeat a recorded marker detection run in the database copy *db*.
 
@@ -368,6 +542,14 @@ def main() -> int:
         name = case["name"]
         db = copies[case["session"]]
         print(f"\n=== {name} " + "=" * max(0, 60 - len(name)))
+        if "subjects" in case:
+            checks, extra = run_joint_case(case, db, binary, work)
+            for label, ok, detail in checks:
+                print(f"  {'PASS' if ok else 'FAIL'}  {label}: {detail}")
+            failed |= not all(ok for _, ok, _ in checks)
+            report.append({"case": name, **extra,
+                           "checks": [{"check": l, "pass": ok, "detail": d} for l, ok, d in checks]})
+            continue
         conn = open_readonly(db)
         baseline_row = conn.execute("SELECT * FROM tracking_runs WHERE id LIKE ?", (case["baseline_run"] + "%",)).fetchone()
         if baseline_row is None:

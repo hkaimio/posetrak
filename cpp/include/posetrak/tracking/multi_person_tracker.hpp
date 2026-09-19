@@ -89,6 +89,17 @@ struct PersonSpec {
     std::string config_id;
     int person_id = 0;
     std::filesystem::path output_dir;
+    /// Initial root position (meters), used instead of the observation-based
+    /// init search. It is required for a subject that has only anonymous-dot
+    /// (`unlabeled_points`) markers: Tracker::initialize() only sees labeled
+    /// observations, which are permanently empty for such a subject, and dot
+    /// assignment needs an existing predicted position to gate candidates
+    /// against, so there is nothing to start from. The root orientation is left
+    /// at identity, so this is only valid for a body whose orientation is
+    /// unobserved, meaning one dot; a body with several dots and no coded
+    /// marker is refused (see build_person_context()). Optional for any other
+    /// subject, which then skips its normal init search.
+    std::optional<Eigen::Vector3d> seed_position;
 };
 
 /// @brief Options shared by every person built within one CLI invocation
@@ -103,21 +114,6 @@ struct BuildPersonContextOptions {
     bool debug_init = false;
     bool smooth_output = false;
     bool quiet = true;
-    /// @brief Externally-supplied initial root position, bypassing the normal
-    /// observation-based init search entirely (a single-subject
-    /// escape hatch, not general multi-person functionality -- shared across
-    /// every person in a --person run, so only meaningful for a one-subject
-    /// invocation). A rigid body whose only markers are `unlabeled_points`-
-    /// tracked (e.g. a single fully-reflective ball with no coded pattern
-    /// and no second marker to disambiguate against) has no cold-start path
-    /// at all: Tracker::initialize() only ever sees the labeled `observations`
-    /// set, which is permanently empty for such a skeleton, and per-frame dot
-    /// assignment itself needs an existing predicted position to gate
-    /// candidates against -- there's nothing to bootstrap from without an
-    /// external seed. Root orientation is left at identity (this is only
-    /// useful for a skeleton where orientation is genuinely unobserved, same
-    /// as initialize_rigid_body()'s own single-marker branch).
-    std::optional<Eigen::Vector3d> seed_position;
 };
 
 /// @brief Owns everything needed to track one person through a sequence and record

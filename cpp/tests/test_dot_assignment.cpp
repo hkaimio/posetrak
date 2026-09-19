@@ -758,3 +758,110 @@ TEST_CASE(
     REQUIRE((pos_result->actual - pos_result->predicted).isApprox(pos_result->innovation, 1e-6));
     REQUIRE((vel_result->actual - vel_result->predicted).isApprox(vel_result->innovation, 1e-6));
 }
+
+// ---------------------------------------------------------------------------
+// Shared pool across subjects: duplicate candidates, per-subject camera
+// eligibility and agreement of the shared dot-assignment settings.
+// ---------------------------------------------------------------------------
+
+constexpr std::uint64_t kSubject0 = 1U << 0;
+constexpr std::uint64_t kSubject1 = 1U << 1;
+
+TEST_CASE("append_unique_candidates: a copy of another subject's candidate is merged, not added",
+          "[dot_assignment][shared_pool]") {
+    UnlabeledCandidate a = make_candidate(0, 100.0, 200.0);
+    a.tracklet_id = 7;
+    UnlabeledCandidate b = make_candidate(0, 300.0, 400.0);
+    UnlabeledCandidate c = make_candidate(0, 500.0, 600.0);
+
+    std::vector<UnlabeledCandidate> pool;
+    append_unique_candidates(pool, {a, b}, kSubject0);
+    REQUIRE(pool.size() == 2);
+    REQUIRE(pool[0].subject_mask == kSubject0);
+
+    // A second subject holds a byte-identical copy of `a` and one new candidate.
+    append_unique_candidates(pool, {a, c}, kSubject1);
+    REQUIRE(pool.size() == 3);
+    REQUIRE(pool[0].subject_mask == (kSubject0 | kSubject1));  // `a` is now owned by both
+    REQUIRE(pool[1].subject_mask == kSubject0);                // `b` only by the first
+    REQUIRE(pool[2].subject_mask == kSubject1);                // `c` only by the second
+}
+
+TEST_CASE("append_unique_candidates: candidates that differ in any identifying field are kept",
+          "[dot_assignment][shared_pool]") {
+    UnlabeledCandidate a = make_candidate(0, 100.0, 200.0);
+    a.tracklet_id = 7;
+    std::vector<UnlabeledCandidate> pool = {a};
+
+    UnlabeledCandidate other_tracklet = a;
+    other_tracklet.tracklet_id = 8;
+    UnlabeledCandidate other_frame = a;
+    other_frame.frame_idx = 1;
+    UnlabeledCandidate other_position = a;
+    other_position.position_distorted.x() += 0.5;
+    append_unique_candidates(pool, {other_tracklet, other_frame, other_position}, kSubject1);
+    REQUIRE(pool.size() == 4);
+}
+
+TEST_CASE("append_unique_candidates: one subject's own list is never merged with itself",
+          "[dot_assignment][shared_pool]") {
+    UnlabeledCandidate a = make_candidate(0, 100.0, 200.0);
+    std::vector<UnlabeledCandidate> pool;
+    append_unique_candidates(pool, {a, a}, kSubject0);
+    REQUIRE(pool.size() == 2);
+}
+
+TEST_CASE("find_dot_config_disagreement: names the first setting that differs",
+          "[dot_assignment][shared_pool]") {
+    TrackerConfig a;
+    TrackerConfig b;
+    REQUIRE(find_dot_config_disagreement({&a, &b}).empty());
+    REQUIRE(find_dot_config_disagreement({&a}).empty());
+
+    b.dot_assignment_gate_mahalanobis = a.dot_assignment_gate_mahalanobis + 1.0;
+    REQUIRE(find_dot_config_disagreement({&a, &b}) == "dot_assignment_gate_mahalanobis");
+
+    b = a;
+    b.dot_streak_velocity_enabled = !a.dot_streak_velocity_enabled;
+    REQUIRE(find_dot_config_disagreement({&a, &b}) == "dot_streak_velocity_enabled");
+
+    // A setting the shared solve does not read is not a disagreement.
+    b = a;
+    b.outlier_threshold = a.outlier_threshold + 1.0;
+    REQUIRE(find_dot_config_disagreement({&a, &b}).empty());
+}
+
+TEST_CASE("resolve_shared_dot_assignment: a subject cannot claim a candidate it does not own",
+          "[dot_assignment][shared_pool]") {
+    auto skeleton = make_rigid_dot_skeleton();
+    std::unordered_map<int, Camera> cameras;
+    cameras.emplace(0, make_test_camera(0, 0.0));
+
+    TrackerConfig config;
+    config.dot_assignment_gate_mahalanobis = kGate;
+    Tracker tracker(skeleton, cameras, config);
+    State state(Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), Eigen::VectorXd(0),
+                Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), Eigen::VectorXd(0));
+    tracker.initialize_from_state(state, 0.0);
+    tracker.predict_step(1.0 / 30.0);
+
+    // A candidate exactly at the subject's prediction, so only ownership can
+    // keep it from being claimed.
+    auto pred = tracker.predict_dot_slot_predictions(0);
+    UnlabeledCandidate candidate =
+        make_candidate(0, pred.begin()->second.position.x(), pred.begin()->second.position.y());
+    std::vector<DotAssignmentSubject> subjects = {DotAssignmentSubject{0, &tracker}};
+
+    auto const claimed = [&](std::uint64_t owners) {
+        candidate.subject_mask = owners;
+        std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+        candidates[0] = {candidate};
+        auto result = resolve_shared_dot_assignment(subjects, candidates, config, 0, 0.0);
+        auto it = result.find(0);  // a subject that claims nothing has no entry
+        return it == result.end() ? size_t{0} : it->second.resolved.size();
+    };
+
+    REQUIRE(claimed(kSubject0) == 1);              // owned by subject 0
+    REQUIRE(claimed(kSubject0 | kSubject1) == 1);  // shared: either may claim it
+    REQUIRE(claimed(kSubject1) == 0);              // owned by another subject only
+}

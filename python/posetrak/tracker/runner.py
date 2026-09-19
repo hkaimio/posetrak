@@ -64,7 +64,7 @@ def default_binary_path() -> Path:
     """Return the tracker binary path.
 
     Prefers ~/.posetrak/posetrak-tracker (installed location) and falls back
-    to optbuild/cli/posetrak-tracker (developer build). Both get a ``.exe``
+    to optbuild/cpp/cli/posetrak-tracker (developer build). Both get a ``.exe``
     suffix on Windows, where the built binary actually has one.
 
     Trap: if a ~/.posetrak install exists at all, it silently wins even when it's a stale copy predating a

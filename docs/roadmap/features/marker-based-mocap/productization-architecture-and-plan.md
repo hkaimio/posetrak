@@ -925,9 +925,13 @@ affected ones from the package, not from scripts):
 | person, leg module | tracked, NIS/dof vs markerless | 100 %, equal |
 | ball, throw 1 (3 cameras) | reprojection median per camera | 12–57 px |
 
-A `scripts/validate_marker_mocap.py` driver takes the data-drive path
-from an environment variable, skips when absent, and compares each case
-to the table with tolerances. It runs on demand, not in CI.
+The `scripts/validate_marker_mocap.py` driver re-runs each case from a
+cases file kept beside the data, skips when the data is absent, and
+compares against expected values with tolerances. It runs on demand, not
+in CI. [validation-baseline.md](validation-baseline.md) records the values
+a correct build produces; they reproduce the table above except for the
+sword (whose stored detections had to be redone) and the ball's
+reprojection figure, both explained there.
 
 **Ground-truth harness** (redesign doc §2) for WS2 and WS6: the CAL and
 HARD labeled frame sets and the per-stage metric scripts under

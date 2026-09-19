@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import click
 
+from posetrak.cli.detect import _resolve_capture_object
 from posetrak.cli.session import _open_session_required, _resolve
+from posetrak.db.object_marker_run import derive_object_marker_run
 from posetrak.db.sequence_dots import add_dots_to_sequence
 
 
@@ -25,28 +27,53 @@ def sequence_group() -> None:
 @sequence_group.command("finalise-object")
 @click.option(
     "--detection-run", "run", required=True, metavar="UUID",
-    help="An object-bound marker run (`detect run --type aruco|dots --object NAME`); prefix accepted.",
+    help="A marker run (`detect run --type aruco|dots`); prefix accepted. Bound to the object "
+         "unless --object is given.",
+)
+@click.option(
+    "--object", "object_ref", default=None, metavar="NAME|ID",
+    help="Take this object's markers out of a run bound to no object (or to another one), for "
+         "props detected together in one pass. Makes a run of its own for the object first.",
+)
+@click.option(
+    "--with-dots", is_flag=True, default=False,
+    help="With --object: also copy the run's reflective-dot candidates, for an object whose "
+         "marker body has dots.",
 )
 @click.option("--notes", default="", metavar="S")
 @click.pass_obj
-def sequence_finalise_object(obj: dict, run: str, notes: str) -> None:
-    """Make the observation sequence of a tracked object from its marker run.
+def sequence_finalise_object(obj: dict, run: str, object_ref: str | None, with_dots: bool, notes: str) -> None:
+    """Make the observation sequence of a tracked object from a marker run.
 
     Copies the run's coded-marker corners and reflective-dot candidates into one
     new sequence. Finalising a run again replaces its sequence, unless that
     sequence already has tracking results or manual edits.
+
+    Several props can be detected in one pass over the video: run
+    `detect run --type aruco --marker-ids ...` once with the ids of all of them,
+    then finalise once per prop with --object. Each prop gets a run of its own
+    (derived from the shared one, which is not changed) and a sequence.
     """
     from app.pose.finalise import finalise_object_to_db
 
+    if with_dots and object_ref is None:
+        raise click.UsageError("--with-dots needs --object.")
     conn = _open_session_required(obj)
     try:
         run_id = _resolve(conn, "detection_runs", run)
         try:
+            if object_ref is not None:
+                shot_id = conn.execute("SELECT shot_id FROM detection_runs WHERE id = ?", (run_id,)).fetchone()[0]
+                run_id = derive_object_marker_run(
+                    conn, run_id, _resolve_capture_object(conn, shot_id, object_ref), with_dots=with_dots,
+                )
             sequence_id = finalise_object_to_db(conn, run_id, notes=notes)
         except (ValueError, RuntimeError) as exc:
             raise click.ClickException(str(exc)) from exc
     finally:
         conn.close()
+    if object_ref is not None:
+        click.echo(f"detection_run_id: {run_id}")
     click.echo(f"sequence_id: {sequence_id}")
 
 

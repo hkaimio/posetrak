@@ -9,6 +9,7 @@ finalise); only the video frame source is faked.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from unittest.mock import patch
@@ -206,3 +207,157 @@ class TestAddDots:
 
         assert result.exit_code != 0
         assert "sync_config_id mismatch" in result.output
+
+
+_TIP_BODY_YAML = _BODY_YAML.replace("test-bokken", "test-tip").replace("hilt", "tip").replace('id: "3"', 'id: "7"')
+
+
+def _two_objects(session_path: Path, capture_id: str) -> None:
+    """Objects "hilt-prop" (marker 3) and "tip-prop" (marker 7)."""
+    conn = sqlite3.connect(str(session_path))
+    hilt = import_marker_body_str(conn, _BODY_YAML, name="Hilt")
+    tip = import_marker_body_str(conn, _TIP_BODY_YAML, name="Tip")
+    conn.close()
+    for name, body in (("hilt-prop", hilt), ("tip-prop", tip)):
+        result = _invoke(["capture", "object", "add", "--capture", capture_id, "--name", name,
+                          "--marker-body", body], session_path)
+        assert result.exit_code == 0, result.output
+
+
+def _shared_run(session_path: Path, capture_id: str, sync_id: str, *extra: str) -> str:
+    """One unbound run over markers 3 and 7. Marker 3 is seen on even frames, marker 7 on odd ones."""
+    run_id = _detect(session_path, capture_id, sync_id, "--type", "aruco", "--marker-ids", "3,7", *extra)
+    conn = sqlite3.connect(str(session_path))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT shot_video_id, video_frame FROM detection_keypoints "
+        "WHERE detection_run_id = ? AND region_type = 'markers'", (run_id,),
+    ).fetchall()
+    for r in rows:
+        blob = np.full((8, 3), np.nan, dtype=np.float32)
+        blob[:, 2] = 0.0
+        seen = slice(0, 4) if r["video_frame"] % 2 == 0 else slice(4, 8)
+        blob[seen] = [[100.0 + r["video_frame"], 200.0, 1.0]] * 4
+        conn.execute(
+            "UPDATE detection_keypoints SET keypoints = ? WHERE detection_run_id = ? AND shot_video_id = ? "
+            "AND video_frame = ? AND region_type = 'markers'",
+            (blob.tobytes(), run_id, r["shot_video_id"], r["video_frame"]),
+        )
+    conn.commit()
+    conn.close()
+    return run_id
+
+
+def _marker_frames(session_path: Path, run_id: str) -> dict[int, np.ndarray]:
+    return {
+        r["video_frame"]: np.frombuffer(r["keypoints"], dtype=np.float32).reshape(-1, 3)
+        for r in _query(session_path, "SELECT video_frame, keypoints FROM detection_keypoints "
+                                      "WHERE detection_run_id = ? AND region_type = 'markers'", run_id)
+    }
+
+
+class TestFinaliseObjectFromASharedRun:
+    def test_each_prop_gets_its_own_run_and_sequence_and_the_shared_run_is_unchanged(
+        self, seeded_session_db_path: Path, capture_id: str, sync_id: str
+    ) -> None:
+        _two_objects(seeded_session_db_path, capture_id)
+        shared = _shared_run(seeded_session_db_path, capture_id, sync_id)
+        before = {f: b.copy() for f, b in _marker_frames(seeded_session_db_path, shared).items()}
+
+        results = {}
+        for name in ("hilt-prop", "tip-prop"):
+            result = _invoke(["sequence", "finalise-object", "--detection-run", shared, "--object", name],
+                             seeded_session_db_path)
+            assert result.exit_code == 0, result.output
+            results[name] = dict(line.split(": ") for line in result.output.strip().splitlines())
+
+        for name, marker, parity in (("hilt-prop", "3", 0), ("tip-prop", "7", 1)):
+            (run,) = _query(seeded_session_db_path, "SELECT * FROM detection_runs WHERE id = ?",
+                            results[name]["detection_run_id"])
+            object_id = _query(seeded_session_db_path, "SELECT id FROM capture_objects WHERE name = ?", name)[0]["id"]
+            config = json.loads(run["config_json"])
+            assert run["capture_object_id"] == object_id
+            assert config["marker_ids"] == [marker]
+            assert config["derived_from_detection_run_id"] == shared
+
+            frames = _marker_frames(seeded_session_db_path, run["id"])
+            assert frames and all(f % 2 == parity for f in frames)
+            for frame, blob in frames.items():
+                assert blob.shape == (4, 3)
+                assert np.allclose(blob, before[frame][4 * parity:4 * parity + 4])
+
+            (seq,) = _query(seeded_session_db_path,
+                            "SELECT id, detection_run_id FROM pose_observation_sequences WHERE id = ?",
+                            results[name]["sequence_id"])
+            assert seq["detection_run_id"] == run["id"]
+            landmark = "hilt" if marker == "3" else "tip"
+            assert [r["name"] for r in _query(
+                seeded_session_db_path,
+                "SELECT name FROM pose_sequence_keypoints WHERE sequence_id = ? ORDER BY keypoint_idx", seq["id"],
+            )] == [f"{landmark}:c{i}" for i in range(4)]
+
+        after = _marker_frames(seeded_session_db_path, shared)
+        assert after.keys() == before.keys()
+        assert all(np.array_equal(after[f], before[f], equal_nan=True) for f in after)
+
+    def test_dots_are_copied_only_when_asked(
+        self, seeded_session_db_path: Path, capture_id: str, sync_id: str
+    ) -> None:
+        _two_objects(seeded_session_db_path, capture_id)
+        shared = _shared_run(seeded_session_db_path, capture_id, sync_id, "--dots-camera", "cam1")
+
+        plain = _invoke(["sequence", "finalise-object", "--detection-run", shared, "--object", "hilt-prop"],
+                        seeded_session_db_path)
+        with_dots = _invoke(["sequence", "finalise-object", "--detection-run", shared, "--object", "tip-prop",
+                             "--with-dots"], seeded_session_db_path)
+
+        def sources(output: str) -> set[str]:
+            seq = output.strip().splitlines()[-1].split(": ")[1]
+            return {r["source"] for r in _query(
+                seeded_session_db_path, "SELECT DISTINCT source FROM pose_observations WHERE sequence_id = ?", seq)}
+
+        assert sources(plain.output) == {"markers"}
+        assert sources(with_dots.output) == {"markers", "dots"}
+
+    def test_an_object_none_of_whose_markers_the_run_looked_for_is_refused(
+        self, seeded_session_db_path: Path, capture_id: str, sync_id: str
+    ) -> None:
+        _two_objects(seeded_session_db_path, capture_id)
+        run_id = _detect(seeded_session_db_path, capture_id, sync_id, "--type", "aruco", "--marker-ids", "3")
+
+        result = _invoke(["sequence", "finalise-object", "--detection-run", run_id, "--object", "tip-prop"],
+                         seeded_session_db_path)
+
+        assert result.exit_code != 0
+        assert "none of the marker ids of object 'tip-prop'" in result.output
+        assert len(_query(seeded_session_db_path, "SELECT id FROM detection_runs")) == 1
+
+    def test_finalising_the_same_object_twice_points_at_the_existing_run(
+        self, seeded_session_db_path: Path, capture_id: str, sync_id: str
+    ) -> None:
+        _two_objects(seeded_session_db_path, capture_id)
+        shared = _shared_run(seeded_session_db_path, capture_id, sync_id)
+        args = ["sequence", "finalise-object", "--detection-run", shared, "--object", "hilt-prop"]
+        first = _invoke(args, seeded_session_db_path)
+        derived = first.output.splitlines()[0].split(": ")[1]
+
+        again = _invoke(args, seeded_session_db_path)
+
+        assert again.exit_code != 0
+        assert f"already has run {derived}" in again.output
+        refinalised = _invoke(["sequence", "finalise-object", "--detection-run", derived], seeded_session_db_path)
+        assert refinalised.exit_code == 0, refinalised.output
+
+    def test_an_unknown_object_and_a_stray_with_dots_are_rejected(
+        self, seeded_session_db_path: Path, capture_id: str, sync_id: str
+    ) -> None:
+        _two_objects(seeded_session_db_path, capture_id)
+        shared = _shared_run(seeded_session_db_path, capture_id, sync_id)
+
+        unknown = _invoke(["sequence", "finalise-object", "--detection-run", shared, "--object", "nope"],
+                          seeded_session_db_path)
+        stray = _invoke(["sequence", "finalise-object", "--detection-run", shared, "--with-dots"],
+                        seeded_session_db_path)
+
+        assert unknown.exit_code != 0 and "no capture object 'nope'" in unknown.output
+        assert stray.exit_code != 0 and "--with-dots needs --object" in stray.output

@@ -554,6 +554,41 @@ def test_pipeline_dot_threshold_by_camera_overrides_the_global_default(session):
     assert np.allclose(candidates[104][0, :2], [50.0, 60.0], atol=1.0)
 
 
+def test_pipeline_passes_per_camera_max_saturation_and_blacklist_frac(session):
+    """dot_max_saturation_by_camera / dot_blacklist_frac_by_camera override
+    their scalar defaults for a specific camera, exactly like
+    dot_threshold_by_camera above -- the 2026-09-11 finding (person-marker
+    redesign phase P-D, status.md) that a real capture mixing camera
+    models needs both overridden per camera too (one camera's markers
+    render meaningfully colour-tinted; the glare veto tuned on a
+    reflective-prop capture proved too tight for person-worn markers).
+    Checked at the detect_blobs() call site itself (mocked) since the
+    per-camera .get() plumbing is what's under test, not detect_blobs()'s
+    own thresholding (covered elsewhere)."""
+    ids = _TEST_IDS
+    calls = []
+
+    def _fake_detect_blobs(gray, **kwargs):
+        calls.append(kwargs)
+        return []
+
+    with patch("posetrak.detection.marker_pipeline.iter_frames", _synthetic_dim_dot_frames), \
+         patch("posetrak.detection.marker_pipeline.detect_blobs", _fake_detect_blobs):
+        pipeline = MarkerDetectionPipeline(
+            session, shot_id=ids["shot_id"], sync_config_id=ids["sync_id"],
+            time_start_s=0.0, time_end_s=10.0, marker_ids=["3"],
+            detect_dots_for_cameras={ids["cam_id"]},
+            dot_background_mode="blacklist",
+            dot_max_saturation=255.0, dot_max_saturation_by_camera={ids["cam_id"]: 90.0},
+            dot_blacklist_frac=0.7, dot_blacklist_frac_by_camera={ids["cam_id"]: 0.95},
+        )
+        pipeline.run()
+
+    assert calls, "detect_blobs was never called"
+    assert all(c["max_saturation"] == 90.0 for c in calls)
+    assert all(c["blacklist_frac"] == 0.95 for c in calls)
+
+
 def test_run_parallel_matches_run_on_a_real_tiny_video_file(session, tmp_path):
     """run_parallel() spawns a real subprocess (ProcessPoolExecutor, needed
     to be picklable across Windows' spawn start method) -- unlike every

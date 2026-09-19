@@ -70,8 +70,18 @@ def main() -> None:
                           "docstring for why 'subtract' fuses a marker into the subject's own "
                           "limb on an atypical pose, and status.md for the real-data validation.")
     ap.add_argument("--dot-blacklist-frac", type=float, default=0.7)
+    ap.add_argument("--dot-blacklist-frac-by-camera", nargs="*", default=[], metavar="LABEL=FRAC",
+                     help="Per-camera glare-veto looseness override, e.g. "
+                          "--dot-blacklist-frac-by-camera gopro13_01=0.95 -- higher = looser veto "
+                          "(fewer real markers vetoed, more glare kept). The 0.7 default (tuned on "
+                          "a reflective-prop capture) proved too tight for person-worn markers "
+                          "passing in front of bright background patches; see status.md's P-D entry.")
     ap.add_argument("--dot-blacklist-radius-px", type=int, default=6)
     ap.add_argument("--dot-max-saturation", type=float, default=255.0)
+    ap.add_argument("--dot-max-saturation-by-camera", nargs="*", default=[], metavar="LABEL=MAXSAT",
+                     help="Per-camera chroma-filter override, e.g. "
+                          "--dot-max-saturation-by-camera pixel9=120 -- some cameras render a real "
+                          "marker meaningfully colour-tinted (saturation 50-90, not near-0).")
     ap.add_argument("--dot-bg-sample-count", type=int, default=40)
     ap.add_argument("--parallel", action="store_true",
                      help="Run cameras concurrently (MarkerDetectionPipeline.run_parallel(), one "
@@ -95,13 +105,21 @@ def main() -> None:
         print(f"Dot detection enabled for: {args.detect_dots_camera_label} "
               f"({sorted(c[:8] for c in detect_dots_for_cameras)})")
 
-    dot_threshold_by_camera = {}
-    for entry in args.dot_threshold_by_camera:
-        label, _, value = entry.partition("=")
-        row = conn.execute("SELECT id FROM camera_instances WHERE label = ?", (label,)).fetchone()
-        if row is None:
-            raise ValueError(f"--dot-threshold-by-camera: no camera_instances row with label {label!r}")
-        dot_threshold_by_camera[row["id"]] = int(value)
+    def _by_camera(entries: list[str], flag: str, cast):
+        out = {}
+        for entry in entries:
+            label, _, value = entry.partition("=")
+            row = conn.execute("SELECT id FROM camera_instances WHERE label = ?", (label,)).fetchone()
+            if row is None:
+                raise ValueError(f"{flag}: no camera_instances row with label {label!r}")
+            out[row["id"]] = cast(value)
+        return out
+
+    dot_threshold_by_camera = _by_camera(args.dot_threshold_by_camera, "--dot-threshold-by-camera", int)
+    dot_blacklist_frac_by_camera = _by_camera(
+        args.dot_blacklist_frac_by_camera, "--dot-blacklist-frac-by-camera", float)
+    dot_max_saturation_by_camera = _by_camera(
+        args.dot_max_saturation_by_camera, "--dot-max-saturation-by-camera", float)
 
     pipeline = MarkerDetectionPipeline(
         session=conn,
@@ -120,8 +138,10 @@ def main() -> None:
         dot_threshold_by_camera=dot_threshold_by_camera,
         dot_background_mode=args.dot_background_mode,
         dot_blacklist_frac=args.dot_blacklist_frac,
+        dot_blacklist_frac_by_camera=dot_blacklist_frac_by_camera,
         dot_blacklist_radius_px=args.dot_blacklist_radius_px,
         dot_max_saturation=args.dot_max_saturation,
+        dot_max_saturation_by_camera=dot_max_saturation_by_camera,
         dot_bg_sample_count=args.dot_bg_sample_count,
     )
 

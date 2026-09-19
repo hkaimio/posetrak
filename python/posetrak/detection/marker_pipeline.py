@@ -96,8 +96,10 @@ class _DotDetectionConfig:
     threshold_by_camera: dict[str, int]
     background_mode: str
     blacklist_frac: float
+    blacklist_frac_by_camera: dict[str, float]
     blacklist_radius_px: int
     max_saturation: float
+    max_saturation_by_camera: dict[str, float]
     bg_subtract: bool
     bg_sample_count: int
 
@@ -198,12 +200,14 @@ def _process_camera_core(
             if dot_writer is not None:
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                 dot_threshold = dot_cfg.threshold_by_camera.get(cam.camera_instance_id, dot_cfg.threshold)
+                dot_max_sat = dot_cfg.max_saturation_by_camera.get(cam.camera_instance_id, dot_cfg.max_saturation)
+                dot_frac = dot_cfg.blacklist_frac_by_camera.get(cam.camera_instance_id, dot_cfg.blacklist_frac)
                 blobs = detect_blobs(
                     gray, threshold=dot_threshold, background=dot_background,
                     background_mode=dot_cfg.background_mode,
-                    blacklist_frac=dot_cfg.blacklist_frac,
+                    blacklist_frac=dot_frac,
                     blacklist_radius_px=dot_cfg.blacklist_radius_px,
-                    bgr=img, max_saturation=dot_cfg.max_saturation,
+                    bgr=img, max_saturation=dot_max_sat,
                 )
                 dot_linker.link_frame(video_frame, blobs)
                 dot_writer.add_frame(video_frame, blobs)
@@ -294,8 +298,10 @@ class MarkerDetectionPipeline:
         dot_threshold_by_camera: dict[str, int] | None = None,
         dot_background_mode: str = "subtract",
         dot_blacklist_frac: float = 0.7,
+        dot_blacklist_frac_by_camera: dict[str, float] | None = None,
         dot_blacklist_radius_px: int = 6,
         dot_max_saturation: float = 255.0,
+        dot_max_saturation_by_camera: dict[str, float] | None = None,
         dot_bg_sample_count: int = 40,
     ) -> None:
         """See the class docstring for the two ways to drive this pipeline.
@@ -350,6 +356,24 @@ class MarkerDetectionPipeline:
             value that's wrong for some of them. dot_blacklist_frac/
             dot_blacklist_radius_px tune the veto itself; see
             detect_blobs()'s own docstring.
+        dot_max_saturation_by_camera, dot_blacklist_frac_by_camera:
+            2026-09-11 (person-marker-assignment redesign phase P-D, see
+            status.md): the same per-camera-override need as
+            dot_threshold_by_camera, for two more parameters real data
+            showed also need it. A capture mixing camera models can have
+            some markers rendering meaningfully colour-tinted (real
+            saturation 50-90, not near-0) only on specific cameras --
+            dot_max_saturation must be loosened there without loosening it
+            (and admitting more skin/fabric) on cameras where it doesn't
+            need to be. Separately, dot_blacklist_frac=0.7 (tuned on a
+            reflective-prop capture) proved too tight for person-worn
+            markers passing in front of bright background patches (a
+            window-lit floor, say) -- vetoing real markers, confirmed by a
+            ground-truth sweep (recall recovered by loosening frac to
+            0.85-0.95 depending on the camera). Both dicts override their
+            scalar default per camera_instance_id exactly like
+            dot_threshold_by_camera; absent from the dict means "use the
+            scalar".
         """
         if rig_config is not None:
             if not rig_config.marker_corners:
@@ -385,8 +409,10 @@ class MarkerDetectionPipeline:
         self._dot_threshold_by_camera = dot_threshold_by_camera or {}
         self._dot_background_mode = dot_background_mode
         self._dot_blacklist_frac = dot_blacklist_frac
+        self._dot_blacklist_frac_by_camera = dot_blacklist_frac_by_camera or {}
         self._dot_blacklist_radius_px = dot_blacklist_radius_px
         self._dot_max_saturation = dot_max_saturation
+        self._dot_max_saturation_by_camera = dot_max_saturation_by_camera or {}
         self._dot_bg_sample_count = dot_bg_sample_count
         if rig_config is not None:
             self._detector = MarkerRigDetector(
@@ -421,8 +447,10 @@ class MarkerDetectionPipeline:
                 "threshold": self._dot_threshold,
                 "threshold_by_camera": dict(self._dot_threshold_by_camera),
                 "blacklist_frac": self._dot_blacklist_frac,
+                "blacklist_frac_by_camera": dict(self._dot_blacklist_frac_by_camera),
                 "blacklist_radius_px": self._dot_blacklist_radius_px,
                 "max_saturation": self._dot_max_saturation,
+                "max_saturation_by_camera": dict(self._dot_max_saturation_by_camera),
                 "bg_sample_count": self._dot_bg_sample_count,
             }
         run_id = create_marker_detection_run(
@@ -555,8 +583,10 @@ class MarkerDetectionPipeline:
             threshold_by_camera=self._dot_threshold_by_camera,
             background_mode=self._dot_background_mode,
             blacklist_frac=self._dot_blacklist_frac,
+            blacklist_frac_by_camera=self._dot_blacklist_frac_by_camera,
             blacklist_radius_px=self._dot_blacklist_radius_px,
             max_saturation=self._dot_max_saturation,
+            max_saturation_by_camera=self._dot_max_saturation_by_camera,
             bg_subtract=self._dot_bg_subtract,
             bg_sample_count=self._dot_bg_sample_count,
         )
@@ -642,8 +672,10 @@ class MarkerDetectionPipeline:
                 "threshold": self._dot_threshold,
                 "threshold_by_camera": dict(self._dot_threshold_by_camera),
                 "blacklist_frac": self._dot_blacklist_frac,
+                "blacklist_frac_by_camera": dict(self._dot_blacklist_frac_by_camera),
                 "blacklist_radius_px": self._dot_blacklist_radius_px,
                 "max_saturation": self._dot_max_saturation,
+                "max_saturation_by_camera": dict(self._dot_max_saturation_by_camera),
                 "bg_sample_count": self._dot_bg_sample_count,
             }
         run_id = create_marker_detection_run(
@@ -709,8 +741,10 @@ def load_pipeline_for_capture_object(
     dot_threshold_by_camera: dict[str, int] | None = None,
     dot_background_mode: str = "subtract",
     dot_blacklist_frac: float = 0.7,
+    dot_blacklist_frac_by_camera: dict[str, float] | None = None,
     dot_blacklist_radius_px: int = 6,
     dot_max_saturation: float = 255.0,
+    dot_max_saturation_by_camera: dict[str, float] | None = None,
     dot_bg_sample_count: int = 40,
 ) -> MarkerDetectionPipeline:
     """Build a ``MarkerDetectionPipeline`` for an existing ``capture_objects``
@@ -721,7 +755,8 @@ def load_pipeline_for_capture_object(
 
     detect_dots_for_cameras, dot_bg_subtract, dot_threshold,
     dot_threshold_by_camera, dot_background_mode, dot_blacklist_frac,
-    dot_blacklist_radius_px, dot_max_saturation, dot_bg_sample_count:
+    dot_blacklist_frac_by_camera, dot_blacklist_radius_px, dot_max_saturation,
+    dot_max_saturation_by_camera, dot_bg_sample_count:
         forwarded to ``MarkerDetectionPipeline`` unchanged -- see its own
         docstring. The GUI's run-detection dialog does not yet expose a way
         to set any of these (no UI wiring exists for it yet); a caller
@@ -766,7 +801,9 @@ def load_pipeline_for_capture_object(
         dot_threshold_by_camera=dot_threshold_by_camera,
         dot_background_mode=dot_background_mode,
         dot_blacklist_frac=dot_blacklist_frac,
+        dot_blacklist_frac_by_camera=dot_blacklist_frac_by_camera,
         dot_blacklist_radius_px=dot_blacklist_radius_px,
         dot_max_saturation=dot_max_saturation,
+        dot_max_saturation_by_camera=dot_max_saturation_by_camera,
         dot_bg_sample_count=dot_bg_sample_count,
     )

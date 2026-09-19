@@ -327,29 +327,50 @@ a unit.  Tools that write paths should prefer relative paths when the file is un
 project root; tools that read paths must resolve against the registry's `project_root`
 when the path is not absolute.
 
-### Pose blob extensibility for additional observation sources
-`PoseObservation.kp_blob` currently stores keypoints from a single pose detector
-(`pose_model`), with keypoint count and ordering implied by the model name.
-
-To support additional observation points in future (e.g. visual fiducial markers or
-manually labelled points alongside the pose keypoints), the seam is a per-sequence
-keypoint manifest table:
+### Pose blob extensibility: the keypoint manifest
+`PoseObservation.kp_blob` from a person's pose detector has its keypoint count and
+ordering implied by the model name (`pose_model`).  A sequence whose observations come
+from another source carries a per-sequence manifest instead, so the blob is indexed by
+`keypoint_idx` rather than by model convention:
 
 ```sql
--- Future: PoseSequenceKeypoints (not yet implemented)
 CREATE TABLE pose_sequence_keypoints (
     sequence_id   TEXT NOT NULL REFERENCES pose_observation_sequences(id),
     keypoint_idx  INTEGER NOT NULL,
-    name          TEXT NOT NULL,   -- e.g. "right_knee", "marker_A4"
-    source        TEXT NOT NULL,   -- e.g. "rtmpose_body", "visual_marker"
+    name          TEXT NOT NULL,   -- landmark name: "<marker name>:c<corner 0-3>"
+    source        TEXT NOT NULL,   -- where the slot comes from, e.g. "aruco"
     PRIMARY KEY (sequence_id, keypoint_idx)
 );
 ```
 
-With this table, the blob is indexed by `keypoint_idx` rather than implicitly by model
-convention.  Adding visual markers becomes inserting new rows with higher `keypoint_idx`
-values and expanding the blob accordingly.  Until this is needed, `pose_model` continues
-to imply the keypoint layout.
+A sequence with no manifest rows -- every person sequence -- keeps the layout implied by
+`pose_model`, so nothing existing changes.  Today the manifest is written for object
+sequences (`finalise_object_to_db`, `source = 'aruco'`).  The C++ `SessionReader` matches
+each row's `name` against `Marker::landmark` to bind a blob slot to a skeleton marker,
+and sizes the per-frame blob as `max(keypoint_idx) + 1` rather than by how many slots
+happened to match, so a skeleton that uses only a subset of the slots still reads the
+blob correctly.
+
+### Capture objects and marker detection runs
+A tracked rigid prop is a `capture_objects` row (`capture_id`, `name`,
+`marker_body_definition_id`), the counterpart of `capture_persons`.  The marker body
+definition holds the prop's marker geometry; the skeleton a tracking run uses for it is
+generated from that definition.
+
+Marker detection reuses `detection_runs` rather than adding a parallel table:
+- `detector_type` is `'pose'` (the default, so every pre-existing row) or `'aruco'` for a
+  marker run.  Reflective-dot detection currently runs as part of an `'aruco'` run, with
+  its parameters recorded under `dot_detection` in `config_json`.  A finer taxonomy
+  (separate dot, imported-2D-track and segmentation types) is proposed in
+  `docs/roadmap/features/marker-based-mocap/productization-architecture-and-plan.md` §3.4
+  but is not implemented.
+- `config_json` holds the detector-specific settings, so a run can be inspected and
+  reproduced later.
+- `capture_object_id` is NULL for person (pose) runs and names the prop for an object run.
+
+In a tracking run, `tracking_run_persons.capture_object_id` is non-NULL when that subject
+is an object; `person_id` remains a subject index within the run either way, and results
+stay keyed `(run_id, person_id)`.
 
 ### `PoseObservationSequence` is the atomic tracking input
 A single run of `posetrak track` consumes exactly one sequence.  All relationships required
@@ -954,10 +975,9 @@ inter-tool exchange if a specific consumer requires it.
   `--version`, etc.) to be decided during implementation.
 - **obs_blob compression**: decide between page-level `zstd_vfs` (transparent, no code
   changes) vs. per-blob application-layer compression (more portable).
-- **Pose blob extensibility**: the `PoseSequenceKeypoints` manifest table (§3) is not yet
-  implemented.  Until it is, `pose_model` implies the keypoint layout.  Implement before
-  adding any non-pose observation source (visual markers, etc.) to avoid a breaking
-  change to the blob format.
+- **Pose blob extensibility**: resolved.  The `pose_sequence_keypoints` manifest (§3) is
+  implemented and used by object sequences; person sequences without manifest rows keep
+  the layout implied by `pose_model`.
 
 ---
 

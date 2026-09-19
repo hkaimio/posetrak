@@ -102,19 +102,40 @@ def _get_background(
 def _refine_point(
     gray: np.ndarray, background: np.ndarray, gx: float, gy: float,
     window_radius: int, snap_radius_px: float,
+    centroid_mode: str, blacklist_threshold: int,
 ) -> tuple[float, float, bool, int | None]:
-    """Returns (refined_x, refined_y, was_refined, threshold_used)."""
+    """Returns (refined_x, refined_y, was_refined, threshold_used).
+
+    centroid_mode:
+      'blacklist' (default) -- threshold *raw* brightness at
+        `blacklist_threshold`, take the contour-moments centroid of the
+        connected component nearest the click. This is exactly what
+        `dot_blob_detector.detect_blobs(background_mode='blacklist')` --
+        the production detector -- does, so a marker the detector found
+        lands the GT point on the detector's own centroid (metric epsilon
+        can then be tiny), and a marker it missed still gets a real
+        centroid.
+      'subtract-ladder' -- the original: threshold the residual
+        (`gray - background`) down a strict->loose ladder, first component
+        within snap radius wins. Use for captures detected in
+        `background_mode='subtract'`.
+    """
     h, w = gray.shape
     x0, y0 = max(0, int(gx - window_radius)), max(0, int(gy - window_radius))
     x1, y1 = min(w, int(gx + window_radius)), min(h, int(gy + window_radius))
     if x1 <= x0 or y1 <= y0:
         return gx, gy, False, None
-
-    residual = cv2.subtract(gray[y0:y1, x0:x1], background[y0:y1, x0:x1])
     local_gx, local_gy = gx - x0, gy - y0
 
-    for thresh in _THRESHOLD_LADDER:
-        _, mask = cv2.threshold(residual, thresh, 255, cv2.THRESH_BINARY)
+    if centroid_mode == "blacklist":
+        levels = [blacklist_threshold]
+        source = gray[y0:y1, x0:x1]
+    else:
+        levels = _THRESHOLD_LADDER
+        source = cv2.subtract(gray[y0:y1, x0:x1], background[y0:y1, x0:x1])
+
+    for thresh in levels:
+        _, mask = cv2.threshold(source, thresh, 255, cv2.THRESH_BINARY)
         n, labels, stats, centroids = cv2.connectedComponentsWithStats(mask)
         best_i, best_d = None, None
         for i in range(1, n):
@@ -125,10 +146,6 @@ def _refine_point(
             if best_d is None or d < best_d:
                 best_i, best_d = i, d
         if best_i is not None and best_d <= snap_radius_px:
-            # Recompute via moments (matches detect_blobs()'s own centroid
-            # definition exactly, rather than connectedComponentsWithStats'
-            # own centroid which is pixel-count-weighted the same way but
-            # kept separate on principle -- one source of truth).
             comp_mask = (labels == best_i).astype(np.uint8) * 255
             contours, _ = cv2.findContours(comp_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             if contours:
@@ -153,6 +170,12 @@ def main() -> None:
     ap.add_argument("--snap-radius-px", type=float, default=30.0,
                      help="Max distance a found component's centroid may be from the original "
                           "click to be accepted as a refinement of it.")
+    ap.add_argument("--centroid-mode", choices=["blacklist", "subtract-ladder"], default="blacklist",
+                     help="'blacklist' (default) matches the production detector's raw-brightness "
+                          "centroid; 'subtract-ladder' is the original residual method.")
+    ap.add_argument("--blacklist-threshold", type=int, default=200,
+                     help="Raw-brightness threshold for --centroid-mode blacklist (match the "
+                          "detection run's own dot_threshold).")
     args = ap.parse_args()
 
     session_paths = {}
@@ -178,8 +201,10 @@ def main() -> None:
         if entry.get("points"):
             labeled_frames_by_cam.setdefault((entry["dataset"], entry["shot_video_id"]), []).append(entry["video_frame"])
 
+    # 'blacklist' centroid mode thresholds raw brightness only -- no background needed,
+    # so skip the (slow) per-camera background decode entirely.
     bg_cache: dict[tuple[str, str], np.ndarray] = {}
-    for (dataset, svid), video_frames in labeled_frames_by_cam.items():
+    for (dataset, svid), video_frames in ([] if args.centroid_mode == "blacklist" else labeled_frames_by_cam.items()):
         conn = session_conns.get(dataset)
         if conn is None:
             raise SystemExit(f"no --session given for dataset {dataset!r}")
@@ -198,7 +223,7 @@ def main() -> None:
         dataset, svid, video_frame = entry["dataset"], entry["shot_video_id"], entry["video_frame"]
         conn = session_conns.get(dataset)
         file_path = _resolve_file_path(conn, svid)
-        background = bg_cache[(dataset, svid)]
+        background = bg_cache.get((dataset, svid))  # None in --centroid-mode blacklist
 
         img = None
         for _, decoded in iter_frames(file_path, video_frame, video_frame + 1):
@@ -213,6 +238,7 @@ def main() -> None:
             n_points += 1
             rx, ry, refined, thresh = _refine_point(
                 gray, background, gx, gy, args.window_radius_px, args.snap_radius_px,
+                args.centroid_mode, args.blacklist_threshold,
             )
             new_points.append([rx, ry])
             moved = float(np.hypot(rx - gx, ry - gy))

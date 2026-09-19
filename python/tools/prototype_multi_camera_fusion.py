@@ -19,17 +19,49 @@ directly rather than pre-filtering by epipolar distance first.
 
 Algorithm, per (synchronized) frame:
     1. Undistort every camera's raw candidate pixels.
-    2. For every pair of cameras with candidates, triangulate every
-       (candidate_a, candidate_b) combination (cv2.triangulatePoints),
-       keep pairs with positive depth in both cameras and low
-       reprojection error back into BOTH -- a real 3D point that two
-       different candidates both happen to explain well; a coincidental
-       false pairing generally reprojects badly in at least one view.
-    3. Greedily merge accepted 2-view points that land within
-       --merge-radius-m of each other in 3D into one fused point,
-       accumulating which (camera, candidate index) pairs support it --
-       a point three or more cameras agree on this way is real multi-view
-       confirmation, not just a coincidental 2-view alignment.
+    2. **Seed 3D point hypotheses**: for every pair of cameras with
+       candidates, triangulate every (candidate_a, candidate_b)
+       combination (cv2.triangulatePoints), keep pairs with positive
+       depth in both cameras and low reprojection error back into BOTH --
+       a real 3D point that two different candidates both happen to
+       explain well; a coincidental false pairing generally reprojects
+       badly in at least one view. Greedily merge accepted 2-view points
+       landing within --merge-radius-m of each other in 3D into one seed
+       hypothesis (position averaged across whichever pairs merged into
+       it) -- this stage exists only to produce candidate 3D positions,
+       not a final view/membership list (see step 3).
+    3. **Reprojection consensus** (2026-09-10, replacing an earlier
+       version that only ever recorded the specific camera pair that
+       happened to seed a hypothesis): reproject every seed hypothesis's
+       3D position into *every* camera with candidates this frame --not
+       only the pair that produced it-- and find each camera's closest
+       candidate within --max-reproj-px. Resolve all (hypothesis, camera,
+       candidate) matches globally by greedy best-first claiming, sorted
+       by reprojection error ascending, so one raw candidate ends up
+       supporting at most one hypothesis (whichever it fits best) instead
+       of silently supporting two different 3D interpretations of the
+       same pixel -- a real bug found 2026-09-09 (two seed hypotheses
+       both used the same raw pixel in one camera, paired with two
+       different candidates in two other cameras, and each got assigned
+       a different marker name downstream). This also recovers support
+       from cameras that had a matching candidate but weren't part of
+       the winning triangulating pair (Harri, 2026-09-10: "fusion should
+       group all detections that reproject close, it does not make sense
+       to just apply to the winning pair"). A hypothesis is kept only if
+       it ends up with >=2 claimed views after this; its position is then
+       refined by a proper N-view triangulation (triangulate_multiview)
+       over its final claimed views, rather than kept at the pairwise-
+       average estimate from step 2.
+
+    Note this resolves *more* ambiguity at the fusion stage than the
+    original P7 design deliberately left unresolved (2026-09-09: "P7
+    explicitly does NOT force one-to-one dedup ... competing/ambiguous
+    2-view hypotheses are legitimate evidence for the assignment layer to
+    weigh"). The greedy claim can make a real second physical point lose
+    its own best-fitting camera views to a competing hypothesis that
+    happened to fit slightly better globally. Accepted per Harri's
+    explicit request; genuinely close, still-separately-visible points
+    are the remaining case this doesn't handle perfectly.
 
 Usage:
     python tools/prototype_multi_camera_fusion.py \\
@@ -115,6 +147,8 @@ def fuse_frame(
     merge_radius_m: float = 0.03,
 ) -> list[FusedPoint]:
     cams = [c for c in candidates_by_camera if candidates_by_camera[c].shape[0] > 0]
+
+    # --- Stage 1: seed 3D point hypotheses (pairwise triangulation + 3D-proximity merge) ---
     pair_points: list[tuple[np.ndarray, str, int, str, int, float]] = []
     for i, cam_a in enumerate(cams):
         for cam_b in cams[i + 1:]:
@@ -125,22 +159,64 @@ def fuse_frame(
             for xyz, ia, ib, err in accepted:
                 pair_points.append((xyz, cam_a, ia, cam_b, ib, err))
 
-    fused: list[FusedPoint] = []
-    for xyz, cam_a, ia, cam_b, ib, err in pair_points:
+    seeds: list[np.ndarray] = []
+    seed_counts: list[int] = []
+    for xyz, _cam_a, _ia, _cam_b, _ib, _err in pair_points:
         target = None
-        for f in fused:
-            if np.linalg.norm(f.xyz - xyz) <= merge_radius_m:
-                target = f
+        for si, sxyz in enumerate(seeds):
+            if np.linalg.norm(sxyz - xyz) <= merge_radius_m:
+                target = si
                 break
         if target is None:
-            target = FusedPoint(xyz=xyz)
-            fused.append(target)
-        for view in [(cam_a, ia), (cam_b, ib)]:
-            if view not in target.views:
-                target.views.append(view)
-        target.max_reproj_err_px = max(target.max_reproj_err_px, err)
-        # Running average position across merged pair-estimates of the same point.
-        target.xyz = (target.xyz * (len(target.views) - 1) + xyz) / len(target.views) if len(target.views) > 1 else xyz
+            seeds.append(xyz)
+            seed_counts.append(1)
+        else:
+            n = seed_counts[target]
+            seeds[target] = (seeds[target] * n + xyz) / (n + 1)
+            seed_counts[target] += 1
+
+    if not seeds:
+        return []
+
+    # --- Stage 2: reprojection consensus -- see module docstring for why this
+    # replaced a version that only ever recorded the seeding pair's own views. ---
+    proj_matrices = {c: _proj_matrix(states[c]) for c in cams}
+    matches: list[tuple[float, int, str, int]] = []  # (reproj_err, seed_idx, cam_id, cand_idx)
+    for si, xyz in enumerate(seeds):
+        xyz_h = np.append(xyz, 1.0)
+        for cam_id in cams:
+            h = proj_matrices[cam_id] @ xyz_h
+            if h[2] <= 0:  # behind this camera
+                continue
+            proj = h[:2] / h[2]
+            pts = candidates_by_camera[cam_id]
+            d = np.linalg.norm(pts - proj, axis=1)
+            j = int(np.argmin(d))
+            if d[j] <= max_reproj_px:
+                matches.append((float(d[j]), si, cam_id, j))
+    matches.sort(key=lambda m: m[0])
+
+    claimed: set[tuple[str, int]] = set()
+    seed_views: list[list[tuple[str, int]]] = [[] for _ in seeds]
+    seed_max_err: list[float] = [0.0] * len(seeds)
+    for err, si, cam_id, j in matches:
+        key = (cam_id, j)
+        if key in claimed:
+            continue
+        claimed.add(key)
+        seed_views[si].append(key)
+        seed_max_err[si] = max(seed_max_err[si], err)
+
+    fused: list[FusedPoint] = []
+    for si, views in enumerate(seed_views):
+        if len(views) < 2:
+            continue  # lost its multi-view confirmation to a competing hypothesis
+        refined_P = [proj_matrices[c] for c, _idx in views]
+        refined_pt = [tuple(candidates_by_camera[c][idx]) for c, idx in views]
+        xyz = triangulate_multiview(refined_P, refined_pt)
+        if xyz is None:
+            xyz = seeds[si]
+        fused.append(FusedPoint(xyz=xyz, views=views, max_reproj_err_px=seed_max_err[si]))
 
     return fused
 

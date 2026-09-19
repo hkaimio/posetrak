@@ -9,7 +9,7 @@ Motivation (2026-09-09, a real diagnosed case, see status.md): the hybrid
 assignment is still purely per-frame independent -- no tracklet continuity
 at all, despite DotCandidateWriter's own detection-time output already
 carrying a per-camera tracklet_id for every raw candidate (assigned by the
-existing DotTrackletLinker, already used in production for the prop-dot
+existing per-camera dot-tracklet linker, already used in production for the prop-dot
 case). A real example: heel_L and ankle_L's anchor keypoints came within
 2.6cm of each other for a few frames, close enough (given the current
 bootstrap-stage 15cm match radius) that they briefly competed for the same
@@ -61,7 +61,7 @@ from tools.prototype_hybrid_person_marker_assignment import hybrid_assign_frame 
 
 def run_tracklet_smoothed(
     conn: sqlite3.Connection, shot_id: str, marker_detection_run: str, pose_sequence: str,
-    start_time: float, end_time: float, ref_camera_id: str | None = None,
+    start_time: float, end_time: float, ref_camera_id: str | None = None, assign_fn=hybrid_assign_frame,
 ) -> dict[int, dict[str, dict[str, tuple[float, float, str]]]]:
     """Returns {video_frame: {camera_instance_id: {marker_name: (px, py, confidence)}}}
     -- same shape as calling hybrid_assign_frame() per frame, but with
@@ -71,6 +71,11 @@ def run_tracklet_smoothed(
     an arbitrary camera if not given) -- pass the camera a caller intends
     to look results up by (e.g. the one a validation video renders) so the
     returned dict's keys actually match what that caller will query.
+
+    *assign_fn* is the per-frame assigner to smooth on top of -- defaults
+    to hybrid_assign_frame, but accepts any function with the same
+    signature/return shape (e.g.
+    prototype_marker_normal_assignment.normal_aware_hybrid_assign_frame).
     """
     states = load_camera_states(conn, shot_id)
     sync_table, svid_by_cam = load_sync_table(conn, shot_id)
@@ -82,8 +87,13 @@ def run_tracklet_smoothed(
     per_frame_results: dict[int, dict[str, dict[str, tuple[float, float, str]]]] = {}
     # (camera_instance_id, tracklet_id) -> Counter of assigned names across frames
     tracklet_votes: dict[tuple[str, int], Counter] = defaultdict(Counter)
-    # (camera_instance_id, video_frame, tracklet_id) -> assigned name, for the rewrite pass
-    tracklet_membership: dict[tuple[str, int], list[tuple[int, str]]] = defaultdict(list)
+    # (video_frame, camera_instance_id) -> every (name, tracklet_id, px, py, conf) assigned that
+    # frame, for the rewrite pass. Recording full per-frame membership up front (rather than
+    # mutating per_frame_results in place, tracklet by tracklet) matters when two tracklets swap
+    # names within the *same* frame: correcting one via pop(old_name)/[new_name]=... on the shared
+    # dict then clobbers the other's in-flight correction, since both are fighting over the same
+    # two dict keys (a "swap two variables without a temp" bug, caught 2026-09-09 -- see status.md).
+    frame_cam_entries: dict[tuple[int, str], list[tuple[str, int, float, float, str]]] = defaultdict(list)
 
     for ref_frame in range(frame_lo, frame_hi):
         t = sync_table.frame_to_global_time(ref_frame, ref_svid)
@@ -116,7 +126,7 @@ def run_tracklet_smoothed(
         if not kp_by_cam or not any(d.shape[0] > 0 for d in dots_xy_by_cam.values()):
             continue
 
-        result = hybrid_assign_frame(dots_xy_by_cam, kp_by_cam, states)
+        result = assign_fn(dots_xy_by_cam, kp_by_cam, states)
         frame_key = frame_by_cam[ref_cam]
         per_frame_results[frame_key] = result
 
@@ -133,21 +143,31 @@ def run_tracklet_smoothed(
                 if tracklet_id < 0:
                     continue
                 tracklet_votes[(cam_id, tracklet_id)][name] += 1
-                tracklet_membership[(cam_id, tracklet_id)].append((frame_key, name))
+                frame_cam_entries[(frame_key, cam_id)].append((name, tracklet_id, px, py, _conf))
 
-    # Rewrite pass: for each tracklet with a clear majority, overwrite every one
-    # of its member frames' assigned name to the majority.
+    # Rewrite pass: rebuild each (frame, camera)'s assignment dict from scratch, mapping every
+    # entry's own tracklet_id straight to that tracklet's majority name, instead of mutating the
+    # existing dict in place one tracklet at a time (see frame_cam_entries' comment above for why
+    # in-place pop/insert corrupts mutual name swaps within a single frame).
     majority_name = {key: counter.most_common(1)[0][0] for key, counter in tracklet_votes.items()}
     n_corrected = 0
-    for (cam_id, tracklet_id), members in tracklet_membership.items():
-        best_name = majority_name[(cam_id, tracklet_id)]
-        for frame_key, original_name in members:
-            if original_name == best_name:
+    n_collisions = 0
+    for (frame_key, cam_id), entries in frame_cam_entries.items():
+        new_assigns: dict[str, tuple[float, float, str]] = {}
+        for original_name, tracklet_id, px, py, conf in entries:
+            best_name = majority_name[(cam_id, tracklet_id)]
+            if best_name != original_name:
+                n_corrected += 1
+            if best_name in new_assigns:
+                # Two different tracklets both majority-vote to the same name in this frame --
+                # keep whichever arrived first and drop the other rather than silently overwrite.
+                n_collisions += 1
                 continue
-            px, py, conf = per_frame_results[frame_key][cam_id].pop(original_name)
-            per_frame_results[frame_key][cam_id][best_name] = (px, py, conf)
-            n_corrected += 1
+            new_assigns[best_name] = (px, py, conf)
+        per_frame_results[frame_key][cam_id] = new_assigns
 
+    if n_collisions:
+        print(f"tracklet smoothing: {n_collisions} same-frame name collisions dropped", file=sys.stderr)
     print(f"tracklet smoothing: {len(tracklet_votes)} (camera, tracklet) tracks, "
           f"{n_corrected} per-frame name corrections applied", file=sys.stderr)
     return per_frame_results

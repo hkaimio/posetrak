@@ -1,9 +1,10 @@
 # Catalog
 
-Nominal, reusable marker definitions belong here: `catalog/modules/` will
-hold the per-module marker layouts (for example the leg dot module) once the
-`posetrak marker-set` tooling lands
-(`docs/roadmap/features/marker-based-mocap/productization-architecture-and-plan.md` §3.2).
+Nominal, reusable marker definitions belong here. `catalog/modules/` holds the
+per-module marker layouts, one `<module>.marker-module.yaml` each, read by
+`posetrak.markers.catalog` (`catalog_module("leg")`). The file format is described
+in that module's docstring, and the design in
+`docs/roadmap/features/marker-based-mocap/productization-architecture-and-plan.md` §3.2.
 
 Capture-specific results do not belong in the repository. Calibrated
 attachment sets and dot-augmented skeletons are products of one capture and

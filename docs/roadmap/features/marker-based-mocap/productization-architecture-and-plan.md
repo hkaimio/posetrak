@@ -917,6 +917,35 @@ Harri: I think there have been some tests failing in main; likely worth handling
    skeleton YAML, `requires_topology`/`requires_joints` on modules and
    attachment sets, and a refuse-with-a-clear-error check in the
    composer and in `augment-skeleton`.
+
+   > **Built (2026-09-19)** as a reduced item (`posetrak/markers/`):
+   > `catalog.py` loads a module or an attachment set (`module`, `markers` with
+   > `name`, `parent_joint`, optional `mirror` and `along/lateral/anterior/normal`,
+   > `requires_topology`, `requires_topology_hash`, `requires_joints`), expands mirrored
+   > markers (names `_R`→`_L`, joints `.R`→`.L`, `lateral` negated) and finds modules in
+   > `catalog/modules/` (`$POSETRAK_CATALOG_DIR` overrides). `topology.py` reads a skeleton's
+   > topology and computes the structural hash over joint names, parents, types and the
+   > direction of each `bone_tip_offset`. `check_module_fits_skeleton` refuses a mismatch,
+   > naming every problem. `catalog/modules/leg.marker-module.yaml` holds the leg slots and
+   > parent joints that `fit_calibrated_attachment_set.py` and
+   > `label_tracklet_groups_gui.py` used to hardcode; those scripts now read it, the fitting
+   > scripts refuse a skeleton the leg slots do not fit, and `build_dot_augmented_skeleton`
+   > refuses an attachment set written for another skeleton. Fitted attachment sets now
+   > record `requires_topology` and `requires_topology_hash` (the loader still reads the
+   > older `skeleton_topology` key).
+   >
+   > *Checked on the real skeletons of the 2026-09-06 session (12):* the six base, scaled and
+   > dot-augmented rig skeletons and the three per-person scaled ones all have one structural
+   > hash, so the hash does what D15 needs. The prop skeletons (pen, pad, ball) differ and
+   > are refused. Two of the rig-structured skeletons carry a per-person top-level `name`
+   > ("Nelli scale attempt …"), so a topology name is only compared when the YAML declares a
+   > `topology:` block; otherwise the hash and the joints decide, and the leg module is pinned
+   > by hash. Nothing writes a `topology:` block yet.
+   >
+   > *Not built:* nominal geometry (`along/lateral/anterior`) for the leg module, since no
+   > script held any (fitted attachment sets carry the real values); the `marker-set` CLI and
+   > the `marker_attachment_sets` table (§10.2); `label_tracklet_groups_gui.py`'s probe table
+   > and `audit_cross_slot_consistency.py`'s slot pairs, which are not the slot list.
 4. Multi-view dot triangulation seed provider (§3.6.4); the per-subject
    seed exists (§10.1).
 5. Object subjects allowed in `posetrak track run-persons` rosters (they

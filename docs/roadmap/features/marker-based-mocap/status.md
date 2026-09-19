@@ -1,5 +1,56 @@
 # Marker-based mocap — status
 
+- **2026-09-19** (productization plan, review round 1) — Harri's inline
+  review folded into
+  [productization-architecture-and-plan.md](productization-architecture-and-plan.md)
+  (§8 has the summary table). **One comment found a real design flaw**:
+  the draft's "compose a subject sequence by copying detection rows into
+  it" would have copied a scene-wide reflective-dot run's candidates into
+  every participating subject's sequence — and since
+  `MultiPersonTracker::run()` concatenates each subject's own candidate
+  list into the shared cost matrix, one physical dot would have appeared
+  as two distinct candidates and could be claimed by two subjects at
+  once, silently defeating the mutual exclusion the shared assignment
+  phase exists to provide. This is the prerequisite
+  dot-assignment-architecture-design.md §5.4 already flagged; copying
+  would have turned it from a latent limitation into a guaranteed bug on
+  the first two-dot-bearing-subject capture. Corrected: labeled sources
+  are copied into the subject's sequence, anonymous candidate pools are
+  *referenced* and loaded once per detection run, shared across subjects,
+  with per-subject camera filters as an eligibility view. That also
+  delivers §5.4's real fix at the data-model level instead of needing a
+  de-dup bridge. Other resolutions: `rel-proto` branched from current
+  main with main returning to trunk; external-2D import gains a labeled
+  layout with an external-label→PoseTrak-label map; tracking runs are per
+  trial with a subject roster, so segments are per (run, subject); WS4
+  (decode performance) moves ahead of the torso+arm module's processing
+  since that capture lands in 1-2 weeks; DaVinci Resolve joins Blender in
+  the BVH-gap spike. **Skeleton document split**: recommended as its own
+  feature rather than folded in (§9) — the full split touches loading,
+  hashing, scaling, provenance, export and every existing session DB, and
+  three of this plan's workstreams will generate the requirements it
+  still lacks. Pulled forward instead: a topology name plus a structural
+  hash that catalog modules and attachment sets declare and the composer
+  validates, which bounds the duck-typing risk for ~a day of work and is
+  forward-compatible with the eventual split. Four evidence triggers
+  recorded for when to open that feature.
+
+- **2026-09-18** (productization architecture and plan drafted) —
+  [productization-architecture-and-plan.md](productization-architecture-and-plan.md)
+  proposes the target architecture for landing this branch on `main`
+  and the workstream order to get there. Headline calls, all open for
+  review: merge the foundation now and finish on `main` (the old merge
+  bar's schema condition is met by the 2026-09-14 person+pen+pad run);
+  keep one sequence per subject and make sequence *composition* a
+  first-class, provenance-recording operation (`pose_sequence_sources`)
+  in place of the three bespoke finalise scripts; external 2D tracks as
+  an `external_2d` detector type; attachment sets as stored registry
+  documents materialized into generated skeletons; a cost-modifier
+  pipeline plus a reacquisition-corroboration gate for tracking-time dot
+  assignment (the twice-observed confidently-wrong-candidate failure);
+  segments as the unit of re-initialization; and a full triage of the
+  ~60 tools into package/CLI, prototypes, GT harness, or archive.
+
 - **2026-09-17** (throw3/4's remaining divergence explained; productization
   thoughts from the ball-tracking investigation) — Harri asked whether
   throw3/4's still-visible divergence (vs. throw1/2 "looking pretty

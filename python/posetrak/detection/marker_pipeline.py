@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""marker_pipeline.py — ArUco marker detection pipeline (design phases 1a/1c).
+"""marker_pipeline.py — ArUco marker and reflective-dot detection pipeline.
 
 See docs/roadmap/features/marker-based-mocap/marker-mocap-design.md §7.1.
 Structurally parallel to ``pipeline.py``'s person ``DetectionPipeline``,
@@ -13,17 +13,18 @@ corner blob described in the design doc's §4.1 to ``detection_keypoints``
 via ``db_cache.MarkerKeypointWriter`` (detector-agnostic -- it only
 consumes ``FiducialDetection`` objects, so it works unchanged either way):
 
-- **Standalone** (sub-phase 1a): pass ``marker_ids`` + a single
+- **Standalone**: pass ``marker_ids`` + a single
   ``dictionary`` directly, no ``capture_objects``/``marker_body_definitions``
   involved -- a plain ``ArucoDetector`` does the detecting. This is what a
   script or test drives without any GUI or registered marker body existing.
-- **Marker-body-driven** (sub-phase 1c, the real GUI path): pass a
+- **Marker-body-driven** (the GUI path): pass a
   ``rig_config`` (an ``app.setup.fiducial_markers.MarkerRigConfig``, e.g.
   from ``load_pipeline_for_capture_object`` below) -- a ``MarkerRigDetector``
   does the detecting instead, which additionally handles a body spanning
   more than one ArUco dictionary and filters out any marker not actually
-  part of this body (the "purple marker mixup" lesson, algorithms doc
-  §1.1). ``marker_ids`` is derived from the config, not given directly.
+  part of this body, such as a tag from a different object in the same
+  scene (marker-mocap-algorithms.md §1.1). ``marker_ids`` is derived from the
+  config, not given directly.
 
 Either mode can additionally run anonymous reflective-dot blob detection
 per camera (see ``__init__``'s ``detect_dots_for_cameras``) -- an
@@ -32,10 +33,9 @@ running, not a third mode: same frame, same loop, a second writer
 (``db_cache.DotCandidateWriter``) alongside the first.
 
 Camera/sync-table loading below duplicates ``pipeline.py``'s
-``_load_cameras``/``_frame_range`` rather than sharing them, to keep this
-phase's slice self-contained; a shared helper is a reasonable extraction
-once both pipelines have settled (design doc's "Option 1 first, revisit if
-it proves fiddly" precedent, §5.3).
+``_load_cameras``/``_frame_range`` rather than sharing them, which keeps the
+two pipelines independent; a shared helper is a reasonable extraction now
+that both are stable.
 """
 from __future__ import annotations
 
@@ -251,8 +251,8 @@ def _run_camera_job(job: _CameraJob) -> tuple[str, int]:
     serializes actual commits; the default 0 timeout would surface that as
     an immediate "database is locked" error instead of a short, harmless
     wait. No live stop_event or per-frame on_progress here -- see
-    run_parallel()'s own docstring for why those don't cross the boundary
-    in this first version."""
+    run_parallel()'s own docstring for why those don't cross the process
+    boundary."""
     conn = sqlite3.connect(job.session_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 30000")
@@ -317,11 +317,11 @@ class MarkerDetectionPipeline:
             camera in the same capture) -- the caller decides which cameras
             actually have one, this pipeline doesn't guess from a label.
         dot_bg_subtract, dot_threshold, dot_max_saturation, dot_bg_sample_count:
-            opt-in, off by default (2026-09-06, see dot_blob_detector.py's
-            own docstring for why) -- background-subtracted residual
-            detection plus a chroma (saturation) filter, validated on one
-            real fast-swing capture but not yet broadly enough to become the
-            default for every capture. dot_threshold defaults to
+            opt-in, off by default (see dot_blob_detector.py's docstring for
+            why) -- background-subtracted residual detection plus a chroma
+            (saturation) filter, validated on a fast-swing capture but not
+            broadly enough to be the default for every capture. dot_threshold
+            defaults to
             detect_blobs()'s own raw-brightness default (235) so passing
             nothing changes nothing, but MUST be lowered (e.g. to somewhere
             in the tens, not hundreds) when dot_bg_subtract=True -- it gates
@@ -334,18 +334,17 @@ class MarkerDetectionPipeline:
             time range, before the real detection pass starts.
         dot_threshold_by_camera, dot_background_mode, dot_blacklist_frac,
         dot_blacklist_radius_px:
-            2026-09-08 (see dot_blob_detector.py's own docstring for the
-            full account, status.md for the investigation): 'subtract' (the
-            default, unchanged) has a real failure mode on a person-worn
-            marker capture -- a marker on a subject in a pose the
-            background samples didn't cover gets fused into one large,
-            non-round blob with the subject's own limb and shape-rejected
-            as a whole. dot_background_mode='blacklist' instead thresholds
-            each frame's own raw brightness (shape classification never
-            sees more than the marker's own local contour) and uses the
-            background only to veto a spot that's already nearly as bright
-            with no subject present -- validated on real data to raise both
-            recall and precision together, not trade one for the other.
+            'subtract' (the default) has a failure mode on person-worn
+            markers -- a marker on a subject in a pose the background
+            samples didn't cover gets fused into one large, non-round blob
+            with the subject's own limb and shape-rejected as a whole (see
+            dot_blob_detector.py's "Background modes"). dot_background_mode=
+            'blacklist' instead thresholds each frame's own raw brightness
+            (shape classification never sees more than the marker's own
+            local contour) and uses the background only to veto a spot that's
+            already nearly as bright with no subject present. On real data it
+            raises recall and precision together, not one at the expense of
+            the other.
             dot_threshold still gates raw brightness in this mode (like its
             un-subtracted default already implies), but two different
             cameras' own sensors/tone-mapping can cap a real marker's peak
@@ -357,20 +356,19 @@ class MarkerDetectionPipeline:
             dot_blacklist_radius_px tune the veto itself; see
             detect_blobs()'s own docstring.
         dot_max_saturation_by_camera, dot_blacklist_frac_by_camera:
-            2026-09-11 (person-marker-assignment redesign phase P-D, see
-            status.md): the same per-camera-override need as
-            dot_threshold_by_camera, for two more parameters real data
-            showed also need it. A capture mixing camera models can have
+            The same per-camera-override need as dot_threshold_by_camera,
+            for two more parameters that real data showed also need it. A
+            capture mixing camera models can have
             some markers rendering meaningfully colour-tinted (real
             saturation 50-90, not near-0) only on specific cameras --
             dot_max_saturation must be loosened there without loosening it
             (and admitting more skin/fabric) on cameras where it doesn't
             need to be. Separately, dot_blacklist_frac=0.7 (tuned on a
-            reflective-prop capture) proved too tight for person-worn
-            markers passing in front of bright background patches (a
-            window-lit floor, say) -- vetoing real markers, confirmed by a
-            ground-truth sweep (recall recovered by loosening frac to
-            0.85-0.95 depending on the camera). Both dicts override their
+            reflective-prop capture) is too tight for person-worn markers
+            passing in front of bright background patches (a window-lit
+            floor, say): it vetoes real markers, and a ground-truth sweep
+            recovered recall by loosening it to 0.85-0.95 depending on the
+            camera. Both dicts override their
             scalar default per camera_instance_id exactly like
             dot_threshold_by_camera; absent from the dict means "use the
             scalar".
@@ -379,7 +377,7 @@ class MarkerDetectionPipeline:
             if not rig_config.marker_corners:
                 raise ValueError(
                     f"marker body {rig_config.rig_id!r} has no coded markers to detect "
-                    "-- a dot-only body needs sub-phase 2's detector, not this one"
+                    "-- a dot-only body has no coded markers for this detector"
                 )
             marker_ids = list(rig_config.marker_corners.keys())
         elif not marker_ids:
@@ -631,21 +629,21 @@ class MarkerDetectionPipeline:
         """Camera-level parallel variant of run() -- one process per camera
         via ProcessPoolExecutor, cameras being the natural parallel unit
         (each already has its own decoder, background model, and tracklet
-        linker state; see marker-mocap-productization-plan.md §2). Ceiling
-        is max(per-camera time) rather than sum(per-camera time) -- ~Nx on
-        an N-camera capture, up to however many the machine can run at once.
+        linker state). Ceiling is max(per-camera time) rather than
+        sum(per-camera time) -- ~Nx on an N-camera capture, up to however
+        many the machine can run at once.
 
-        Profiled 2026-09-08 on a representative camera (status.md): ArUco
-        detection (~35ms/frame) and video decode (~26ms/frame) are the two
-        real costs, both genuinely per-camera-independent CPU work -- the
-        thing this parallelizes. A single camera's own frame sequence is
+        Profiling a representative camera showed ArUco detection
+        (~35ms/frame) and video decode (~26ms/frame) are the two real
+        costs, both genuinely per-camera-independent CPU work -- the thing
+        this parallelizes. A single camera's own frame sequence is
         NOT parallelized here (MotionGatedLinker.link_frame() is inherently
         sequential -- each frame's linking depends on the previous frame's
         still-open tracklets), so a capture with fewer cameras than
-        available cores still leaves some idle; see the plan doc's own
-        "within a camera, across frames" section for that harder, not-yet-
-        built axis, worth reaching for only if this ceiling isn't enough in
-        practice, not speculatively.
+        available cores still leaves some idle. Splitting a camera's
+        frames into chunks would use them, but is harder because of that
+        linker state, and is worth building only if this ceiling proves
+        insufficient in practice.
 
         Two real trade-offs against run(), both because a worker process
         can't share this instance's live state:
@@ -748,10 +746,10 @@ def load_pipeline_for_capture_object(
     dot_bg_sample_count: int = 40,
 ) -> MarkerDetectionPipeline:
     """Build a ``MarkerDetectionPipeline`` for an existing ``capture_objects``
-    row (design phase 1c) -- resolves its marker body definition, loads the
-    resolved rig geometry, and constructs the pipeline in marker-body-driven
-    mode. This is the path the GUI's run-detection dialog uses; sub-phase
-    1a's plain constructor stays available for the standalone/scripted case.
+    row -- resolves its marker body definition, loads the resolved rig
+    geometry, and constructs the pipeline in marker-body-driven mode. This is
+    the path the GUI's run-detection dialog uses; the plain constructor stays
+    available for the standalone/scripted case.
 
     detect_dots_for_cameras, dot_bg_subtract, dot_threshold,
     dot_threshold_by_camera, dot_background_mode, dot_blacklist_frac,
@@ -767,7 +765,7 @@ def load_pipeline_for_capture_object(
     ValueError
         If *capture_object_id* or its marker body definition does not
         exist, or the marker body has no coded markers to detect (a
-        dot-only body needs sub-phase 2's detector, not this one).
+        dot-only body has no coded markers for this detector).
     """
     obj_row = get_capture_object(session, capture_object_id)
     if obj_row is None:

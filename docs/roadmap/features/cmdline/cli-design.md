@@ -154,6 +154,16 @@ posetrak detect run --capture ID --sync ID --start S --end S \
                     [--conf 0.3]
   # Wraps DetectionPipeline; streams progress to stderr, prints run-id to stdout.
 
+posetrak detect run --type aruco|dots --capture ID --sync ID --start S --end S \
+                    [--object NAME|ID] [--trial ID] [--marker-ids 3,7 --dictionary DICT_4X4_50] \
+                    [--dots-camera LABEL]... [--dot-threshold N] [--dot-background-mode subtract|blacklist] \
+                    [--dot-max-saturation X] [--dot-threshold-by-camera LABEL=N]... [--frame-step N] \
+                    [--parallel [--max-workers N]]
+  # Marker runs. aruco: coded markers, from the object's marker body (--object) or from
+  # --marker-ids for a run bound to no object; reflective dots are added on the cameras
+  # named by --dots-camera. dots: dots only, no coded-marker pass. Options that belong to
+  # another run type are rejected. Stored as detector_type='aruco' either way.
+
 posetrak detect list [--capture ID]
 posetrak detect show ID
 ```

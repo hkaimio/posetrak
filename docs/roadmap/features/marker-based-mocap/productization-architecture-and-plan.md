@@ -458,6 +458,14 @@ surface (`dot_bg_subtract`, thresholds per camera, `max_saturation` per
 camera, camera subset) on both `posetrak detect run` and
 `RunDetectionDialog`.
 
+> **Revision (2026-09-19).** `posetrak detect run` now covers marker runs:
+> `--type pose|aruco|dots` (§10.2 explains the name), object-bound with
+> `--object` or unbound with `--marker-ids`, and the whole dot parameter
+> surface including per-camera overrides and `--dots-camera` as the camera
+> subset. `RunDetectionDialog` still lacks the dot parameters. The scripts
+> `run_object_marker_detection.py` and `run_standalone_marker_detection.py`
+> are deleted.
+
 ### 3.5 Sequence composition
 
 New module `posetrak/db/compose_sequence.py`, CLI `posetrak sequence
@@ -873,7 +881,7 @@ for, and one no current capture has ever exercised.
 > | PR | Content | Replaces plan items |
 > |---|---|---|
 > | 1 | Person + prop tracking: candidate ownership and config agreement (§3.5.1 revision), a per-subject seed, `track run-persons --object`, a person + ball validation case | 1a (reduced), 4 (reduced), 5, 5a |
-> | 2 | `detect run --detector aruco\|dots`, object-bound or standalone, with the dot parameter surface | 2 (first part) |
+> | 2 | `detect run --type aruco\|dots`, object-bound or standalone, with the dot parameter surface (§10.2) | 2 (first part) |
 > | 3 | `capture object` commands, `sequence finalise-object`, `sequence add-dots` | 1 (as narrower commands) |
 > | 4 | `detect import-2d`, anonymous layout; the labeled layout's `config_json` format is documented, not implemented | 2 (second part, reduced) |
 > | 5 | Catalog module YAML and loader replacing the hard-coded slot tables in the existing scripts; topology name and hash check | 3 (reduced), 3a |
@@ -1313,6 +1321,7 @@ the ball's sequence.
 | `track export-2d` (§3.10) | Per-camera CSV writer | Deferred | No consumer | Something reads the export |
 | Labeled `detect import-2d` layout (D4) | Implemented in WS1 | The `config_json` format and `label_map` are documented; only the anonymous layout is implemented | The first labeled user is later; the format costs nothing to settle now | A labeled external project exists |
 | `marker-set` CLI, `marker_attachment_sets` table (D5, §3.2) | WS1 item 3, gating the torso+arm processing | The catalog module file and loader come first (PR 5); the CLI and table follow the first GUI consumer | The scripts work and are protected by D11; what blocked a second module was the hard-coded slot tables | The tracklet-group labeling panel or another app feature needs the fitting functions; `python/tools` is not shipped, so app code must not import from it |
+| `detect run` selector (§3.4, WS1 item 2) | `--detector aruco\|dots` | `--type pose\|aruco\|dots`; `--detector` stays the person detector model. `dots` runs the dot detector without a coded-marker pass (`MarkerDetectionPipeline(detect_coded=False)`) | `--detector` already names the YOLOX model on `detect run`, so reusing it for the run kind would make one option mean two things. Marker runs, with or without dots, are stored as `detector_type='aruco'`, as before, so there is no data or schema change and no `dots` value in the column | A consumer needs to tell a dots-only run from an ArUco run without reading `config_json.marker_ids` |
 | `marker-body calibrate` (§3.2) | CLI command | Kept, and scheduled as PR 6 with the old module re-exporting its helpers | The application needs calibration; the re-export keeps about 27 importing tools working | (not deferred) |
 
 ### 10.3 Status of decisions

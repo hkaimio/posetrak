@@ -361,3 +361,45 @@ class TestFinaliseObjectFromASharedRun:
 
         assert unknown.exit_code != 0 and "no capture object 'nope'" in unknown.output
         assert stray.exit_code != 0 and "--with-dots needs --object" in stray.output
+
+
+def _add_second_camera(session_path: Path, capture_id: str, sync_id: str) -> None:
+    conn = sqlite3.connect(str(session_path))
+    model_id = conn.execute("SELECT camera_model_id FROM camera_instances").fetchone()[0]
+    conn.execute("INSERT INTO camera_instances (id, camera_model_id, label) VALUES ('cam2-id', ?, 'cam2')", (model_id,))
+    conn.execute(
+        "INSERT INTO capture_videos (id, shot_id, camera_instance_id, file_path, first_video_frame, "
+        "last_video_frame, actual_fps) VALUES ('sv2', ?, 'cam2-id', '/fake/video2.mp4', 0, 1000, 30.0)",
+        (capture_id,),
+    )
+    conn.execute(
+        "INSERT INTO sync_points (sync_config_id, camera_instance_id, shot_video_id, video_frame, timestamp_s) "
+        "VALUES (?, 'cam2-id', 'sv2', 0, 0.0)", (sync_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+class TestAddDotsFromSeveralRuns:
+    def test_cameras_come_from_different_runs_and_a_covered_camera_needs_replace(
+        self, seeded_session_db_path: Path, capture_id: str, sync_id: str
+    ) -> None:
+        _add_second_camera(seeded_session_db_path, capture_id, sync_id)
+        seq = _person_sequence(seeded_session_db_path, capture_id, sync_id)
+        both = ("--type", "dots", "--dots-camera", "cam1", "--dots-camera", "cam2")
+        run_a = _detect(seeded_session_db_path, capture_id, sync_id, *both)
+        run_b = _detect(seeded_session_db_path, capture_id, sync_id, *both)
+        add = ["sequence", "add-dots", "--sequence", seq]
+
+        assert _invoke([*add, "--detection-run", run_a, "--camera", "cam1"], seeded_session_db_path).exit_code == 0
+        assert _invoke([*add, "--detection-run", run_b, "--camera", "cam2"], seeded_session_db_path).exit_code == 0
+        covered = _invoke([*add, "--detection-run", run_b, "--camera", "cam1"], seeded_session_db_path)
+        swapped = _invoke([*add, "--detection-run", run_b, "--camera", "cam1", "--replace"], seeded_session_db_path)
+
+        by_camera = {r["label"]: r["detection_run_id"] for r in _query(
+            seeded_session_db_path,
+            "SELECT DISTINCT ci.label, po.detection_run_id FROM pose_observations po "
+            "JOIN camera_instances ci ON ci.id = po.camera_instance_id WHERE po.sequence_id = ?", seq)}
+        assert covered.exit_code != 0 and "already has" in covered.output
+        assert swapped.exit_code == 0, swapped.output
+        assert by_camera == {"cam1": run_b, "cam2": run_b}

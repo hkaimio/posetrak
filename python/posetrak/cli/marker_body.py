@@ -229,7 +229,7 @@ def marker_body_export(obj: dict, marker_body_id: str, output: str) -> None:
 @click.pass_obj
 def marker_body_to_skeleton(obj: dict, marker_body_id: str, name: str, output: str) -> None:
     """Generate a prop tracking skeleton from a marker body definition and
-    import it (marker-based-mocap design doc §5.3, §7.1 sub-phase 1b).
+    import it (marker-based-mocap design doc §5.3).
 
     One free-flyer root, markers only -- no articulated joints. Import is
     content-addressed and idempotent, same as `skeleton import`: running

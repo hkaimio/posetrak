@@ -2265,8 +2265,8 @@ class RunTrackerDialog(QDialog):
 
 class ObjectRunTrackerDialog(QDialog):
     """Run the tracker against a single marker-based-mocap object sequence
-    (marker-based-mocap design doc §7.1 sub-phase 1f -- this is the GUI
-    entry point that phase's own CLI-only validation left missing).
+    (marker-based-mocap design doc §7.1) -- the GUI entry point for
+    tracking an object.
 
     Deliberately not RunTrackerWidget: that widget is built entirely around
     multi-person tracking (a trial → people table, cross-person coupling,
@@ -2278,9 +2278,9 @@ class ObjectRunTrackerDialog(QDialog):
     cross-person/hierarchical tabs are simply unused here), pick a time
     range, run. Reuses the exact same execution path
     (run_tracker()/_TrackerThread) PersonPanel's single-person case uses,
-    so nothing here is throwaway if a future trial-level launcher (Harri's
-    "run tracker across several detection runs" idea) ends up calling into
-    this same machinery from a different entry point.
+    so nothing here is throwaway if a trial-level launcher (running the
+    tracker across several detection runs) later calls into this same
+    machinery from a different entry point.
     """
 
     def __init__(

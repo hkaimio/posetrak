@@ -102,12 +102,12 @@ def create_marker_detection_run(
 ) -> str:
     """Create a detection_runs row for an ArUco marker detection pass.
 
-    Design phase 1a (marker-mocap-design.md §7.1) covers the standalone
-    case: *dictionary*/*marker_ids* given directly, no
-    `marker_body_definitions`/`capture_objects` row involved.
-    Phase 1c's `MarkerDetectionPipeline`/`load_pipeline_for_capture_object`
-    additionally passes *capture_object_id* and *marker_body_definition_id*
-    once a real object/registered body drives the run. `config_json`'s
+    The standalone case gives *dictionary*/*marker_ids* directly, with no
+    `marker_body_definitions`/`capture_objects` row involved
+    (marker-mocap-design.md §7.1). `MarkerDetectionPipeline` driven through
+    `load_pipeline_for_capture_object` additionally passes
+    *capture_object_id* and *marker_body_definition_id* once a real
+    object/registered body drives the run. `config_json`'s
     `marker_ids` is the corner-blob decode key for `detection_keypoints`
     (§4.1) in both cases: a run's coded-marker corner slots are ordered
     list-position-major by this list, so re-deriving the blob layout later
@@ -128,7 +128,7 @@ def create_marker_detection_run(
     `dot_detection_config`, when given, is recorded verbatim under
     `config_json["dot_detection"]` -- whatever dot-detection settings
     (`MarkerDetectionPipeline`'s `dot_bg_subtract`/`dot_max_saturation`/
-    `dot_bg_sample_count`, 2026-09-06) were actually used for this run,
+    `dot_bg_sample_count`) were actually used for this run,
     purely for later inspection/reproducibility, the same way every other
     detector setting above is recorded.
     """
@@ -339,7 +339,7 @@ class DetectionBatchWriter:
 
 
 # ---------------------------------------------------------------------------
-# Coded-marker (ArUco) keypoint writer -- design phase 1a
+# Coded-marker (ArUco) keypoint writer
 # ---------------------------------------------------------------------------
 
 MARKER_TRACK_ID = 0       # one prop = one track (aruco-prop-tracking-design.md)
@@ -358,9 +358,8 @@ MARKER_REGION_TYPE = "markers"
 # fixed-input-resolution network stage for crop_scale to describe, and the
 # corner-finding error itself is negligible next to ec -- so crop_scale
 # should be ~0 for markers (letting ec alone dominate), not the person
-# pipeline's 1.0 default. See status.md's 2026-08-31 entry (code review
-# finding #4): before this, marker observations silently reused the full
-# ep contribution meant for a markerless pose network, under-trusting
+# pipeline's 1.0 default. Reusing that default would apply the full ep
+# contribution meant for a markerless pose network, under-trusting
 # sub-pixel-precise corners relative to a ~5-25px interpolated keypoint.
 _MARKER_CROP_SCALE = 0.0
 
@@ -462,16 +461,14 @@ def encode_dot_candidates(candidates: list) -> bytes:
     minor_axis_px, dir_x, dir_y, tracklet_id). The major/minor axis pair
     `resolve_dot_assignment()` (dot_assignment.cpp) uses to inflate a
     motion-blur streak's measurement noise; dir_x/dir_y is the streak's own
-    (canonicalized, direction-ambiguous) unit axis (dot_blob_detector.py's
-    own docstring; status.md's 2026-09-04 and 2026-09-05 entries), feeding
-    the streak-velocity design
+    (canonicalized, direction-ambiguous) unit axis (see
+    dot_blob_detector.py), feeding the streak-velocity design
     (docs/roadmap/features/marker-based-mocap/streak-velocity-design.md);
-    tracklet_id (2026-09-06, dot_tracklet.py) is a per-camera frame-to-frame
-    identity `resolve_dot_assignment()` uses to relax its own assignment
-    gate for a candidate continuing an already-established track (status.md's
-    2026-09-06 Phase B entry) -- stored as a float (exact for any realistic
-    per-capture tracklet count, well under 2^24) to keep this one flat
-    float32 array rather than a mixed-type layout.
+    tracklet_id (dot_tracklet.py) is a per-camera frame-to-frame identity
+    `resolve_dot_assignment()` uses to relax its own assignment gate for a
+    candidate continuing an already-established track -- stored as a float
+    (exact for any realistic per-capture tracklet count, well under 2^24) to
+    keep this one flat float32 array rather than a mixed-type layout.
 
     Explicitly versioned via a leading count field, rather than inferring
     N from raw byte length the way the original float32[N,4] format did:
@@ -479,13 +476,9 @@ def encode_dot_candidates(candidates: list) -> bytes:
     width changes -- some real candidate counts make an old-format blob's
     length also land on an exact multiple of a new, wider stride, decoding
     as a different (wrong) N silently rather than failing loudly. A count
-    prefix removes the ambiguity outright, at the cost of every earlier
-    format no longer being decodable -- this is now the fourth such width
-    (float32[N,4] originally, float32[N,6] from 2026-09-04, float32[N,8]
-    from 2026-09-05, this float32[N,9] from 2026-09-06); each bump has so
-    far arrived exactly when the one real detection run using the previous
-    format needed re-running anyway for an unrelated reason, so nothing
-    real has yet been lost by not migrating old blobs.
+    prefix removes the ambiguity outright, at the cost of earlier layouts
+    (float32[N,4], [N,6] and [N,8]) no longer being decodable. They are not
+    migrated: a run written in an older layout is re-detected.
     """
     arr = np.array(
         [(c.cx, c.cy, c.area, c.compactness, c.major_axis_px, c.minor_axis_px,
@@ -504,7 +497,7 @@ def decode_dot_candidates(blob: bytes) -> np.ndarray:
     expected_bytes = 4 + n * _DOT_CANDIDATE_FLOATS * 4
     if n < 0 or len(blob) != expected_bytes:
         raise ValueError(
-            f"dot candidate blob malformed, or written in an older (pre-2026-09-06) "
+            f"dot candidate blob malformed, or written in an older "
             f"format: header says {n} candidates ({expected_bytes} "
             f"bytes expected), got {len(blob)} bytes -- re-run detection"
         )
@@ -656,11 +649,10 @@ def read_observations_with_edits(
     *primary_source* (default `BODY_SOURCE`) names the source this
     sequence's single "real" row uses as its base layer -- pass a
     sequence's own source (e.g. 'markers' for a marker-based-mocap object
-    sequence, design doc §7.1 sub-phase 1e) when it isn't 'body', so that
-    sequence's row is correctly treated as the base layer instead of a
-    same-width zero body silently overwriting it once any edit exists (see
-    `merge_observation_sources`'s own docstring and status.md's 2026-08-30
-    note for why this matters).
+    sequence) when it isn't 'body', so that sequence's row is correctly
+    treated as the base layer instead of a same-width zero body silently
+    overwriting it once any edit exists (see `merge_observation_sources`'s
+    docstring).
 
     Rows with source `DOT_REGION_TYPE` ('dots') are excluded: they hold
     anonymous reflective-dot candidates in a different blob layout
@@ -796,8 +788,8 @@ def update_single_keypoint_edit(
     a frame may also have 'hand_l'/'hand_r' rows (narrower, 21-point
     arrays) that must not be mistaken for the frame's full keypoint width.
     A sequence with no 'body' source at all (marker-based-mocap object
-    sequences, source='markers' — design doc §7.1 sub-phase 1e) passes
-    its own *source* here instead, since 'body' will never exist for it.
+    sequences, source='markers') passes its own *source* here instead,
+    since 'body' will never exist for it.
     """
     obs_row = session.execute(
         "SELECT kp_blob FROM pose_observations"

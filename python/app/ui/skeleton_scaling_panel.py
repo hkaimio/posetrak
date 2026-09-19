@@ -82,7 +82,7 @@ MEAS_LABELS = {
     "shoulder_width": "Shoulder width  (L → R)",
     # Hip-to-ear, not shoulder-to-ear: shoulders move a lot with arm
     # movement, so a time-range average of a shoulder-anchored measurement
-    # carries more variation than hip-anchored (Harri, 2026-09-14).
+    # carries more variation than hip-anchored.
     # scale_skeleton_yaml() derives the neck+head segment's own scale from
     # (hip_to_ear - torso_height), not from this value directly.
     "hip_to_ear":     "Hip to ear midpoint  (neck + head, derived)",

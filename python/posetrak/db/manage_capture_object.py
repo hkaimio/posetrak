@@ -7,7 +7,7 @@
 ``capture_objects`` is the object analog of ``capture_persons``
 (manage_person.py) -- see
 docs/roadmap/features/marker-based-mocap/marker-mocap-design.md §4.2 and
-§7.1 sub-phase 1c. Deliberately mirrors that module's shape (create, list,
+§7.1. Deliberately mirrors that module's shape (create, list,
 get, rename, delete-with-in-use-guard) rather than inventing a different
 pattern for what is structurally the same kind of row.
 """

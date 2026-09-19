@@ -655,13 +655,13 @@ def _migrate_registry_v9_to_v10(conn: sqlite3.Connection) -> None:
     """Migrate a registry database from schema version 9 to 10.
 
     v10 adds process_noise_vel_max_multiplier to tracker_configs: the cap on the
-    adaptive process noise (Mechanism A) variance-domain multiplier, previously a
-    hardcoded UKF constant (kMaxVelocityNoiseMultiplier = 10.0) -- found to bind
-    for real on a fast-swing capture (a third of the run's steps, including 100% of
-    a known bad-tracking window, already saturated the default gain=4/ref_root=2
-    tuning's multiplier at just ~1.08 rad/s of root angular velocity). NULL means
-    the same 10.0 default every existing config already got from the hardcoded
-    constant -- backward-compatible. See
+    adaptive process noise (Mechanism A) variance-domain multiplier, formerly a
+    hardcoded UKF constant (kMaxVelocityNoiseMultiplier = 10.0). It can bind on a
+    fast-swing capture: a third of the run's steps, including 100% of a known
+    bad-tracking window, already saturated the default gain=4/ref_root=2 tuning's
+    multiplier at just ~1.08 rad/s of root angular velocity. NULL means the same
+    10.0 default every existing config already got from the hardcoded constant --
+    backward-compatible. See
     docs/roadmap/features/adaptive-process-noise/adaptive-process-noise-design.md.
     """
     existing = _tracker_config_columns(conn)
@@ -678,8 +678,7 @@ def _migrate_registry_v10_to_v11(conn: sqlite3.Connection) -> None:
 
     v11 adds the dot-candidate assignment gate and its tracklet-aware
     relaxation to tracker_configs, mirroring the session schema v51->v52
-    change -- see docs/roadmap/features/marker-based-mocap/status.md
-    (Phase B, 2026-09-06). dot_assignment_gate_mahalanobis existed as a
+    change. dot_assignment_gate_mahalanobis existed as a
     TOML-only tunable before this migration; it had no DB column at all, so
     a DB-driven tracker_config row could never actually override it -- fixed
     here alongside the new tracklet multiplier since both touch the same
@@ -1618,8 +1617,8 @@ def _migrate_session_v46_to_v47(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 46 to 47.
 
     v47 adds detection_runs.detector_type and .config_json, the first
-    piece of marker-based-mocap phase 1a (design §4.1): a marker detection
-    run (initially ArUco) is a `detection_runs` row like any pose-detection
+    piece of the marker-based-mocap data model (design §4.1): a marker
+    detection run (initially ArUco) is a `detection_runs` row like any pose-detection
     run, distinguished by `detector_type` rather than a parallel table, so
     every existing run/status/provenance query keeps working unchanged.
     `detector_type` defaults to 'pose' so every pre-existing row is
@@ -1644,7 +1643,7 @@ def _migrate_session_v46_to_v47(conn: sqlite3.Connection) -> None:
 def _migrate_session_v47_to_v48(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 47 to 48.
 
-    v48 adds marker-based-mocap phase 1c's data model (design §4.2):
+    v48 adds the marker-based-mocap object data model (design §4.2):
 
     - `capture_objects`: the object analog of `capture_persons` -- a
       physical prop instance participating in a capture, linking to its
@@ -1652,9 +1651,8 @@ def _migrate_session_v47_to_v48(conn: sqlite3.Connection) -> None:
       (that lives in the definition); adding one to a capture is the same
       kind of action as adding a named performer.
     - `tracking_run_persons.capture_object_id`: makes a tracking run's
-      object subjects explicit rather than a convention (design §4.2) --
-      unused until sub-phase 1f wires up tracking runs, added now so the
-      schema work for phase 1's data model lands in one place.
+      object subjects explicit rather than a convention (design §4.2);
+      set when a subject of the run is an object rather than a person.
     - `detection_runs.capture_object_id`: the same "make it explicit"
       reasoning applied to the detection layer, which the design doc
       doesn't spell out directly -- needed because a marker detection
@@ -1696,7 +1694,7 @@ def _migrate_session_v48_to_v49(conn: sqlite3.Connection) -> None:
     seam: a sequence *without* manifest rows keeps today's implied-by-
     `pose_model` layout (fully backward compatible -- every existing
     person sequence needs no backfill), while a sequence *with* manifest
-    rows (starting with marker-based-mocap phase 1d's object sequences)
+    rows (first used by marker-based-mocap object sequences)
     declares its own per-slot name and source, e.g. `hilt:c0`..`c3` /
     'aruco'. Landmark names derive from the marker body definition, so the
     same physical prop always yields the same names regardless of which
@@ -1760,8 +1758,7 @@ def _migrate_session_v51_to_v52(conn: sqlite3.Connection) -> None:
 
     v52 adds the dot-candidate assignment gate and its tracklet-aware
     relaxation to tracker_configs, mirroring the registry schema v10->v11
-    change -- see docs/roadmap/features/marker-based-mocap/status.md
-    (Phase B, 2026-09-06). dot_assignment_gate_mahalanobis existed as a
+    change. dot_assignment_gate_mahalanobis existed as a
     TOML-only tunable before this migration; it had no DB column at all, so
     a DB-driven tracker_config row could never actually override it -- fixed
     here alongside the new tracklet multiplier since both touch the same
@@ -1780,15 +1777,12 @@ def _migrate_session_v52_to_v53(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 52 to 53.
 
     v53 adds an experimental per-marker confidence-threshold override to
-    tracker_configs (2026-09-15): confidence_threshold_marker_names (JSON
-    string array) names which markers are gated by
-    confidence_threshold_override instead of the existing global
-    min_confidence/measurement_noise_std path. Motivated by the
-    confidence-vs-head-orientation analysis in
-    docs/roadmap/features/marker-based-mocap/status.md (2026-09-14) --
-    nose/ear.L/ear.R keep passing the normal confidence gate even when
-    occluded by the back of the head, because occlusion only lowers
-    ViTPose's reported confidence, it doesn't zero it out.
+    tracker_configs: confidence_threshold_marker_names (JSON string array)
+    names which markers are gated by confidence_threshold_override instead
+    of the existing global min_confidence/measurement_noise_std path.
+    Motivated by nose/ear.L/ear.R, which keep passing the normal confidence
+    gate even when occluded by the back of the head, because occlusion only
+    lowers ViTPose's reported confidence, it doesn't zero it out.
     """
     existing = _tracker_config_columns(conn)
     if "confidence_threshold_marker_names" not in existing:

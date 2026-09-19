@@ -23,9 +23,9 @@ Shoulder width (upper_arm.L/R):
 
 Neck + head (neck1, neck2, head):
     Not measured directly -- shoulder position moves too much with arm
-    motion for a stable time-averaged anchor (Harri, 2026-09-14: "shoulders
-    move a lot with arm movements so the time range average might have lot
-    of variation"). Measured instead as ``hip_to_ear`` (hips to the
+    motion for a stable time-averaged anchor (a time-range average of a
+    shoulder-anchored measurement carries a lot of variation). Measured
+    instead as ``hip_to_ear`` (hips to the
     ear-midpoint, a rigid-to-the-skull landmark independent of arm pose),
     with the neck+head segment's own length derived as
     ``hip_to_ear - torso_height`` -- i.e. whatever's left over once the

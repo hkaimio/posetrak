@@ -30,7 +30,7 @@ class ItemKind(str, Enum):
     SEGMENTATION_RUN   = "segmentation_run"
     DETECTION_RUN      = "detection_run"
     PERSON_TRACK       = "person_track"
-    OBJECT_TRACK       = "object_track"  # marker-based-mocap design doc §7.1 sub-phase 1e
+    OBJECT_TRACK       = "object_track"  # marker-based-mocap design doc §7.1
     TRACKING_RUN       = "tracking_run"
 
 
@@ -47,7 +47,7 @@ class SessionTreeWidget(QTreeWidget):
     segmentation_run_open_requested = Signal(str)  # seg_quality_run_id ("Open / Continue…")
     detection_run_selected         = Signal(str)  # run_id
     person_track_selected          = Signal(str)  # sequence_id
-    object_track_selected          = Signal(str)  # sequence_id (marker-based-mocap, phase 1e)
+    object_track_selected          = Signal(str)  # sequence_id (marker-based-mocap object)
     tracking_run_selected          = Signal(str)  # tracking_run_id
     selection_changed              = Signal(str, str)  # kind.value, item_id
 
@@ -238,7 +238,7 @@ class SessionTreeWidget(QTreeWidget):
 
     def _add_object_tracks(self, parent: QTreeWidgetItem, detection_run_id: str) -> None:
         """Object analog of _add_person_tracks (marker-based-mocap design
-        doc §7.1 sub-phase 1e) -- a finalised object sequence, labeled by
+        doc §7.1) -- a finalised object sequence, labeled by
         its capture_objects row's own name rather than a person name."""
         rows = self._conn.execute(
             "SELECT pos.id, co.name AS object_name "

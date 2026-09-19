@@ -544,12 +544,12 @@ class MarkerRigConfig:
     (marker-based-mocap self-occlusion-culling design). The skeleton
     generator uses this to assign the dot the *named* tag's own outward
     normal directly, in preference to inferring one geometrically (nearest
-    face-plane by signed distance) -- confirmed necessary on the real
-    sword body: two real dots' calibrated positions sit almost exactly on
-    the "wrong" tag's own plane (2026-09-05), most likely because the
-    object isn't the simple flat two-plane shape that inference assumes,
-    not from a calibration error -- only direct physical inspection
-    (which face is this dot actually mounted on) resolves that reliably.
+    face-plane by signed distance). This was needed on the sword body: two
+    real dots' calibrated positions sit almost exactly on the "wrong" tag's
+    own plane, most likely because the object isn't the simple flat
+    two-plane shape that inference assumes, not because of a calibration
+    error. Only direct physical inspection (which face the dot is actually
+    mounted on) resolves that reliably.
     Absent (empty) for a dot with no ``same_face_as:`` given, in which
     case the generator falls back to geometric inference as before.
     """

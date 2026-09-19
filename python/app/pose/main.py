@@ -200,7 +200,7 @@ class DetectionJob(BackgroundJob):
 
 class MarkerDetectionJob(BackgroundJob):
     """Background job wrapping MarkerDetectionPipeline for one capture
-    object (marker-based-mocap design doc §7.1 sub-phase 1c) -- the
+    object (marker-based-mocap design doc §7.1) -- the
     marker-run counterpart to DetectionJob above. Same signal shapes
     (progress/camera_progress/finished/error), so RunDetectionDialog wires
     it to its existing handlers unchanged; camera_progress's phase label

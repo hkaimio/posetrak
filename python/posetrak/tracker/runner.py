@@ -67,8 +67,7 @@ def default_binary_path() -> Path:
     to optbuild/cli/posetrak-tracker (developer build). Both get a ``.exe``
     suffix on Windows, where the built binary actually has one.
 
-    Trap confirmed the hard way (2026-09-05): if a ~/.posetrak install
-    exists at all, it silently wins even when it's a stale copy predating a
+    Trap: if a ~/.posetrak install exists at all, it silently wins even when it's a stale copy predating a
     real C++ change (a call from a standalone script, not the GUI, has no
     "rebuild first" reminder in its way) -- it doesn't fail loudly, it just
     runs the old logic and produces a wrong or crashing result for reasons

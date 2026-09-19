@@ -828,10 +828,10 @@ class CutieInitPanel(QWidget):
         # went through the old detect-first flow keep working unchanged. See
         # docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md.
         #
-        # 2026-09-17 (Harri): also union in capture_objects.name, so a
-        # non-person prop (e.g. a ball with no coded pattern, tracked purely
-        # by segmentation-mask centroid) can be selected as a SAM/Cutie
-        # target here too, the same way a person is. Safe to just widen this
+        # Also union in capture_objects.name, so a non-person prop (e.g. a
+        # ball with no coded pattern, tracked purely by segmentation-mask
+        # centroid) can be selected as a SAM/Cutie target here too, the same
+        # way a person is. Safe to just widen this
         # one query: self._persons is used everywhere below as a plain list
         # of label strings (button text, SAM object-id ordinals,
         # persons_json's ordinal->name snapshot) -- nothing in this panel

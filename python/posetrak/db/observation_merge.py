@@ -65,14 +65,13 @@ def merge_observation_sources(
     person-panel call site) is the base layer — its own row establishes
     the merged array's width. Every other recognised source
     (`_SOURCE_PLACEMENT`) overlays its own index range on top, the same
-    precedence Phase 1 already validated by patching hand keypoints
-    directly into the whole-body blob. A sequence with no 'body' source at
-    all (marker-based-mocap object sequences, source='markers' — design
-    doc §7.1 sub-phase 1e) passes its own *primary_source* instead, so its
-    single real row is treated as the base layer rather than silently
-    discarded in favour of a synthesized zero body the instant
+    precedence as patching hand keypoints directly into the whole-body blob.
+    A sequence with no 'body' source at all (marker-based-mocap object
+    sequences, source='markers') passes its own *primary_source* instead, so
+    its single real row is treated as the base layer. Otherwise it would be
+    silently discarded in favour of a synthesized zero body as soon as
     *default_width* happens to be known from something unrelated (e.g. an
-    edit's own shape) — see status.md's 2026-08-30 note on this exact bug.
+    edit's own shape).
 
     A source '<base>.refined' overrides its plain '<base>' counterpart for
     the same slots — applied as two explicit passes (plain sources, then

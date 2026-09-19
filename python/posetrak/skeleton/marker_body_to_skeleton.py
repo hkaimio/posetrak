@@ -3,24 +3,24 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """marker_body_to_skeleton.py — Generate a prop tracking skeleton from a
-marker body definition (design phase 1b).
+marker body definition.
 
 See docs/roadmap/features/marker-based-mocap/marker-mocap-design.md §5.3
-("Prop skeletons are generated, not authored") and §7.1 sub-phase 1b.
+("Prop skeletons are generated, not authored").
 
 A prop is a degenerate skeleton: one free-flyer root (named ``prop_root``,
 matching the joint name the design doc's §5.4 "Later" splicing note
 already anticipates), no other joints, markers only. This module is a
 pure transform -- ``MarkerRigConfig`` (already-resolved marker-body
 geometry, from ``app.setup.fiducial_markers.load_marker_body_yaml``) in,
-skeleton YAML text out -- with no capture/detection/tracker-run
-involvement, matching this sub-phase's deliberately narrow scope.
+skeleton YAML text out -- with no capture, detection or tracker-run
+involvement.
 
 ``input_tracks`` and a marker's ``track``/``landmark`` fields are consumed
-by the C++ side as of sub-phase 1f (Tracker::initialize()'s rigid-body
-path); coded-marker corners and reflective dots get two *separate* input
-tracks -- ``prop_markers`` (``type: labeled_points``, resolved via the
-manifest, phase 1) and ``prop_dots`` (``type: unlabeled_points``, resolved
+by the C++ side (Tracker::initialize()'s rigid-body path); coded-marker
+corners and reflective dots get two *separate* input tracks --
+``prop_markers`` (``type: labeled_points``, resolved via the sequence's
+keypoint manifest) and ``prop_dots`` (``type: unlabeled_points``, resolved
 at tracking time by the shared dot-assignment phase, see
 docs/roadmap/features/marker-based-mocap/dot-assignment-architecture-design.md
 §1) -- never the same track: a dot has no manifest slot to resolve
@@ -57,10 +57,10 @@ def _plane_normal(corners: np.ndarray) -> np.ndarray:
     every other calibration tool in this project already treats as "the
     marker's own front face" (e.g. the sword's `aruco_2` -- the marker
     body's reference/origin tag -- sits at Z=0 with this same template).
-    Cross-checked against the real, orbit-recalibrated `aruco_3` corners
-    (2026-09-05): comes out as (0.007, 0.158, -0.987), i.e. essentially
-    -Z, matching the physical fact that the two tags sit on opposite
-    faces of the same thin harness.
+    Cross-checked against the orbit-recalibrated corners of the sword's
+    second tag (`aruco_3`): the normal comes out as (0.007, 0.158, -0.987),
+    i.e. essentially -Z, matching the physical fact that the two tags sit on
+    opposite faces of the same thin harness.
 
     Raises ValueError for a degenerate (near-zero-area, e.g. all 4 corners
     collinear) marker -- there's no meaningful normal to compute.

@@ -125,7 +125,7 @@ class RunDetectionDialog(QDialog):
 
         # Run for: a person (pose detection, the default) or one of this
         # capture's tracked objects (marker detection instead -- design
-        # doc §7.1 sub-phase 1c). Both the combo and its accompanying
+        # doc §7.1). Both the combo and its accompanying
         # marker-only fields are only built when the capture actually has
         # at least one object, same "don't show it if it can't apply" rule
         # the bbox-source combo below already follows -- object mode is
@@ -330,7 +330,7 @@ class RunDetectionDialog(QDialog):
 
     def _on_object_source_changed(self, _index: int) -> None:
         """Choosing an object switches the dialog to marker-detection mode
-        (design §7.1 sub-phase 1c): every person-only field (bbox source,
+        (design §7.1): every person-only field (bbox source,
         detector, pose model, confidence, refine hands) is disabled and
         the marker-only fields are enabled, and vice versa -- same
         disable-not-hide convention as _on_bbox_source_changed above."""
@@ -421,7 +421,7 @@ class RunDetectionDialog(QDialog):
         self._job.start()
 
     # ------------------------------------------------------------------
-    # Marker detection for a tracked object (design §7.1 sub-phase 1c)
+    # Marker detection for a tracked object (design §7.1)
     # ------------------------------------------------------------------
 
     def _run_marker_detection(
@@ -619,8 +619,7 @@ class RunDetectionDialog(QDialog):
 
         if self._is_marker_run:
             # An object has no track-to-person stitching decision to make
-            # first (design doc §7.1 1d/1e ordering note) -- finalisation
-            # is the only step, so it happens automatically right here
+            # first -- finalisation is the only step, so it happens automatically right here
             # rather than waiting on a manual "Finalise" action that,
             # unlike the person workflow, has nothing left to decide.
             from app.pose.finalise import finalise_object_to_db

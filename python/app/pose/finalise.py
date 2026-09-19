@@ -322,17 +322,15 @@ def finalise_object_to_db(
     notes: str = "",
 ) -> str:
     """Finalise a marker detection run into one `pose_observation_sequence`
-    for its tracked object (marker-based-mocap design doc §4.3, §7.1
-    sub-phase 1d).
+    for its tracked object (marker-based-mocap design doc §4.3, §7.1).
 
     Unlike `finalise_to_db`, there is no stitching/track-assignment step:
     a marker detection run already has exactly one implicit subject
     (`track_id=0` throughout, "one prop = one track" — design §4.1), so
     this reads every camera's `detection_keypoints` directly and writes
     one sequence, automatically — the finalisation call itself *is* the
-    only decision (design §7.1's 1d/1e ordering note: an object has no
-    pre-finalisation review step to make first, unlike a person's
-    track-to-person stitching).
+    only decision (an object has no pre-finalisation review step to make
+    first, unlike a person's track-to-person stitching).
 
     Also writes the `pose_sequence_keypoints` manifest (design §4.3): each
     landmark's name and source, resolved from the run's own `config_json`
@@ -376,7 +374,7 @@ def finalise_object_to_db(
     if run["capture_object_id"] is None:
         raise ValueError(
             f"detection run {detection_run_id!r} has no capture_object_id -- only "
-            "an object-bound run (design phase 1c) can be finalised into an object "
+            "an object-bound run can be finalised into an object "
             "sequence; a standalone/scripted run has no object to attach one to"
         )
 

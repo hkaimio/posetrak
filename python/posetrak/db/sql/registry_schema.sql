@@ -196,18 +196,17 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     -- UKF constant -- see UnscentedKalmanFilter::set_velocity_noise_max_multiplier().
     process_noise_vel_max_multiplier REAL,     -- Variance-domain cap; NULL/10.0 = prior hardcoded default
     -- Added in schema migration v52 (session)/v11 (registry): dot-candidate
-    -- assignment gate and its tracklet-aware relaxation -- see
-    -- docs/roadmap/features/marker-based-mocap/status.md (Phase B, 2026-09-06).
+    -- assignment gate and its tracklet-aware relaxation.
     -- dot_assignment_gate_mahalanobis existed as a TOML-only tunable before
     -- this migration; it had no DB column at all, so a DB-driven tracker_config
     -- row could never actually override it -- fixed here alongside the new
     -- tracklet multiplier since both touch the same assignment gate.
     dot_assignment_gate_mahalanobis  REAL,     -- Chi-square gate on assignment cost; NULL/9.21 = prior default
     dot_tracklet_gate_multiplier     REAL,     -- Divides cost for a same-tracklet pairing; NULL/1.0 = disabled
-    -- Added in schema migration v53 (session)/v12 (registry), 2026-09-15:
-    -- experimental per-marker confidence-threshold override -- see
-    -- docs/roadmap/features/marker-based-mocap/status.md (2026-09-14
-    -- confidence-vs-head-orientation entry). NULL/empty = disabled (every
+    -- Added in schema migration v53 (session)/v12 (registry): experimental
+    -- per-marker confidence-threshold override (markers such as nose/ear stay
+    -- confident even when occluded by the back of the head).
+    -- NULL/empty = disabled (every
     -- marker uses the existing global min_confidence path, unchanged).
     confidence_threshold_marker_names TEXT,    -- JSON string array, e.g. ["MRK-nose","MRK-ear.L"]
     confidence_threshold_override     REAL     -- Confidence floor applied to the markers named above

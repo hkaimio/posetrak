@@ -638,7 +638,7 @@ class CapturePersonsSection(QWidget):
 
 class _AddObjectDialog(QDialog):
     """Name + marker body definition picker (marker-based-mocap design doc
-    §6.2 step 1, §7.1 sub-phase 1c). Mirrors _AddPersonDialog's shape --
+    §6.2 step 1). Mirrors _AddPersonDialog's shape --
     an object's marker body is required, not optional like a person's
     default skeleton, since an object with no marker body can never be
     detected or tracked."""
@@ -910,7 +910,7 @@ class CapturePanel(QWidget):
         # Persons (config-improvements design doc, phase 5)
         root.addWidget(CapturePersonsSection(self._conn, self._capture_id, parent=self))
 
-        # Objects (marker-based-mocap design doc §7.1 sub-phase 1c)
+        # Objects (marker-based-mocap design doc §7.1)
         root.addWidget(CaptureObjectsSection(self._conn, self._capture_id, parent=self))
 
         # Bottom toolbar
@@ -1530,12 +1530,13 @@ class StandaloneRunPanel(QWidget):
     (marker-based-mocap design doc §7.1) -- the two run kinds have nothing in
     common past this point. A person run needs track-to-person stitching
     before it can be finalised; an object run has no stitching decision to
-    make (§7.1's 1d/1e ordering note) and is normally auto-finalised the
+    make and is normally auto-finalised the
     moment its detection job completes (RunDetectionDialog._on_finished).
     This panel's object branch covers what that automation doesn't: a run
     finalised before it existed, or one whose auto-finalise attempt failed
-    and needs a retry -- previously this fell through to StitcherPanel, which
-    has no person tracks to show for an object run and no way to proceed.
+    and needs a retry -- without this branch such a run would fall through to
+    StitcherPanel, which has no person tracks to show for an object run and no
+    way to proceed.
 
     Reached by clicking a detection run row in TrialPanel or a detection run
     node in the session tree.  Shows a compact breadcrumb header above the
@@ -1543,7 +1544,7 @@ class StandaloneRunPanel(QWidget):
     """
 
     data_changed = Signal()
-    navigate_object_track = Signal(str)  # sequence_id (marker-based-mocap, phase 1e)
+    navigate_object_track = Signal(str)  # sequence_id of a marker-based-mocap object
 
     def __init__(self, conn: sqlite3.Connection, run_id: str, parent=None) -> None:
         super().__init__(parent)
@@ -6641,14 +6642,14 @@ class _RunInfoPane(QWidget):
 
 # ---------------------------------------------------------------------------
 # ObjectPanel / ObjectCropGridWidget — marker-based-mocap design doc §7.1
-# sub-phase 1e (ObjectPanel review). Object analog of PersonPanel/
+# (object review). Object analog of PersonPanel/
 # PersonCropGridWidget below, deliberately far simpler: no stitching, no
 # hand regions, no segmentation overlay, no crop caching (marker detection
 # never writes frame_cache_entries) -- full frames are decoded on demand
 # via FrameReader and shown through the *same* _CropCell/_ImageCanvas
 # primitives, so the keypoint-edit mode (drag a corner, write via
 # pose_observation_edits) is the same mechanism, not a second
-# implementation of it (see status.md's 2026-08-30 1d/1e ordering note).
+# implementation of it.
 # ---------------------------------------------------------------------------
 
 
@@ -6825,7 +6826,7 @@ class ObjectCropGridWidget(QWidget):
 
 class ObjectPanel(QWidget):
     """Object panel: info, marker-corner review/correction crop grid, and
-    tracker launcher (marker-based-mocap design doc §7.1 sub-phase 1f)."""
+    tracker launcher (marker-based-mocap design doc §7.1)."""
 
     def __init__(self, conn: sqlite3.Connection, sequence_id: str,
                  session_path: Path, parent=None) -> None:
@@ -6880,7 +6881,7 @@ class ObjectPanel(QWidget):
         self._crop_grid = ObjectCropGridWidget(self._conn, self._sequence_id)
         layout.addWidget(self._crop_grid, stretch=1)
 
-        # --- Tracking runs section (§7.1 sub-phase 1f) ---
+        # --- Tracking runs section ---
         self._run_box = _section("Tracking runs (0)")
         self._run_list = QListWidget()
         self._run_list.setMaximumHeight(110)

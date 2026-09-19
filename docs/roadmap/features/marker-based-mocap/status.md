@@ -1,3 +1,17 @@
+```toml
+name = "Marker-Based Motion Capture"
+status = "in_progress"
+description = """
+Tracking of rigid props and person-worn reflective dots or ArUco markers alongside the markerless pipeline: \
+marker detection, tracklet linking, shared dot assignment inside the UKF, and rigid-body and articulated \
+tracking. The foundation is built and validated on four real cases; the remaining work is turning the \
+script-driven workflows into CLI and GUI features, per the productization plan.
+"""
+categories = ["tracker-core", "detection-pipeline"]
+target_release = "TBD"
+last_updated = 2026-09-19
+```
+
 # Marker-based mocap — status
 
 - **2026-09-19** (productization plan, review round 1) — Harri's inline

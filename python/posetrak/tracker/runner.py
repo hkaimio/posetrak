@@ -190,6 +190,7 @@ def _build_multi_person_args(
     start_time: float | None,
     end_time: float | None,
     smooth: bool,
+    seed_position: tuple[float, float, float] | None = None,
 ) -> list[str]:
     """Build the CLI argument list for a ``--person``-mode multi-person run.
 
@@ -209,6 +210,8 @@ def _build_multi_person_args(
         args += ["--start-time", str(start_time)]
     if end_time is not None:
         args += ["--end-time", str(end_time)]
+    if seed_position is not None:
+        args += ["--seed-position", *[str(v) for v in seed_position]]
     if smooth:
         args.append("--smooth")
     return args
@@ -223,6 +226,7 @@ def run_multi_person_tracker(
     start_time: float | None = None,
     end_time: float | None = None,
     smooth: bool = True,
+    seed_position: tuple[float, float, float] | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> MultiPersonResult:
     """Run the posetrak-tracker binary in ``--person`` multi-person mode.
@@ -253,6 +257,10 @@ def run_multi_person_tracker(
         Optional sequence time-range override, applied to every person.
     smooth:
         Whether to enable RTS smoothing (``--smooth`` flag). Default True.
+    seed_position:
+        Initial root position (x, y, z in metres) for the one dots-only
+        subject, which cannot initialise from observations. The tracker
+        rejects it if no subject, or more than one, is dots-only.
     on_progress:
         Callback invoked for each non-empty output line.
 
@@ -264,7 +272,7 @@ def run_multi_person_tracker(
     binary = binary_path or default_binary_path()
     args = _build_multi_person_args(
         binary, session_path, persons, output_dir,
-        start_time=start_time, end_time=end_time, smooth=smooth,
+        start_time=start_time, end_time=end_time, smooth=smooth, seed_position=seed_position,
     )
 
     run_ids: list[str | None] = [None] * len(persons)

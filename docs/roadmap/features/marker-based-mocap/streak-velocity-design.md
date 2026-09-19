@@ -172,8 +172,8 @@ feature is the first thing to ever give one (camera, marker) two
 Observations in the same step, and that broke three places in the
 codebase that assumed at most one, including one able to affect the real
 outlier-rejection decision. Full account and fix in
-`docs/roadmap/features/observation-results-semantics.md`'s 2026-09-05
-entry. The original `prev_observations_` theory is neither confirmed nor
+`docs/roadmap/features/observation-results-semantics.md`'s "Two
+observations per slot" section. The original `prev_observations_` theory is neither confirmed nor
 ruled out yet — it needs re-investigating with the now-fixed diagnostics,
 since every video and query used to support it was reading corrupted data.
 

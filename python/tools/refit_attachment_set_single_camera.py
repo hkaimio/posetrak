@@ -213,7 +213,8 @@ def main() -> None:
     requires_joints = sorted({j.split(".")[0] for j in {_slot_parent_joint(m["name"]) for m in catalog_markers}})
     out_doc = {
         "module": "leg",
-        "skeleton_topology": xform.skeleton_topology,
+        "requires_topology": xform.topology.name,
+        "requires_topology_hash": xform.topology.hash,
         "requires_joints": requires_joints,
         "calibration": {
             "session": args.session, "shot_id": args.shot_id,

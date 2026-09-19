@@ -43,12 +43,18 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from posetrak.db.manage_skeleton import import_skeleton_str  # noqa: E402
+from posetrak.markers.catalog import check_module_fits_skeleton  # noqa: E402
 
 _DOTS_TRACK_ID = "dots"
 
 
 def build_dot_augmented_skeleton(base_yaml_content: str, calibrated_doc: dict) -> str:
-    """Returns the merged skeleton YAML content as a string."""
+    """Returns the merged skeleton YAML content as a string.
+
+    Raises MarkerSetError if the attachment set was not written for the base skeleton's
+    topology, or names joints the skeleton does not have.
+    """
+    check_module_fits_skeleton(calibrated_doc, base_yaml_content)
     skeleton = yaml.safe_load(base_yaml_content)
 
     input_tracks = skeleton.setdefault("input_tracks", [])

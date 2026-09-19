@@ -67,22 +67,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.setup.extrinsics_solver import _proj_matrix, _undistort_pts  # noqa: E402
 from posetrak.db.skeleton_layout import SkeletonLayout  # noqa: E402
+from posetrak.markers.catalog import catalog_module, check_module_fits_skeleton  # noqa: E402
+from posetrak.markers.topology import skeleton_topology  # noqa: E402
 from tools.build_tracklet_groups import collect_tracklets  # noqa: E402
 from tools.calibrate_rigid_marker_body import load_camera_states, load_sync_table  # noqa: E402
 from tools.prototype_multi_camera_fusion import triangulate_multiview  # noqa: E402
 
-# real slot base name -> parent joint base name (§1.3; see module docstring)
-_SLOT_PARENT_BASE = {
-    "hip": "thigh",
-    "knee_lat": "shin", "knee_med": "shin", "knee_front": "shin",
-    "ankle_lat": "shin", "ankle_med": "shin",
-    "heel": "foot", "toe": "foot",
-}
+# The slots and their parent joints (§1.3; see module docstring) come from the catalog.
+_LEG_MODULE = catalog_module("leg")
 
 
 def _slot_parent_joint(slot: str) -> str:
-    base, side = slot.rsplit("_", 1)
-    return f"{_SLOT_PARENT_BASE[base]}.{side}"
+    return _LEG_MODULE.parent_joint(slot)
 
 
 def _parse_member(entry: list) -> tuple[str, int, int | None, int | None]:
@@ -110,13 +106,14 @@ class _TransformCache:
             "SELECT skeleton_id FROM tracking_runs WHERE id = ?", (tracking_run_id,)
         ).fetchone()["skeleton_id"]
         yc = conn.execute("SELECT yaml_content FROM skeletons WHERE id = ?", (sk_id,)).fetchone()["yaml_content"]
+        check_module_fits_skeleton(_LEG_MODULE, yc)  # refuse a skeleton the leg slots do not fit
         self.layout = SkeletonLayout(yc)
         # The skeleton row's own `name` column is the per-person instance
         # label (e.g. "Default female"); the rig-topology identifier this
         # catalog's `parent_joint` names actually depend on is the YAML's
         # own top-level `name` field (e.g. "reallusion-no-waist") -- §1.9's
-        # `skeleton_topology`.
-        self.skeleton_topology = yaml.safe_load(yc)["name"]
+        # `requires_topology`.
+        self.topology = skeleton_topology(yc)
         rows = conn.execute(
             "SELECT timestamp_s, state FROM tracking_results WHERE run_id = ? AND is_smoothed = 1 ORDER BY tracker_step",
             (tracking_run_id,),
@@ -328,7 +325,8 @@ def main() -> None:
 
     out_doc = {
         "module": "leg",
-        "skeleton_topology": xform.skeleton_topology,
+        "requires_topology": xform.topology.name,
+        "requires_topology_hash": xform.topology.hash,
         "requires_joints": requires_joints,
         "calibration": {
             "session": args.session, "shot_id": args.shot_id, "tracking_run": args.tracking_run,

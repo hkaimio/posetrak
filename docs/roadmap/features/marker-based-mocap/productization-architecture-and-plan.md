@@ -522,11 +522,28 @@ the whole C++ change for D9's per-source half.
 > on a sequence that has tracking runs or manual edits. An object name is
 > unique within a capture, so `--object NAME` is unambiguous.
 > `copy_dot_candidates_to_sequence.py` is deleted.
-> `setup_pen_pad_capture_objects.py` stays: it builds two objects from one
-> existing run by narrowing its marker ids, and the CLI has no such step (the
-> command sequence for a new capture is `marker-body import`, `capture object
-> add`, `detect run --type aruco --object`, `sequence finalise-object`,
-> `marker-body to-skeleton`).
+>
+> *Several props, one detection pass.* Decoding the video dominates the cost of
+> coded-marker detection, so props are best detected together: one `detect run
+> --type aruco --marker-ids …` over the ids of all of them, bound to no object.
+> `sequence finalise-object --detection-run RUN --object NAME` then gives each
+> prop a run of its own, derived from the shared one, and finalises it. The
+> derived run (`posetrak/db/object_marker_run.py`) is bound to the object, keeps
+> the shared run's corner rows re-slotted to the object's marker ids in the
+> body's order, drops frames that show none of them, and records
+> `derived_from_detection_run_id` in `config_json`. The shared run is not
+> changed, in line with detection runs being append-only. `--with-dots` also
+> copies the run's dot candidates, for an object whose body has dots. A separate
+> run per object is deliberate: `detection_runs.capture_object_id` is how a
+> sequence is linked to its object (`track run-persons` reads it), so a shared
+> run cannot serve several objects without a schema change. Checked on the
+> 2026-09-06 capture: the pen's and pad's rows from one shared run over ids 1, 2
+> and 3 are identical to those the earlier pen/pad script produced for the same
+> frames (399 of 399 and 580 of 580), and the calibration box's stray marker 0
+> never reaches the pad, because the pad's body does not list it.
+> `setup_pen_pad_capture_objects.py` is deleted. The command sequence for a new
+> capture is `marker-body import`, `capture object add`, `detect run --type aruco`,
+> `sequence finalise-object --object`, `marker-body to-skeleton`.
 
 #### 3.5.1 Anonymous pools are shared, not copied (D2/D3)
 

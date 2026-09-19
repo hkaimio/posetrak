@@ -179,9 +179,13 @@ posetrak detect show ID
 ### Observation sequences of marker subjects
 
 ```
-posetrak sequence finalise-object --detection-run ID [--notes S]
+posetrak sequence finalise-object --detection-run ID [--object NAME|ID [--with-dots]] [--notes S]
   # A tracked object's sequence from its object-bound marker run: coded-marker corners and
   # dot candidates, plus the landmark manifest. Prints the sequence id.
+  # With --object the run may be a shared one bound to no object (props detected together in
+  # one pass, `detect run --type aruco --marker-ids 1,2,3`): the object first gets a run of its
+  # own, derived from the shared one, with the corner rows re-slotted to the object's marker
+  # ids. The shared run is not changed. --with-dots also copies its dot candidates.
 
 posetrak sequence add-dots --detection-run ID --sequence ID [--replace]
   # Attach a dots run's candidates to an existing sequence (dots worn on a person). Additive;

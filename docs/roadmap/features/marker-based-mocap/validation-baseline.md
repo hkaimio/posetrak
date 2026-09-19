@@ -2,7 +2,7 @@
 
 Marker-based tracking was developed by iterating on real captures, so many of
 its results exist only as numbers recorded along the way. This page fixes them
-as a reproducible baseline: five real cases that can be re-run from the
+as a reproducible baseline: six real cases that can be re-run from the
 committed code, with the values a correct build produces. Run them before and
 after any change to marker detection, dot assignment, initialisation or the
 UKF, and read any difference as either a regression or a change to be
@@ -54,13 +54,27 @@ data reproduces every number below.
 | Single reflective ball, one throw (0.75 s) | 89 / 90 (98.9 %) | 0 | – | 0.150 | 18.9, 71.3, 20.4 px (3 cameras) |
 | Sword with ArUco tags and dots, 66 s | 6108 / 6626 (92.2 %) | 518 | 4.6 mm | 2.786 | 7.5 – 9.4 px (6 cameras) |
 
+The sixth case tracks two subjects together, the person with the leg module and
+the ball, over the ball's first throw (0.75 s), and compares each with the same
+subject tracked alone over the same window:
+
+| Subject | Tracked steps | Mean NIS/dof, joint / alone | Reprojection medians, joint = alone |
+|---|---|---|---|
+| Person with the leg module | 89 / 89 | 1.577 / 1.577 | 19.6 – 30.1 px (6 cameras) |
+| Ball | 89 / 89 | 0.150 / 0.150 | 18.9, 71.3, 20.4 px (3 cameras) |
+
+The case also requires that no observed pixel is used by both subjects at the same
+time and camera, both on this run and on a variant where exact copies of the
+person's dot candidates are added to the ball's sequence.
+
 For the leg module the comparison that matters is against tracking the same
 trial without dots: the recorded markerless run has mean NIS/dof 1.959, and the
 case requires the dot-augmented run to stay within 10 % of it.
 
 Approximate wall time on the development workstation: the pen, pad and ball
 cases take a few seconds each, the leg module 28 minutes, the sword 16 minutes
-of detection plus 15 seconds of tracking.
+of detection plus 15 seconds of tracking, and the two-subject case about a minute
+(two solo runs and two joint runs of 17 seconds).
 
 ## What each case exercises
 
@@ -74,6 +88,12 @@ of detection plus 15 seconds of tracking.
 - **Sword.** The full pipeline: ArUco and dot detection on six cameras with
   background subtraction and the chroma filter, tracklet linking, finalisation
   into an object sequence, then tracking with streak velocity.
+- **Person + ball.** Joint dot assignment across subjects: candidates that two
+  subjects' sequences share are one candidate that either may claim, a candidate
+  only one sequence holds can only be claimed by that subject, and a seed applies
+  only to the dots-only subject. Joint and solo results are identical, which is
+  what makes a prop tracked from hand-placed points safe alongside a person whose
+  automatic detections cover the same cameras.
 
 ## Notes on how the values were established
 
@@ -106,9 +126,11 @@ of detection plus 15 seconds of tracking.
 
 - The cases cover one capture each, so they detect regressions in the
   behaviour they exercise, not general accuracy.
-- Person tracking with worn dots is covered by the leg module only. No case has
-  two dot-bearing subjects, which is what shared candidate pools are for; a case
-  for that belongs with the shared-pool work.
+- The two-subject case has no candidates that the two stored sequences share, so
+  the shared-candidate path is exercised by a constructed variant (copies added
+  in a database copy) and by unit tests, not by two sequences that were recorded
+  that way. The window is one throw, since the subjects are stepped together and
+  the ball's sequence covers only its throws.
 - The reference values are current behaviour, not ground truth. A change that
   improves tracking will fail a check until the reference is deliberately updated
   and the reason recorded.

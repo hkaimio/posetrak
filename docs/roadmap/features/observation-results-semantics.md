@@ -1,11 +1,12 @@
 # `tracking_obs_results` semantics are measurement-mode-dependent — and unmarked
 
-**Status: fixed at the data-model level (2026-09-05).** Filed 2026-08-23
-after a real bug: the skeleton scaling dialog
+**Status: fixed at the data-model level.** The ambiguity was found through
+a real bug: the skeleton scaling dialog
 (`python/app/ui/skeleton_scaling_panel.py`) reported a measured femur
-length in the thousands of centimetres against a real capture. Originally
-worked around per-consumer only (skeleton scaling); this file's own "Open
-question" section is now resolved -- see §2026-09-05 below.
+length in the thousands of centimetres against a real capture. Skeleton
+scaling was fixed on its own first, as a per-consumer workaround; the
+underlying question is resolved in the data model -- see "Two observations
+per slot" below.
 
 ## The problem
 
@@ -78,7 +79,7 @@ worth keeping for their own sake, independent of the mode-ambiguity issue:
   didn't catch (inflated assumed noise from low confidence can make even a
   wildly-off detection look statistically unsurprising).
 
-## 2026-09-05 — the open question resolved, and two deeper bugs it surfaced
+## Two observations per slot — the open question resolved, and two deeper bugs it surfaced
 
 Streak-derived dot velocity (`docs/roadmap/features/marker-based-mocap/
 streak-velocity-design.md` §4) is the first thing in this codebase to give
@@ -92,14 +93,13 @@ step" assumption turned out to be baked into three places, not one:
    (`result_writer.cpp`) writes into one diagnostic slot per (camera,
    marker), last-observation-in-the-vector wins. With two Observations
    sharing a slot, the VELOCITY one's *displacement* (not a position)
-   could silently overwrite the POSITION one's real pixel coordinate --
-   caught visually as dot markers rendered nowhere near any actual
-   detection in `render_tracking_debug_frames.py` output (Harri's own
-   catch: predicted markers tracked the real sword correctly while
-   "actual" markers floated over blank wall/door, nowhere near any
-   possible detection -- the tell that this was a data bug, not a
-   real-but-wrong correspondence, was that a genuinely wrong match would
-   still land *on some real feature*, not in empty space).
+   could silently overwrite the POSITION one's real pixel coordinate. It
+   shows up in `render_tracking_debug_frames.py` output as "actual" dot
+   markers floating over a blank wall or door, nowhere near any possible
+   detection, while the predicted markers track the real sword correctly.
+   That is the tell of a data bug rather than a real-but-wrong
+   correspondence: a genuinely wrong match would still land *on some real
+   feature*, not in empty space.
 2. **`UnscentedKalmanFilter::update()`'s innovation-recompute pass**:
    matched "this observation" between the full and inlier-only lists by
    `(marker_id, camera_id, frame_idx)` alone -- no longer unique once two

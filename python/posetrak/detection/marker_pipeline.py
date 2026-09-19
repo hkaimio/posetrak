@@ -57,7 +57,7 @@ from app.pose.db_cache import (
 from app.setup.db_context import SyncPoint, SyncTable
 from app.setup.fiducial_markers import ArucoDetector, MarkerRigConfig, MarkerRigDetector, load_marker_body_yaml
 from posetrak.detection.dot_blob_detector import compute_background, detect_blobs
-from posetrak.detection.dot_tracklet import DotTrackletLinker
+from posetrak.detection.dot_tracklet import MotionGatedLinker
 from posetrak.detection.frame_source import iter_frames
 from posetrak.db.manage_capture_object import get_capture_object
 
@@ -174,7 +174,7 @@ def _process_camera_core(
     dot_linker = None
     if detect_dots:
         dot_writer = DotCandidateWriter(conn, detection_run_id=run_id, shot_video_id=cam.shot_video_id)
-        dot_linker = DotTrackletLinker()
+        dot_linker = MotionGatedLinker()
         # 'blacklist' mode needs a background image just as much as 'subtract' does
         # (see detect_blobs()'s own docstring) -- gate on either, not bg_subtract
         # alone, so choosing background_mode='blacklist' without separately setting
@@ -205,7 +205,7 @@ def _process_camera_core(
                     blacklist_radius_px=dot_cfg.blacklist_radius_px,
                     bgr=img, max_saturation=dot_cfg.max_saturation,
                 )
-                dot_linker.link_frame(blobs)
+                dot_linker.link_frame(video_frame, blobs)
                 dot_writer.add_frame(video_frame, blobs)
 
             frames_done += 1
@@ -609,7 +609,7 @@ class MarkerDetectionPipeline:
         detection (~35ms/frame) and video decode (~26ms/frame) are the two
         real costs, both genuinely per-camera-independent CPU work -- the
         thing this parallelizes. A single camera's own frame sequence is
-        NOT parallelized here (DotTrackletLinker.link_frame() is inherently
+        NOT parallelized here (MotionGatedLinker.link_frame() is inherently
         sequential -- each frame's linking depends on the previous frame's
         still-open tracklets), so a capture with fewer cameras than
         available cores still leaves some idle; see the plan doc's own

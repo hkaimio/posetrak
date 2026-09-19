@@ -35,7 +35,7 @@ from pathlib import Path
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from app.pose.db_cache import decode_dot_candidates  # noqa: E402
 from app.setup.extrinsics_solver import _undistort_pts  # noqa: E402

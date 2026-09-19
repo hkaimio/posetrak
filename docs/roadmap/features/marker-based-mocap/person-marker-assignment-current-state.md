@@ -239,7 +239,7 @@ mislabeling).
 
 ## 5. Stage C — per-frame anatomical directions (prototype)
 
-**File**: `python/tools/prototype_marker_normal_assignment.py`
+**File**: `python/tools/prototypes/superseded/prototype_marker_normal_assignment.py`
 **Function**: `compute_leg_frames(kp_by_cam, states) -> dict[joint_name -> {...}]`
 
 For each ambiguous joint (`knee_L`, `knee_R`, `ankle_L`, `ankle_R`) that
@@ -274,7 +274,7 @@ triangulating a standing foot's ankle and checking it lands near Z=0.
 
 ## 6. Stage D — per-frame assignment (prototype)
 
-**File**: `python/tools/prototype_marker_normal_assignment.py`
+**File**: `python/tools/prototypes/superseded/prototype_marker_normal_assignment.py`
 **Function**: `normal_aware_hybrid_assign_frame(dots_raw_by_cam,
 kp_by_cam, states, fusion_max_reproj_px=3.0, fusion_merge_radius_m=0.03,
 match_radius_m=0.15, match_radius_px=80.0, min_direction_score=0.4,
@@ -340,7 +340,7 @@ it's still the recommended path for ambiguous groups.
 
 ## 7. Stage E — tracklet-majority-vote smoothing (prototype)
 
-**File**: `python/tools/prototype_tracklet_smoothed_assignment.py`
+**File**: `python/tools/prototypes/superseded/prototype_tracklet_smoothed_assignment.py`
 **Function**: `run_tracklet_smoothed(conn, shot_id, marker_detection_run,
 pose_sequence, start_time, end_time, ref_camera_id=None,
 assign_fn=hybrid_assign_frame) -> {video_frame: {camera: {name: (px, py,

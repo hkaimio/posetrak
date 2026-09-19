@@ -60,7 +60,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.setup.extrinsics_solver import (  # noqa: E402
     _proj_matrix, _undistort_pts, marker_local_corners, solve_marker_pose,

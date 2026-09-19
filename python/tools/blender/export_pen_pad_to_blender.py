@@ -51,7 +51,7 @@ from pathlib import Path
 import numpy as np
 from scipy.ndimage import median_filter
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from posetrak.export.common import (  # noqa: E402
     _coord_matrices, matrix_to_quat_components, quat_to_matrix,

@@ -46,7 +46,7 @@ predicted velocity is left to the consumer. (0.0, 0.0) for a round dot,
 where no streak axis exists.
 
 Shape-before-area ordering fix + background subtraction + chroma filter
-(2026-09-06, ported from python/tools/prototype_streak_detector.py after a
+(2026-09-06, ported from python/tools/prototypes/prototype_streak_detector.py after a
 real investigation on a fast sword-swing capture -- see status.md's
 2026-09-06 entries for the full account): the shape (compactness/axes)
 computation used to run *after* an unconditional `area` bound, so a long,

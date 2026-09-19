@@ -49,7 +49,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.setup.fiducial_markers import ArucoDetector  # noqa: E402
 from posetrak.detection.dot_blob_detector import detect_blobs  # noqa: E402

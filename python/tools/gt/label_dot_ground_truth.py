@@ -98,7 +98,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.pose.db_cache import decode_dot_candidates  # noqa: E402
 from posetrak.detection.frame_source import iter_frames  # noqa: E402

@@ -52,11 +52,11 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from app.pose.db_cache import decode_dot_candidates  # noqa: E402
 from tools.calibrate_rigid_marker_body import load_camera_states, load_sync_table  # noqa: E402
-from tools.prototype_hybrid_person_marker_assignment import hybrid_assign_frame  # noqa: E402
+from tools.prototypes.superseded.prototype_hybrid_person_marker_assignment import hybrid_assign_frame  # noqa: E402
 
 
 def run_tracklet_smoothed(

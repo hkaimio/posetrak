@@ -22,7 +22,7 @@ some tracklet_id, including a length-1 "singleton" tracklet; whether a
 tracklet is trustworthy is the tracker's own call to make (it has real
 predicted positions and gate costs to judge with), not this module's.
 That is a deliberate difference from the prototype's own
-`build_tracklets()` (python/tools/prototype_streak_detector.py), which
+`build_tracklets()` (python/tools/prototypes/prototype_streak_detector.py), which
 returns a keep/reject boolean per candidate -- a judgment that genuinely
 needs to see a tracklet's own future (it only trusts a tracklet once it's
 survived several later frames and moved enough), so that tool works over
@@ -47,7 +47,7 @@ own last known motion during a gap, and gates a candidate on Mahalanobis
 distance from that moving prediction rather than raw pixel distance to a
 static point.
 
-Validated (python/tools/prototype_motion_gated_linker.py, status.md
+Validated (python/tools/prototypes/prototype_motion_gated_linker.py, status.md
 2026-09-11) against 11 real human-determined identity-switch frames from
 that same review (recorded as the 4-element sub-range members `label_
 tracklet_groups_gui.py` writes when a group is manually split): 11/11

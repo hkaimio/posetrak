@@ -68,7 +68,7 @@ may apply local tone-mapping that complicates a simple threshold approach.
 **Start with the two GoPro cameras** (cleanest, most linear pipeline,
 ring-lit) and extend to the other camera models only once those work.
 
-`python/tools/prototype_dot_blob_detector.py` (throwaway spike, not
+`python/tools/prototypes/prototype_dot_blob_detector.py` (throwaway spike, not
 integrated) implements the method above with a compactness filter added
 from the start (`4·π·area / perimeter²`, rejects elongated glare streaks
 that pass a brightness+area test but aren't a round dot) and ran it

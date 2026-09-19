@@ -86,7 +86,7 @@ import numpy as np
 import sqlite3
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.setup.extrinsics_solver import CamCalibState, _undistort_pts, marker_local_corners  # noqa: E402
 from app.setup.fiducial_markers import ArucoDetector  # noqa: E402

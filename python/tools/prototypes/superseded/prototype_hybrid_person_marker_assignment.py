@@ -43,7 +43,7 @@ from pathlib import Path
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from app.setup.extrinsics_solver import CamCalibState, _proj_matrix, _undistort_pts  # noqa: E402
 from tools.prototype_multi_camera_fusion import fuse_frame, triangulate_multiview  # noqa: E402

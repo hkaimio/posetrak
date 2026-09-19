@@ -47,16 +47,16 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from app.pose.db_cache import decode_dot_candidates  # noqa: E402
 from posetrak.detection.frame_source import iter_frames  # noqa: E402
 from tools.calibrate_rigid_marker_body import load_camera_states, load_sync_table  # noqa: E402
-from tools.prototype_hybrid_person_marker_assignment import hybrid_assign_frame  # noqa: E402
-from tools.prototype_marker_normal_assignment import normal_aware_hybrid_assign_frame  # noqa: E402
+from tools.prototypes.superseded.prototype_hybrid_person_marker_assignment import hybrid_assign_frame  # noqa: E402
+from tools.prototypes.superseded.prototype_marker_normal_assignment import normal_aware_hybrid_assign_frame  # noqa: E402
 from tools.prototype_person_marker_assignment import _CATALOG  # noqa: E402
-from tools.prototype_tracklet_smoothed_assignment import run_tracklet_smoothed  # noqa: E402
-from tools.render_person_marker_assignment_video import _marker_colors  # noqa: E402
+from tools.prototypes.superseded.prototype_tracklet_smoothed_assignment import run_tracklet_smoothed  # noqa: E402
+from tools.prototypes.superseded.render_person_marker_assignment_video import _marker_colors  # noqa: E402
 
 _PAD_PX = 250
 _COLORS = _marker_colors()

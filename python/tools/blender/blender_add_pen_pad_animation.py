@@ -30,7 +30,7 @@ from pathlib import Path
 
 import bpy
 
-CONFIG_PATH = Path(__file__).resolve().parents[2] / "scratch" / "blender_pen_pad_keyframes.json"
+CONFIG_PATH = Path(__file__).resolve().parents[3] / "scratch" / "blender_pen_pad_keyframes.json"
 
 
 def _make_empty(name: str, parent=None, empty_type: str = "PLAIN_AXES", size: float = 0.05):

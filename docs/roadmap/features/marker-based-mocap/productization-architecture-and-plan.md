@@ -513,6 +513,20 @@ the whole C++ change for D9's per-source half.
 > `copy_dot_candidates_to_sequence.py` script moved into the package, with the
 > source run stamped correctly). The `pose_sequence_sources` table above is
 > deferred with D3.
+>
+> *Built (2026-09-19):* `capture object add|list|rename|rm`,
+> `sequence finalise-object` and `sequence add-dots` (`posetrak/db/sequence_dots.py`;
+> every copied row keeps its source run in `pose_observations.detection_run_id`).
+> Beyond the script it replaces, `add-dots` refuses a run that has no dots or
+> whose sync configuration differs from the sequence's, and refuses `--replace`
+> on a sequence that has tracking runs or manual edits. An object name is
+> unique within a capture, so `--object NAME` is unambiguous.
+> `copy_dot_candidates_to_sequence.py` is deleted.
+> `setup_pen_pad_capture_objects.py` stays: it builds two objects from one
+> existing run by narrowing its marker ids, and the CLI has no such step (the
+> command sequence for a new capture is `marker-body import`, `capture object
+> add`, `detect run --type aruco --object`, `sequence finalise-object`,
+> `marker-body to-skeleton`).
 
 #### 3.5.1 Anonymous pools are shared, not copied (D2/D3)
 

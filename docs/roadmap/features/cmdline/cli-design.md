@@ -139,6 +139,14 @@ posetrak capture add-video CAPTURE_ID VIDEO_PATH \
     --camera ID --camera-mode ID \
     [--first-frame N] [--last-frame N]
 
+# Tracked objects (rigid props) of a capture. --marker-body is taken from the session,
+# else copied in from the registry. A name is unique within a capture, because
+# `detect run --object` and `track run-persons --object` find an object by name.
+posetrak capture object add --capture ID --name S --marker-body ID [--notes S]
+posetrak capture object list [--capture ID]
+posetrak capture object rename ID NAME
+posetrak capture object rm ID           # refused once a detection or tracking run refers to it
+
 posetrak extrinsics import PATH --capture ID [--method pose2sim]
 posetrak extrinsics list [--capture ID]
 
@@ -166,6 +174,18 @@ posetrak detect run --type aruco|dots --capture ID --sync ID --start S --end S \
 
 posetrak detect list [--capture ID]
 posetrak detect show ID
+```
+
+### Observation sequences of marker subjects
+
+```
+posetrak sequence finalise-object --detection-run ID [--notes S]
+  # A tracked object's sequence from its object-bound marker run: coded-marker corners and
+  # dot candidates, plus the landmark manifest. Prints the sequence id.
+
+posetrak sequence add-dots --detection-run ID --sequence ID [--replace]
+  # Attach a dots run's candidates to an existing sequence (dots worn on a person). Additive;
+  # --replace deletes the sequence's dot rows first and is refused once it is tracked or edited.
 ```
 
 **Note on `detect finalise`:** Converting a detection run to labelled pose sequences requires

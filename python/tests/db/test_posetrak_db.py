@@ -1096,10 +1096,13 @@ def test_get_project_root_returns_none_when_not_set(registry_db: sqlite3.Connect
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_path_absolute(registry_db: sqlite3.Connection) -> None:
+def test_resolve_path_absolute(registry_db: sqlite3.Connection, tmp_path: Path) -> None:
     """resolve_path() should return absolute paths unchanged."""
-    result = resolve_path("/absolute/path/file.db", registry_db)
-    assert result == Path("/absolute/path/file.db")
+    # tmp_path is absolute on every platform; "/absolute/path/file.db" has no
+    # drive letter and so is not absolute on Windows.
+    absolute = tmp_path / "file.db"
+    result = resolve_path(str(absolute), registry_db)
+    assert result == absolute
 
 
 def test_resolve_path_relative_with_root(registry_db: sqlite3.Connection) -> None:

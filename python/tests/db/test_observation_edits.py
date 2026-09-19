@@ -124,15 +124,18 @@ def test_edit_moves_keypoint(obs_session):
 # ---------------------------------------------------------------------------
 
 def test_edit_marks_outlier_zeroes_confidence(obs_session):
-    """Slots with is_outlier!=0 get confidence zeroed; x/y are left as original."""
-    edit_kp = _make_kp(0.0, 0.0, 1.0)  # is_outlier=1
+    """Slots with is_outlier!=0 get confidence zeroed. x/y come from the edit
+    (the editor stores the position the user left the keypoint at, so toggling
+    outlier after moving a keypoint keeps the moved position)."""
+    edit_kp = _make_kp(77.0, 88.0, 1.0)  # is_outlier=1
     mask = _build_mask(1)
     write_observation_edit(obs_session, "seq1", "cam1", 10, edit_kp, mask)
 
     result = read_observations_with_edits(obs_session, "seq1", "cam1")
     kp = result[10]
     assert kp[1, 2] == pytest.approx(0.0)
-    assert kp[1, 0] == pytest.approx(100.0)  # x unchanged
+    assert kp[1, 0] == pytest.approx(77.0)  # x from the edit, not the original 100
+    assert kp[1, 1] == pytest.approx(88.0)
     # Other slots unaffected
     assert kp[0, 2] == pytest.approx(0.9, rel=1e-5)
 

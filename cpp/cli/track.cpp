@@ -969,6 +969,7 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
         spec.config_id = config_id;
         spec.person_id = person_id;
         spec.output_dir = output_dir;
+        spec.seed_position = seed_position;
 
         BuildPersonContextOptions opts;
         opts.db_path = db_path;
@@ -980,7 +981,6 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
         opts.debug_init = debug_init;
         opts.smooth_output = smooth_output;
         opts.quiet = quiet;
-        opts.seed_position = seed_position;
 
         auto ctx = build_person_context(spec, opts, verbose);
 
@@ -1063,11 +1063,9 @@ static int run_multi_person_track_from_db(std::string const& db_path,
                                           bool smooth_output, bool debug_output, bool debug_init,
                                           double min_confidence,
                                           std::vector<std::string> const& active_joint_groups,
-                                          double override_start_time, double override_end_time,
-                                          std::optional<Eigen::Vector3d> const& seed_position) {
+                                          double override_start_time, double override_end_time) {
     try {
         BuildPersonContextOptions opts;
-        opts.seed_position = seed_position;
         opts.db_path = db_path;
         opts.min_confidence = min_confidence;
         opts.active_joint_groups = active_joint_groups;
@@ -1137,7 +1135,9 @@ int main(int argc, char* argv[]) {
     std::vector<std::string> db_active_joint_groups;
     double db_start_time = std::numeric_limits<double>::quiet_NaN();
     double db_end_time = std::numeric_limits<double>::quiet_NaN();
-    std::vector<double> db_seed_position;  // see BuildPersonContextOptions::seed_position
+    std::vector<double> db_seed_position;  // see PersonSpec::seed_position
+    // Per-subject seeds for --person mode: repeated 4-value groups (person index, x, y, z).
+    std::vector<double> db_subject_seeds;
     // Multi-person mode: repeated 4-value groups (sequence, skeleton, tracker_config,
     // person_id), flattened by CLI11's take_all() into one vector.
     std::vector<std::string> db_person_specs;
@@ -1183,12 +1183,19 @@ int main(int argc, char* argv[]) {
     track_cmd
         ->add_option("--seed-position", db_seed_position,
                      "Externally-supplied initial root position (x y z, meters), bypassing "
-                     "the normal observation-based init search. With --person it applies to "
-                     "the one subject that has only unlabeled_points (anonymous dot) markers "
-                     "and so has no cold-start path of its own (it is an error if there is "
-                     "none, or more than one) -- see "
-                     "BuildPersonContextOptions::seed_position.")
+                     "the normal observation-based init search. Single-subject only; with "
+                     "--person use --subject-seed. Required for a subject whose only markers "
+                     "are unlabeled_points (anonymous dots), which has no cold-start path of "
+                     "its own -- see PersonSpec::seed_position.")
         ->expected(3);
+    track_cmd
+        ->add_option("--subject-seed", db_subject_seeds,
+                     "Initial root position for one subject of a --person run: "
+                     "--subject-seed <person index> <x> <y> <z>, where the index counts the "
+                     "--person groups from 0. Repeat for each subject that needs one (every "
+                     "subject with only anonymous-dot markers does).")
+        ->expected(4)
+        ->take_all();
     track_cmd
         ->add_option("--person", db_person_specs,
                      "Track an additional person: --person <sequence> <skeleton> "
@@ -1238,15 +1245,25 @@ int main(int argc, char* argv[]) {
                 spec.person_id = std::stoi(db_person_specs[i + 3]);
                 specs.push_back(spec);
             }
-            std::optional<Eigen::Vector3d> multi_seed;
             if (!db_seed_position.empty()) {
-                multi_seed =
-                    Eigen::Vector3d(db_seed_position[0], db_seed_position[1], db_seed_position[2]);
+                fmt::print(stderr,
+                           "Error: --seed-position is for a single subject; use --subject-seed "
+                           "<person index> <x> <y> <z> with --person\n");
+                return 1;
             }
-            return run_multi_person_track_from_db(db_path, specs, db_output_dir, verbose, quiet,
-                                                  smooth_output, debug_output, debug_init,
-                                                  db_min_confidence, db_active_joint_groups,
-                                                  db_start_time, db_end_time, multi_seed);
+            for (size_t i = 0; i + 3 < db_subject_seeds.size(); i += 4) {
+                if (db_subject_seeds[i] < 0 ||
+                    static_cast<size_t>(db_subject_seeds[i]) >= specs.size()) {
+                    fmt::print(stderr, "Error: --subject-seed index {} is not a --person group\n",
+                               db_subject_seeds[i]);
+                    return 1;
+                }
+                specs[static_cast<size_t>(db_subject_seeds[i])].seed_position = Eigen::Vector3d(
+                    db_subject_seeds[i + 1], db_subject_seeds[i + 2], db_subject_seeds[i + 3]);
+            }
+            return run_multi_person_track_from_db(
+                db_path, specs, db_output_dir, verbose, quiet, smooth_output, debug_output,
+                debug_init, db_min_confidence, db_active_joint_groups, db_start_time, db_end_time);
         } else if (!db_path.empty()) {
             // DB mode: validate required DB args
             if (db_sequence_id.empty() || db_skeleton_id.empty() || db_config_id.empty()) {

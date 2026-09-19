@@ -84,22 +84,28 @@ def test_devbuild_binary_path_matches_cpp_reorg_layout():
     assert _REPO_ROOT.name == "posetrak"
 
 
-def test_build_multi_person_args_appends_seed_position_before_smooth():
-    persons = [PersonRunSpec(sequence_id="s", skeleton_id="k", config_id="c", person_id=0)]
+def test_build_multi_person_args_gives_each_seeded_subject_its_own_seed():
+    persons = [
+        PersonRunSpec(sequence_id="s0", skeleton_id="k", config_id="c", person_id=0),
+        PersonRunSpec(sequence_id="s1", skeleton_id="k", config_id="c", person_id=0,
+                      seed_position=(0.5, -1.0, 1.25)),
+        PersonRunSpec(sequence_id="s2", skeleton_id="k", config_id="c", person_id=0,
+                      seed_position=(2.0, 3.0, 4.0)),
+    ]
     args = _build_multi_person_args(
         Path("posetrak-tracker"), Path("session.db"), persons, Path("out"),
-        start_time=None, end_time=None, smooth=True, seed_position=(0.5, -1.0, 1.25),
+        start_time=None, end_time=None, smooth=True,
     )
 
-    i = args.index("--seed-position")
-    assert args[i + 1:i + 4] == ["0.5", "-1.0", "1.25"]
+    seeds = [args[i + 1:i + 5] for i, a in enumerate(args) if a == "--subject-seed"]
+    assert seeds == [["1", "0.5", "-1.0", "1.25"], ["2", "2.0", "3.0", "4.0"]]
     assert args[-1] == "--smooth"
 
 
-def test_build_multi_person_args_omits_seed_position_by_default():
+def test_build_multi_person_args_omits_seed_when_no_subject_has_one():
     persons = [PersonRunSpec(sequence_id="s", skeleton_id="k", config_id="c", person_id=0)]
     args = _build_multi_person_args(
         Path("posetrak-tracker"), Path("session.db"), persons, Path("out"),
         start_time=None, end_time=None, smooth=False,
     )
-    assert "--seed-position" not in args
+    assert "--subject-seed" not in args

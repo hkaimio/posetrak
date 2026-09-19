@@ -241,6 +241,20 @@ class Skeleton {
         return false;
     }
 
+    /// @brief Counts the markers that read an `unlabeled_points` input track.
+    /// @return The number of anonymous-dot markers; 0 when there are none.
+    int unlabeled_points_marker_count() const {
+        int count = 0;
+        for (auto const& m : markers_) {
+            if (m.track.empty())
+                continue;
+            InputTrack const* track = get_input_track(m.track);
+            if (track != nullptr && track->type == "unlabeled_points")
+                ++count;
+        }
+        return count;
+    }
+
     /// @brief Set joint limits
     /// @param joint_index Index of the joint
     /// @param limits Array of limit pairs [min, max] for each DOF

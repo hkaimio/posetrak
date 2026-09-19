@@ -30,6 +30,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -838,4 +839,77 @@ TEST_CASE("MultiPersonTracker --smooth: smoothed and filtered tracker_step rows 
         REQUIRE(filtered[i].first == smoothed[i].first);                   // same tracker_step
         REQUIRE(filtered[i].second == Catch::Approx(smoothed[i].second));  // same timestamp
     }
+}
+
+// ---------------------------------------------------------------------------
+// A subject whose only markers are anonymous dots cannot initialise from
+// observations. It needs a seed position, and a seed gives no orientation, so
+// a body with several dots is refused outright.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Replaces the fixture's skeleton with a bare root joint carrying `n_dots`
+// markers on an unlabeled_points track.
+void replace_fixture_skeleton_with_dots(fs::path const& db_path, int n_dots) {
+    std::ostringstream yaml;
+    yaml << "name: dots_only\nunits: meters\njoints:\n"
+         << "  - {name: root, type: root, parent: null, offset: [0, 0, 0]}\n"
+         << "input_tracks:\n  - {id: dots, type: unlabeled_points}\nmarkers:\n";
+    for (int i = 0; i < n_dots; ++i) {
+        yaml << "  - {name: d" << i << ", parent: root, offset: [" << 0.05 * i
+             << ", 0, 0], track: dots, landmark: d" << i << "}\n";
+    }
+    sqlite3* db = nullptr;
+    REQUIRE(sqlite3_open(db_path.string().c_str(), &db) == SQLITE_OK);
+    exec_sql(db, "DELETE FROM pose_observations");  // no labeled observations
+    // Sequences of marker bodies carry a keypoint manifest; the subject has none here.
+    exec_sql(db, R"(CREATE TABLE IF NOT EXISTS pose_sequence_keypoints (
+        sequence_id TEXT NOT NULL, keypoint_idx INTEGER NOT NULL, name TEXT NOT NULL,
+        source TEXT NOT NULL, PRIMARY KEY (sequence_id, keypoint_idx)))");
+    sqlite3_stmt* stmt = nullptr;
+    sqlite3_prepare_v2(db, "UPDATE skeletons SET yaml_content = ? WHERE id = 'skel1'", -1, &stmt,
+                       nullptr);
+    std::string const text = yaml.str();
+    sqlite3_bind_text(stmt, 1, text.c_str(), -1, SQLITE_STATIC);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+}
+
+std::string dots_only_build_error(int n_dots, std::optional<Eigen::Vector3d> seed) {
+    fs::path db_path = fs::temp_directory_path() / "posetrak_test_dots_only_init.db";
+    create_fixture_db(db_path, 12, 1.0 / 30.0);
+    replace_fixture_skeleton_with_dots(db_path, n_dots);
+
+    PersonSpec spec;
+    spec.sequence_id = "seq1";
+    spec.skeleton_id = "skel1";
+    spec.config_id = "tc1";
+    spec.output_dir = fs::temp_directory_path() / "posetrak_test_dots_only_init_out";
+    spec.seed_position = seed;
+    BuildPersonContextOptions opts;
+    opts.db_path = db_path.string();
+    opts.quiet = true;
+    try {
+        build_person_context(spec, opts, /*verbose=*/false);
+    } catch (std::runtime_error const& e) {
+        return e.what();
+    }
+    return {};
+}
+
+}  // namespace
+
+TEST_CASE("A dots-only subject without a seed position is refused",
+          "[multi_person_tracker][dot_assignment]") {
+    std::string const error = dots_only_build_error(1, std::nullopt);
+    CAPTURE(error);
+    REQUIRE(error.find("seed position") != std::string::npos);
+}
+
+TEST_CASE("A seed position does not make a multi-dot body without a coded marker initialisable",
+          "[multi_person_tracker][dot_assignment]") {
+    std::string const error = dots_only_build_error(3, Eigen::Vector3d(0.0, 0.0, 1.0));
+    CAPTURE(error);
+    REQUIRE(error.find("anonymous-dot markers") != std::string::npos);
 }

@@ -229,7 +229,7 @@ def run_tracker(binary: Path, db: Path, recipe: dict, out_dir: Path, log_path: P
     return proc.returncode, parse_tracker_output(text.replace("\r", "\n")), elapsed
 
 
-def run_joint_tracker(binary: Path, db: Path, recipes: list[dict], seed: list[float] | None,
+def run_joint_tracker(binary: Path, db: Path, recipes: list[dict],
                       window: tuple[float, float], out_dir: Path, log_path: Path) -> tuple[int, list[str], float]:
     """One tracker process over several subjects; returns exit code, run ids in subject order, seconds."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -237,8 +237,9 @@ def run_joint_tracker(binary: Path, db: Path, recipes: list[dict], seed: list[fl
     for r in recipes:
         args += ["--person", r["sequence"], r["skeleton"], r["config"], str(r["person_id"])]
     args += ["--start-time", str(window[0]), "--end-time", str(window[1]), "--smooth"]
-    if seed:
-        args += ["--seed-position", *[str(v) for v in seed]]
+    for index, r in enumerate(recipes):
+        if r.get("seed_position"):
+            args += ["--subject-seed", str(index), *[str(v) for v in r["seed_position"]]]
     started = time.time()
     proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace")
     elapsed = time.time() - started
@@ -327,26 +328,25 @@ def run_joint_case(case: dict, db: Path, binary: Path, work: Path) -> tuple[list
     tol = {**DEFAULT_TOLERANCE, **case.get("tolerance", {})}
     checks: list[tuple[str, bool, str]] = []
     conn = open_readonly(db)
-    recipes, seeds, subject_names = [], [], []
+    recipes, subject_names = [], []
     for subject in case["subjects"]:
         base = conn.execute("SELECT * FROM tracking_runs WHERE id LIKE ?", (subject["baseline_run"] + "%",)).fetchone()
         recipes.append({"sequence": base["observation_sequence_id"], "skeleton": base["skeleton_id"],
                         "config": base["tracker_config_id"], "person_id": 0,
-                        "start_time": window[0], "end_time": window[1], "smooth": True})
-        seeds.append(first_root_position(conn, base["id"]) if subject.get("seed_from_baseline") else None)
+                        "start_time": window[0], "end_time": window[1], "smooth": True,
+                        "seed_position": first_root_position(conn, base["id"]) if subject.get("seed_from_baseline") else None})
         subject_names.append(subject["name"])
     conn.close()
-    joint_seed = next((s for s in seeds if s), None)
 
     solo = {}
-    for subject, recipe, seed in zip(subject_names, recipes, seeds):
-        code, parsed, _ = run_tracker(binary, db, {**recipe, "seed_position": seed}, work / "out" / f"{name}-{subject}-solo",
+    for subject, recipe in zip(subject_names, recipes):
+        code, parsed, _ = run_tracker(binary, db, recipe, work / "out" / f"{name}-{subject}-solo",
                                       work / f"{name}-{subject}-solo.log")
         checks.append((f"solo run {subject}", code == 0 and bool(parsed.get("run_id")), f"exit {code}"))
         solo[subject] = parsed.get("run_id")
 
     def joint_and_checks(label: str, joint_recipes: list[dict]) -> list[str]:
-        code, run_ids, seconds = run_joint_tracker(binary, db, joint_recipes, joint_seed, window,
+        code, run_ids, seconds = run_joint_tracker(binary, db, joint_recipes, window,
                                                    work / "out" / f"{name}-{label}", work / f"{name}-{label}.log")
         ok = code == 0 and len(run_ids) == len(joint_recipes)
         checks.append((f"{label} run", ok, f"exit {code}, {len(run_ids)} runs in {seconds:.0f}s"))

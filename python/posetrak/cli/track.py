@@ -375,6 +375,7 @@ class ResolvedPerson:
     skeleton_id: str
     time_start_s: float
     time_end_s: float
+    seed_position: tuple[float, float, float] | None = None
 
 
 def resolve_trial_persons(
@@ -459,10 +460,12 @@ def resolve_trial_persons(
 
 
 def resolve_trial_objects(
-    conn: sqlite3.Connection, trial_id: str, specs: list[tuple[str, str]]
+    conn: sqlite3.Connection,
+    trial_id: str,
+    specs: list[tuple[str, str, tuple[float, float, float] | None]],
 ) -> list[ResolvedPerson]:
-    """Resolve ``(object name, skeleton id or prefix)`` pairs to what a
-    ``--person`` 4-tuple needs.
+    """Resolve ``(object name, skeleton id or prefix, seed position)`` triples
+    to what a ``--person`` 4-tuple needs.
 
     An object has no default skeleton the way a person does (a prop's
     tracking skeleton is generated from its marker body and imported
@@ -483,7 +486,7 @@ def resolve_trial_objects(
     capture_id = trial_row["capture_id"]
 
     resolved: list[ResolvedPerson] = []
-    for name, skeleton in specs:
+    for name, skeleton, seed in specs:
         object_row = conn.execute(
             "SELECT id FROM capture_objects WHERE capture_id = ? AND name = ?", (capture_id, name)
         ).fetchone()
@@ -511,6 +514,7 @@ def resolve_trial_objects(
             skeleton_id=skeleton_id,
             time_start_s=seq_rows[0]["time_start_s"],
             time_end_s=seq_rows[0]["time_end_s"],
+            seed_position=seed,
         ))
     return resolved
 
@@ -522,15 +526,12 @@ def resolve_trial_objects(
     help="Comma-separated capture_persons names to track together (e.g. Alice,Bob).",
 )
 @click.option(
-    "--objects", default="",
-    help="Comma-separated NAME=SKELETON pairs: capture_objects to track alongside "
-         "the persons, each with the ID (or prefix) of its tracking skeleton "
-         "(e.g. ball=1a2b3c4d).",
-)
-@click.option(
-    "--seed-position", type=(float, float, float), default=None,
-    help="Initial root position 'X Y Z' (metres) for the one dots-only object, "
-         "which cannot initialise from observations.",
+    "--object", "objects", multiple=True,
+    help="NAME=SKELETON[@X,Y,Z]: a capture object to track alongside the persons, "
+         "with the ID (or prefix) of its tracking skeleton and, optionally, an initial "
+         "root position in metres. An object whose only markers are anonymous dots "
+         "needs the position (e.g. ball=1a2b3c4d@0.0,-0.97,1.1). Repeat for several "
+         "objects.",
 )
 @click.option("--start-time", type=float, default=None,
               help="Start of the tracked range in seconds. Default: the latest start of the subjects' sequences.")
@@ -549,8 +550,7 @@ def cmd_run_persons(
     ctx: click.Context,
     trial_id: str,
     persons: str,
-    objects: str,
-    seed_position: tuple[float, float, float] | None,
+    objects: tuple[str, ...],
     start_time: float | None,
     end_time: float | None,
     base_config_id: str | None,
@@ -563,7 +563,7 @@ def cmd_run_persons(
     Higher-level alternative to 'track run': resolves each of --persons'
     comma-separated names against this trial's capture's capture_persons
     (see CapturePanel's Persons section) to a sequence/skeleton instead of
-    requiring the caller to already know them, and each --objects NAME=SKELETON
+    requiring the caller to already know them, and each --object NAME=SKELETON
     pair against the capture's capture_objects. All subjects are tracked
     together, and dots they share are assigned jointly, each dot to at most
     one subject. Additive to the existing --person 4-tuple mechanism
@@ -573,8 +573,8 @@ def cmd_run_persons(
     Example:
 
         posetrak -s session.db track run-persons \\
-            --trial <trial-id> --persons Alice --objects ball=<skeleton-id> \\
-            --seed-position 0.0 -0.97 1.1
+            --trial <trial-id> --persons Alice \\
+            --object ball=<skeleton-id>@0.0,-0.97,1.1
     """
     session_path: str | None = ctx.obj.get("session")
     if session_path is None:
@@ -591,16 +591,22 @@ def cmd_run_persons(
         fail(str(exc))
 
     names = [n.strip() for n in persons.split(",") if n.strip()]
-    object_specs: list[tuple[str, str]] = []
-    for item in objects.split(","):
-        if not item.strip():
-            continue
-        name, sep, skeleton = item.partition("=")
+    object_specs: list[tuple[str, str, tuple[float, float, float] | None]] = []
+    for item in objects:
+        name, sep, rest = item.partition("=")
+        skeleton, at, position = rest.partition("@")
+        seed = None
+        if at:
+            try:
+                x, y, z = (float(v) for v in position.split(","))
+                seed = (x, y, z)
+            except ValueError:
+                fail(f"--object position must be X,Y,Z in metres, got {position!r}.")
         if not sep or not name.strip() or not skeleton.strip():
-            fail(f"--objects expects NAME=SKELETON pairs, got {item.strip()!r}.")
-        object_specs.append((name.strip(), skeleton.strip()))
+            fail(f"--object expects NAME=SKELETON[@X,Y,Z], got {item.strip()!r}.")
+        object_specs.append((name.strip(), skeleton.strip(), seed))
     if not names and not object_specs:
-        fail("List at least one subject in --persons or --objects.")
+        fail("List at least one subject in --persons or --object.")
 
     try:
         resolved = resolve_trial_persons(conn, trial_id, names) if names else []
@@ -648,7 +654,7 @@ def cmd_run_persons(
         )
 
     person_specs = [
-        PersonRunSpec(r.sequence_id, r.skeleton_id, config_id, 0) for r in resolved
+        PersonRunSpec(r.sequence_id, r.skeleton_id, config_id, 0, r.seed_position) for r in resolved
     ]
 
     click.echo(f"Trial:      {trial_id}", err=True)
@@ -667,7 +673,6 @@ def cmd_run_persons(
         start_time=range_start,
         end_time=range_end,
         smooth=not no_smooth,
-        seed_position=seed_position,
         on_progress=lambda line: click.echo(line, err=True),
     )
 

@@ -427,15 +427,28 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
     double const search_end = std::min(end_time, start_time + kInitSearchWindowS);
     double init_timestamp = start_time;
     bool initialized = false;
-    bool const subject_is_dots_only = ctx->has_dot_track && ctx->observations.empty();
-    ctx->initialized_from_seed = opts.seed_position.has_value() &&
-                                 (!opts.seed_only_dots_only_subjects || subject_is_dots_only);
-    if (ctx->initialized_from_seed) {
-        // See BuildPersonContextOptions::seed_position's own doc comment --
-        // an anonymous-dot-only rigid body has no observation-based cold
-        // start at all, so skip the search loop entirely.
+    // A subject with only anonymous dots has no labeled observations to
+    // initialise from (PersonSpec::seed_position explains why).
+    if (ctx->has_dot_track && ctx->observations.empty()) {
+        if (ctx->skeleton.unlabeled_points_marker_count() > 1) {
+            throw std::runtime_error(fmt::format(
+                "Subject '{}' has {} anonymous-dot markers and no coded marker: initialising a "
+                "body from several dots needs its position and orientation, and a seed gives "
+                "only position. Not supported yet; add a coded (ArUco) marker to the body.",
+                spec.skeleton_id, ctx->skeleton.unlabeled_points_marker_count()));
+        }
+        if (!spec.seed_position.has_value()) {
+            throw std::runtime_error(fmt::format(
+                "Subject '{}' has only anonymous-dot markers and cannot initialise from "
+                "observations: give it a seed position (--seed-position X Y Z for a single "
+                "subject, --subject-seed INDEX X Y Z when tracking several).",
+                spec.skeleton_id));
+        }
+    }
+    if (spec.seed_position.has_value()) {
+        // Skip the observation-based search loop entirely.
         int num_dof = ctx->skeleton.total_dof_count();
-        State seed_state(*opts.seed_position, Eigen::Quaterniond::Identity(),
+        State seed_state(*spec.seed_position, Eigen::Quaterniond::Identity(),
                          Eigen::VectorXd::Zero(num_dof), Eigen::Vector3d::Zero(),
                          Eigen::Vector3d::Zero(), Eigen::VectorXd::Zero(num_dof));
         ctx->tracker->initialize_from_state(seed_state, start_time);
@@ -445,7 +458,7 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
             fmt::print(
                 "  Initialized from externally-supplied seed position ({:.3f}, {:.3f}, "
                 "{:.3f}) at t={:.3f}s\n",
-                opts.seed_position->x(), opts.seed_position->y(), opts.seed_position->z(),
+                spec.seed_position->x(), spec.seed_position->y(), spec.seed_position->z(),
                 start_time);
         }
     } else {
@@ -1180,31 +1193,11 @@ std::vector<Observation> build_cross_person_anchors(
 MultiPersonTracker::MultiPersonTracker(std::vector<PersonSpec> const& specs,
                                        BuildPersonContextOptions const& opts, bool verbose)
     : opts_(opts), verbose_(verbose) {
-    // With several subjects a seed is meant for the subject that cannot
-    // initialise from observations, not for everyone.
-    opts_.seed_only_dots_only_subjects = specs.size() > 1;
     if (specs.size() > 64)
         throw std::runtime_error("At most 64 subjects can be tracked together");
     persons_.reserve(specs.size());
     for (auto const& spec : specs) {
         persons_.push_back(build_person_context(spec, opts_, verbose_));
-    }
-
-    if (opts_.seed_position.has_value() && specs.size() > 1) {
-        size_t seeded = 0;
-        for (auto const& ctx : persons_)
-            seeded += ctx->initialized_from_seed ? 1 : 0;
-        if (seeded == 0) {
-            throw std::runtime_error(
-                "--seed-position was given, but none of the subjects is dots-only: every "
-                "subject initialises from its own observations");
-        }
-        if (seeded > 1) {
-            throw std::runtime_error(fmt::format(
-                "--seed-position was given, but {} subjects are dots-only and one seed cannot "
-                "serve them all",
-                seeded));
-        }
     }
 
     // The shared dot assignment takes its settings from one config, so

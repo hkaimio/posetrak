@@ -264,7 +264,7 @@ class Tracker {
 
     /**
      * @brief Same query as predict_dot_slot_predictions(), batched across
-     * every requested camera in one call (2026-09-13 perf fix).
+     * every requested camera in one call.
      *
      * For an articulated skeleton, calling predict_dot_slot_predictions()
      * once per camera repeats sigma-point generation and the per-sigma-point
@@ -594,7 +594,7 @@ class Tracker {
     // Populated at the end of each successful track_frame() call.
     std::unordered_map<int, std::unordered_map<int, Eigen::Vector2d>> prev_observations_;
 
-    // Previous-frame resolved dot tracklet_id per camera and marker (2026-09-06 Phase B) --
+    // Previous-frame resolved dot tracklet_id per camera and marker --
     // same population point/lifetime as prev_observations_ just above, see
     // prev_dot_tracklet_ids()'s own doc comment for what consumes this.
     std::unordered_map<int, std::unordered_map<int, int>> prev_dot_tracklet_ids_;

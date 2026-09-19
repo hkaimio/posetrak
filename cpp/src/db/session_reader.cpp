@@ -768,7 +768,7 @@ ObservationSet SessionReader::load_observations(
     }
 
     // Step 2.1: Build manifest keypoint-slot → skeleton marker index map
-    // (marker-mocap design §4.3/§5.1, §7.1 sub-phase 1f). A sequence with no
+    // (marker-mocap design §4.3/§5.1). A sequence with no
     // pose_sequence_keypoints rows (every existing person sequence) leaves
     // this empty -- "behaves exactly as today" (design §5.1). landmark_to_marker_idx
     // keys off Marker::landmark (the name a manifest row is matched against),
@@ -1027,12 +1027,12 @@ ObservationSet SessionReader::load_observations(
         // recognized overlay (hand_l/hand_r or their .refined variants) --
         // rather than hardcoding the literal name 'body'. A person group's
         // base row is always named 'body'; a marker-based-mocap object
-        // sequence's is always 'markers' (design doc §7.1 sub-phase 1f) and
+        // sequence's is always 'markers' and
         // never carries hand overlays at all -- in both cases there is at
         // most one non-overlay row per group, so this is unambiguous and,
         // for today's person-only data, behaves identically to the literal
-        // 'body' check it replaces. See status.md's 2026-08-30 note on the
-        // Python-side mirror of this same bug (observation_merge.py).
+        // 'body' check it replaces. observation_merge.py has the Python-side
+        // equivalent.
         SourceRow const* body_row = nullptr;
         for (auto const& r : group_rows) {
             auto [row_base_source, row_is_refined] = split_source(r.source);
@@ -1279,7 +1279,7 @@ ObservationSet SessionReader::load_observations(
 
     // Step 5: Build ObservationSet — throw a diagnostic error if nothing came through.
     // Exception: a skeleton with no labeled (coco_id / non-unlabeled_points-track)
-    // marker at all -- e.g. the ball (2026-09-16): a single unlabeled_points marker,
+    // marker at all -- e.g. a ball: a single unlabeled_points marker,
     // nothing else -- can *never* produce a labeled Observation here by construction
     // (this function's own query excludes source='dots' outright; anonymous dot
     // candidates are load_unlabeled_candidates()'s job, called separately by the

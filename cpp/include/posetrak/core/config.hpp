@@ -60,11 +60,11 @@ struct TrackerConfig {
     double dot_assignment_gate_mahalanobis = 9.21;  ///< Chi-squared threshold (99% for 2-DOF)
 
     /// @brief Divides a candidate-to-slot pairing's squared-Mahalanobis cost when the
-    /// candidate's own tracklet_id (dot_tracklet.DotTrackletLinker) matches the
+    /// candidate's own tracklet_id (dot_tracklet.MotionGatedLinker) matches the
     /// tracklet that resolved into that exact (subject, camera, marker) slot *last*
     /// frame -- see dot_assignment.hpp's own doc comment on resolve_dot_assignment()'s
     /// matching parameter for the full mechanism. Real data from a fast-swing capture
-    /// (status.md's 2026-09-06 Phase B entry) found only ~4-6% of raw candidates
+    /// found only ~4-6% of raw candidates
     /// survive dot_assignment_gate_mahalanobis unmodified during fast motion, with
     /// zero rejected at the later outlier_threshold check -- the attrition is
     /// entirely here, which is what this exists to relax, but only for a pairing with
@@ -112,15 +112,14 @@ struct TrackerConfig {
     double process_noise_vel_gain_root = 0.0;   ///< Velocity gain for root DOFs
     double process_noise_vel_ref_root = 1.0;    ///< Reference velocity for root DOFs (m/s, rad/s)
     /// Cap on the per-DOF variance-domain multiplier `(1 + gain*|v|/ref)^2` applied by
-    /// both the joint and root velocity gains above. Was a hardcoded UKF constant
-    /// (kMaxVelocityNoiseMultiplier = 10.0) until a real capture showed it binding: a
-    /// sword-swing capture's root angular velocity exceeded the gain=4/ref_root=2
-    /// saturation point (~1.08 rad/s) for a third of the whole run, including 100% of
-    /// a known bad-tracking window -- the mechanism meant to widen the dot-assignment
-    /// gate during fast motion couldn't widen any further right when it mattered most.
-    /// Exposed as a config field (rather than just editing the constant) so this can be
-    /// tuned/swept per capture instead of requiring a rebuild each time. 10.0 keeps
-    /// every existing config's behavior unchanged.
+    /// both the joint and root velocity gains above. A config field, not a fixed
+    /// constant, because it can bind: on a sword-swing capture the root angular
+    /// velocity exceeded the gain=4/ref_root=2 saturation point (~1.08 rad/s) for a
+    /// third of the whole run, including 100% of a known bad-tracking window, so the
+    /// mechanism meant to widen the dot-assignment gate during fast motion couldn't
+    /// widen any further right when it mattered most. Being a field lets it be
+    /// tuned/swept per capture without a rebuild. 10.0 (the original fixed value)
+    /// keeps every existing config's behavior unchanged.
     double process_noise_vel_max_multiplier = 10.0;
     /// Literal joint names (e.g. "spine1", "thigh.L") the joint gain applies to.
     /// Empty (default) = all joints. Added after finding a body-wide gain
@@ -264,8 +263,7 @@ struct TrackerConfig {
         0.0001;  ///< σ for prismatic DOFs in calibration mode (m/√s)
 
     // === Per-marker confidence-threshold override (experimental, not yet DB/TOML-committed) ===
-    // See docs/roadmap/features/marker-based-mocap/status.md, 2026-09-14
-    // "confidence-vs-head-orientation" entry: ViTPose's raw confidence for
+    // ViTPose's raw confidence for
     // nose/ear.L/ear.R stays elevated enough to pass the normal
     // min_confidence gate even when the marker is on the occluded back side
     // of the head, because occlusion only *lowers* confidence, it doesn't
@@ -373,7 +371,7 @@ struct TrackerAppConfig {
     /// observation coverage to initialize, when the window at start_time
     /// itself doesn't have it. Real multi-camera captures with sparse,
     /// independently-timed per-camera detections (marker-based-mocap
-    /// objects especially -- see marker-mocap-design.md status.md) commonly
+    /// objects especially) commonly
     /// have no valid init window at exactly start_time; without a search,
     /// initialize() fails there and the CLI either falls back to a rest
     /// pose (meaningless for a free-floating rigid prop -- see

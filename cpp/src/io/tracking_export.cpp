@@ -237,7 +237,7 @@ void TrackingExporter::write_frame(
                 // observation.hpp's own MeasurementMode doc comment) -- comparing
                 // it against an absolute projection unconditionally, the way this
                 // loop used to, produces a physically meaningless "error" for
-                // anything but POSITION (confirmed on real data, 2026-09-14:
+                // anything but POSITION (seen on real data:
                 // 1800-2600px "errors" for every PAIR_DIFF-tracked marker --
                 // wrist/ankle/heel/toe/elbow/knee/fingers -- the exact
                 // mode-ambiguity bug class observation-results-semantics.md

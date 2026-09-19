@@ -1972,16 +1972,13 @@ UnscentedKalmanFilter::predict_marker_slots(std::vector<int> const& marker_ids, 
     // one observations list here means that FK cost is paid once per sigma
     // point total, not once per sigma point *per marker* -- see this
     // method's own doc comment (ukf.hpp) for the ~16x reduction this gave
-    // on the 2026-09-06 kare-tests capture.
+    // on a 16-marker, 6-camera capture.
     //
-    // Parallelized across sigma points (2026-09-13, Harri's own question
-    // prompted checking this): update()'s own equivalent loop (Step 2
-    // above) already does this via the same data_pool_/ensure_data_pool()
-    // machinery -- this loop hadn't been given the same treatment, and
-    // profiling (status.md 2026-09-13) found it costing ~49ms/frame
-    // sequential vs. update()'s ~2.8ms/frame for comparable per-sigma-
-    // point FK+projection work, consistent with running on one core
-    // instead of all of them.
+    // Parallelized across sigma points, like update()'s equivalent loop
+    // (Step 2 above), via the same data_pool_/ensure_data_pool() machinery.
+    // Run sequentially it cost ~49ms/frame against update()'s ~2.8ms/frame
+    // for comparable per-sigma-point FK+projection work, consistent with
+    // using one core instead of all of them.
     auto const t_loop0 = Clock::now();
     Eigen::MatrixXd proj(2 * n_mrk, n_sigma);
     ensure_data_pool(fk);

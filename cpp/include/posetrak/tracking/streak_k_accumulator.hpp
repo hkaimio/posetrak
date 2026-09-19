@@ -14,7 +14,7 @@
  * own speed (the velocity term cancels out of streak_length/frame_displacement),
  * so a real per-camera constant estimated from any resolved motion is
  * exactly what a stable estimate should look like -- see the design doc's
- * real validation numbers (2026-09-05).
+ * validation numbers (streak-velocity-design.md).
  *
  * Deliberately plain data with no Tracker/skeleton/camera access of its own
  * (same "pure core, directly testable" split this codebase already uses for

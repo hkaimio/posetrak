@@ -508,8 +508,7 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
                 fmt::print("  Initializing from first-frame observations via IK...\n");
             }
             // Real multi-camera captures have sparse, independently-timed per-camera
-            // detections (a marker-based-mocap object especially -- see
-            // marker-mocap-design.md status.md's 2026-08-30 entry), so the exact window
+            // detections (a marker-based-mocap object especially), so the exact window
             // at start_time commonly has no valid init coverage even though a window a
             // second or two later does. Search forward rather than trying start_time once.
             double const search_end =

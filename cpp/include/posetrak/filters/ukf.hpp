@@ -527,11 +527,11 @@ class UnscentedKalmanFilter {
      * than one marker at a time: predict_measurements() runs a full FK
      * pass over the *entire* skeleton regardless of how many observations
      * are in its list, so that cost depends only on n_sigma, not on how
-     * many markers are asked about. A first version called this once per
-     * marker (16 dot slots x 6 cameras = 96 calls/frame, each repeating
+     * many markers are asked about. Calling this once per marker would
+     * cost 16 dot slots x 6 cameras = 96 calls/frame, each repeating
      * ~437 sigma points' worth of full-skeleton FK -- ~42k FK evaluations/
-     * frame, measured at ~1.2 tracked-fps on the 2026-09-06 kare-tests
-     * capture). Batching every marker needing this camera into one
+     * frame, measured at ~1.2 tracked-fps on a 16-marker, 6-camera
+     * capture. Batching every marker needing this camera into one
      * observations list cuts that to ~437 FK evaluations per camera per
      * frame, shared across every marker in the batch -- a ~16x reduction
      * for this capture's marker count, with identical per-marker results.
@@ -575,9 +575,8 @@ class UnscentedKalmanFilter {
 
     /**
      * @brief Same computation as predict_marker_slots(), batched across
-     * every requested camera too (2026-09-13 perf fix, prompted by Harri's
-     * own question: "if we rerun FK unnecessarily [per camera] that sounds
-     * like a self-evident optimization").
+     * every requested camera too, since neither sigma-point generation nor
+     * the FK sweep depends on the camera.
      *
      * predict_measurements() runs one full-skeleton FK pass per sigma
      * point regardless of how many observations -- or which cameras --
@@ -587,9 +586,9 @@ class UnscentedKalmanFilter {
      * per sigma point; this batches every (marker, camera) pair the caller
      * needs into that same single call, so sigma-point generation and the
      * FK sweep each run once per frame instead of once per camera.
-     * Measured on the 2026-09-06 kare-tests capture: with sigma generation
-     * and the per-sigma-point loop already parallelized (this file's own
-     * earlier 2026-09-13 fix), sigma generation was 61.7% of
+     * Measured on a 16-marker, 6-camera capture: with sigma generation
+     * and the per-sigma-point loop already parallelized, sigma generation
+     * was 61.7% of
      * predict_marker_slots()'s own cost and ran identically 6 times a
      * frame (once per camera) from the same state/covariance -- this
      * removes that redundancy.

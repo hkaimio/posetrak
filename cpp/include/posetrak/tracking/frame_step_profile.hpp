@@ -11,9 +11,9 @@ namespace posetrak::frame_step_profile {
 /// tracking step that sit *outside* Tracker::predict_step()/update_step()
 /// (already covered by TrackingResult's own predict_ms/update_ms) and
 /// outside UnscentedKalmanFilter::predict_marker_slots[_all_cameras]()
-/// (covered by dot_predict_profile) -- added 2026-09-13 after reconciling
-/// the two against real observed frame time found ~64ms/frame (about a
-/// third of the whole per-frame budget) unaccounted for by either.
+/// (covered by dot_predict_profile) -- added because reconciling the two
+/// against real observed frame time left ~64ms/frame (about a third of the
+/// whole per-frame budget) unaccounted for by either.
 ///
 /// Disabled by default (one bool check) -- enable by setting the
 /// POSETRAK_PROFILE_FRAME_STEP environment variable. Not thread-safe: fine

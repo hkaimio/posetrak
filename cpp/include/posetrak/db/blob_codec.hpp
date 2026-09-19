@@ -102,7 +102,7 @@ struct DotCandidate {
                                ///< `_streak_direction()`) since a blur streak has no
                                ///< forward/backward sense -- (0, 0) for a round dot.
     float tracklet_id{-1.0F};  ///< Per-camera frame-to-frame identity from
-                               ///< dot_tracklet.DotTrackletLinker (2026-09-06)
+                               ///< dot_tracklet.MotionGatedLinker
                                ///< -- resolve_dot_assignment() uses this to
                                ///< relax its own gate for a candidate
                                ///< continuing an already-established track.
@@ -143,7 +143,7 @@ inline std::vector<DotCandidate> decode_dot_candidates(void const* data, int byt
     if (n < 0 || expected_bytes != byte_count) {
         throw std::runtime_error(
             "decode_dot_candidates: malformed blob, or written in an older "
-            "(pre-2026-09-06) format (header says " +
+            "format (header says " +
             std::to_string(n) + " candidates, " + std::to_string(expected_bytes) +
             " bytes expected, got " + std::to_string(byte_count) + ") -- re-run detection");
     }

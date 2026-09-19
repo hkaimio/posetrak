@@ -60,7 +60,7 @@ struct Observation {
     /// -- mahalanobis_distance is still computed and recorded for diagnostics either way.
     bool force_inlier = false;
     /// Per-camera frame-to-frame identity from an anonymous dot candidate's own
-    /// tracklet_id (dot_tracklet.DotTrackletLinker, resolve_dot_assignment() in
+    /// tracklet_id (dot_tracklet.MotionGatedLinker, resolve_dot_assignment() in
     /// dot_assignment.cpp) -- -1 (default) for any Observation not built from an
     /// anonymous dot candidate. Stashed here so Tracker::update_step() can record
     /// it into prev_dot_tracklet_ids_ the same way it already records

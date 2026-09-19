@@ -104,7 +104,7 @@ struct BuildPersonContextOptions {
     bool smooth_output = false;
     bool quiet = true;
     /// @brief Externally-supplied initial root position, bypassing the normal
-    /// observation-based init search entirely (2026-09-15: single-subject
+    /// observation-based init search entirely (a single-subject
     /// escape hatch, not general multi-person functionality -- shared across
     /// every person in a --person run, so only meaningful for a one-subject
     /// invocation). A rigid body whose only markers are `unlabeled_points`-
@@ -164,11 +164,8 @@ struct PersonContext {
     /// timestamp (non-decreasing) per camera, since that reader's own query
     /// is `ORDER BY camera_instance_id, video_frame`. bucket_candidates_by_
     /// camera() binary-searches this per step instead of scanning the flat
-    /// list above (2026-09-13 perf fix, the same one
-    /// ObservationSequence::get_in_range() got the same day for
-    /// *observations* -- this field's previous doc comment described
-    /// mirroring that function's now-fixed linear-scan design; it mirrors
-    /// the fix too).
+    /// list above (the same binary-search treatment
+    /// ObservationSequence::get_in_range() uses for *observations*).
     std::unordered_map<int, std::vector<UnlabeledCandidate>> unlabeled_candidates_by_camera;
 
     std::shared_ptr<const SkeletonLayout> layout;
@@ -269,7 +266,7 @@ std::pair<double, double> person_context_step_window(PersonContext const& ctx, i
 /// @brief Filters PersonContext::unlabeled_candidates_by_camera down to
 /// candidates whose timestamp falls in [t_start, t_end) -- the shape
 /// resolve_shared_dot_assignment() needs as input. Binary-searches each
-/// camera's own vector (2026-09-13 perf fix) rather than scanning it,
+/// camera's own vector rather than scanning it,
 /// relying on unlabeled_candidates_by_camera's own documented sorted-by-
 /// timestamp invariant.
 /// @param candidates_by_camera PersonContext::unlabeled_candidates_by_camera

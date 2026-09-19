@@ -285,7 +285,7 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
     // A dots-track skeleton (has_dot_track) can legitimately have zero labeled
     // observations here by construction -- load_observations() itself already
     // makes the same exception for a skeleton with no labeled marker at all
-    // (2026-09-16, the ball: a single unlabeled_points marker, nothing else).
+    // (e.g. a ball: a single unlabeled_points marker, nothing else).
     // Its real data comes from load_unlabeled_candidates() just below, not here.
     if (ctx->observations.empty() && !ctx->has_dot_track) {
         throw std::runtime_error("No observations found in sequence");
@@ -305,8 +305,8 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
         if (!quiet) {
             fmt::print("  Loaded {} unlabeled dot candidates\n", ctx->unlabeled_candidates.size());
         }
-        // Split by camera once here rather than per step (2026-09-13 perf
-        // fix) -- load_unlabeled_candidates()'s own query is ORDER BY
+        // Split by camera once here rather than per step --
+        // load_unlabeled_candidates()'s own query is ORDER BY
         // camera_instance_id, video_frame, so each camera's slice below
         // comes out already sorted by timestamp, which
         // bucket_candidates_by_camera() relies on for its own binary
@@ -419,7 +419,7 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
     // coverage for triangulation to actually succeed, and an explicit --start-time
     // override skips it entirely. Real multi-camera captures have sparse,
     // independently-timed per-camera detections (a marker-based-mocap object
-    // especially -- see marker-mocap-design.md status.md's 2026-08-30 entry), so
+    // especially), so
     // search forward across a window rather than trying start_time once.
     constexpr double kInitSearchWindowS = 2.0;  // TODO: promote to a TrackerConfig field
     // if per-capture tuning turns out to matter (mirrors TrackerAppConfig's TOML-path

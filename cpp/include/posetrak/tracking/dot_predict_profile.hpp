@@ -8,11 +8,10 @@ namespace posetrak::dot_predict_profile {
 
 /// @file dot_predict_profile.hpp
 /// Opt-in, lightweight wall-time accounting for
-/// UnscentedKalmanFilter::predict_marker_slots() -- added 2026-09-13 to
-/// answer a real, previously unmeasured question (marker-based-mocap
-/// productization plan's own flagged "important open question"): with a
-/// 16-marker leg module, tracked-fps dropped from ~10 (markerless) to
-/// ~4-5 even after the 2026-09-12 per-camera batching fix. Splits
+/// UnscentedKalmanFilter::predict_marker_slots() -- added to answer where
+/// the time goes when dots are tracked: with a 16-marker leg module,
+/// tracked-fps dropped from ~10 (markerless) to ~4-5 even with per-camera
+/// batching. Splits
 /// predict_marker_slots()'s own cost into sigma-point generation, the
 /// per-sigma-point predict_measurements() loop (forward kinematics +
 /// camera projection combined -- not split further here, since that

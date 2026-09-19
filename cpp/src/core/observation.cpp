@@ -46,9 +46,9 @@ Observation Observation::from_json(nlohmann::json const& j) {
 // ObservationSequence implementation
 
 std::vector<Observation> ObservationSequence::get_in_range(double t_start, double t_end) const {
-    // Binary search, not a linear scan (2026-09-13 perf fix -- found via
-    // frame_step_profile, status.md: 33.9 ms/frame, 18.5% of the whole
-    // per-frame budget, just to fetch one frame's real observations).
+    // Binary search, not a linear scan: a linear scan cost ~34 ms/frame
+    // (18.5% of the whole per-frame budget, per frame_step_profile) just to
+    // fetch one frame's real observations.
     // Relies on `observations` being sorted by timestamp (non-decreasing --
     // several observations from the same frame legitimately share one
     // timestamp), which every populating path already guarantees: the DB

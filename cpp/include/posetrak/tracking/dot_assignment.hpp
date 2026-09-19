@@ -67,7 +67,7 @@ using PrevDotPositions =
 
 /// @brief This frame's previous-frame resolved dot tracklet ids, keyed
 /// subject_id -> camera_id -> marker_id -> tracklet_id (db::DotCandidate::
-/// tracklet_id, dot_tracklet.DotTrackletLinker) -- same shape and same
+/// tracklet_id, dot_tracklet.MotionGatedLinker) -- same shape and same
 /// stale-until-overwritten lifetime as PrevDotPositions above (gathered
 /// from one subject's own Tracker::prev_dot_tracklet_ids() per subject_id).
 /// Used by the gate-relaxation mechanism below: a candidate whose own
@@ -161,7 +161,7 @@ struct SubjectDotPredictions {
 ///        assignment() always passes a Tracker-owned one so it actually
 ///        accumulates across frames the way the design intends.
 /// @param dot_tracklet_gate_multiplier Cost-matrix gate relaxation
-///        (TrackerConfig::dot_tracklet_gate_multiplier, 2026-09-06): when a
+///        (TrackerConfig::dot_tracklet_gate_multiplier): when a
 ///        candidate's own tracklet_id matches *prev_tracklet_ids*'s entry for
 ///        the (subject, camera, marker) slot being costed, that pair's squared
 ///        Mahalanobis cost is divided by this before the gate check -- the
@@ -169,11 +169,10 @@ struct SubjectDotPredictions {
 ///        passed into solve_assignment(); this instead makes one specific
 ///        pairing's own cost cheaper, which is functionally the same as
 ///        loosening the gate but only for a pairing with independent identity
-///        evidence behind it, not universally (status.md's 2026-09-06 Phase B
-///        entry: real data showed only ~4-6% of raw candidates during a fast
-///        swing survive the plain gate, with zero rejected at the later UKF
-///        outlier check -- the attrition is entirely here). 1.0 (default) is
-///        a no-op divide, so every existing caller/test is unaffected.
+///        evidence behind it, not universally (real data showed only ~4-6% of raw candidates during
+///        a fast swing survive the plain gate, with zero rejected at the later UKF outlier check --
+///        the attrition is entirely here). 1.0 (default) is a no-op divide, so every existing
+///        caller/test is unaffected.
 /// @param prev_tracklet_ids This frame's previous-frame resolved tracklet ids,
 ///        gathered by the caller (see resolve_shared_dot_assignment()). Empty
 ///        (the default) is correct whenever dot_tracklet_gate_multiplier is

@@ -114,7 +114,7 @@ bool Tracker::initialize(std::vector<Observation> const& observations, double ti
     // solve for beyond its 6-DOF root: triangulation + full IK is overkill
     // and can fall into a local minimum for this degenerate case. Closed-form
     // rigid-body fit instead (algorithms doc §4.2). Checked before the
-    // generic <3-marker gate below (2026-09-15): a single free-floating
+    // generic <3-marker gate below: a single free-floating
     // point body (e.g. a fully-reflective ball with no distinguishing
     // geometry -- see initialize_rigid_body()'s own single-marker branch)
     // has exactly one marker, ever, and would otherwise never pass it.
@@ -410,7 +410,7 @@ bool Tracker::initialize_rigid_body(std::map<std::string, Eigen::Vector3d> const
         body_local.push_back(it->second);
         world_pts.push_back(world_pos);
     }
-    // A single free-floating marker (2026-09-15: a fully-reflective ball,
+    // A single free-floating marker (e.g. a fully-reflective ball,
     // no coded pattern or second marker to fix orientation against) has no
     // relative geometry for Kabsch/Umeyama to fit at all -- rotation about
     // any axis through the one point is equally consistent with the single
@@ -970,20 +970,17 @@ Tracker::predict_dot_slot_predictions(int camera_id) const {
             }
         }
     } else {
-        // General/articulated (§6, built 2026-09-12 -- the precondition the
-        // design doc deferred this on, "no articulated capture with dot
-        // augmentation exists yet to design or test against", is now met):
+        // General/articulated (design §6):
         // UnscentedKalmanFilter::predict_marker_slots() reuses the same
         // sigma-point machinery predict()/update() already run for labeled
         // observations, real FK per sigma point rather than a closed form --
         // additive on top of the rigid path above, not a rewrite of it.
         //
-        // Batched across every dot-track marker on this camera in one call
-        // (2026-09-12 perf fix): a first version called the single-marker
-        // predecessor once per marker here, each repeating a full-skeleton
-        // FK pass per sigma point -- 16 markers x 6 cameras x ~437 sigma
-        // points measured at ~1.2 tracked-fps on the kare-tests capture (a
-        // 2.6-hour run for a 97s capture). predict_marker_slots() runs that
+        // Batched across every dot-track marker on this camera in one call:
+        // calling the single-marker variant once per marker repeats a
+        // full-skeleton FK pass per sigma point -- 16 markers x 6 cameras x
+        // ~437 sigma points measured ~1.2 tracked-fps (a 2.6-hour run for a
+        // 97s capture). predict_marker_slots() runs that
         // FK pass once per sigma point *total*, shared across every marker
         // in the batch, since predict_measurements() below the surface
         // never depended on how many observations it was asked to project.
@@ -1183,7 +1180,7 @@ TrackingResult Tracker::update_step(std::vector<Observation> const& observations
     if (!result.tracking_lost) {
         last_timestamp_ = timestamp;
         ++frame_count_;
-        // Store raw pixel positions for next frame's velocity-mode annotation, and (2026-09-06)
+        // Store raw pixel positions for next frame's velocity-mode annotation, and
         // each observation's own tracklet_id (-1, a no-op, for anything not built from an
         // anonymous dot candidate) for the next frame's tracklet gate-relaxation lookup.
         for (Observation const& obs : observations) {

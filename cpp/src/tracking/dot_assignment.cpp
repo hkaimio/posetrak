@@ -60,7 +60,7 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
                 Eigen::Vector2d const diff = cand_pos - pred.position;
                 double mahal_sq = diff.transpose() * pred.covariance.inverse() * diff;
 
-                // Tracklet gate relaxation (2026-09-06, see dot_assignment.hpp's own doc
+                // Tracklet gate relaxation (see dot_assignment.hpp's own doc
                 // comment on this parameter): a candidate continuing the same tracklet that
                 // resolved into this exact (subject, camera, marker) slot last frame gets
                 // this one pairing's own cost divided down, rather than touching the shared
@@ -112,9 +112,9 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
             // during the exposure. A first cut, not yet modeling *direction*
             // -- the real uncertainty is larger along the blur than across
             // it, but Observation::measurement_noise_std() is a single
-            // scalar; logged as a design gap in status.md's 2026-09-04
-            // entry alongside the future velocity-from-streak and
-            // blinking-LED sub-frame-timing ideas it also records. Treats
+            // scalar (a known gap; streak-velocity-design.md covers the
+            // velocity-from-streak and blinking-LED sub-frame-timing ideas).
+            // Treats
             // the elongation beyond the round-dot footprint as spread
             // uniformly over the exposure window (stddev = width/sqrt(12)).
             // Left at 0.0 (the default -- normal formula applies) for a
@@ -209,7 +209,7 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     for (auto const& subject : subjects) {
         SubjectDotPredictions sp;
         sp.subject_id = subject.subject_id;
-        // Batched across every camera in one call (2026-09-13 perf fix):
+        // Batched across every camera in one call:
         // calling predict_dot_slot_predictions() once per camera repeated
         // sigma-point generation and the per-sigma-point FK sweep once per
         // camera, even though neither depends on camera_id at all -- see

@@ -23,10 +23,10 @@ predict_rigid_marker(Eigen::Vector3d const& local_pos, Eigen::Vector3d const& ro
     // is far more likely to actually be the marker on the *near* face,
     // which real production data confirms happens: dot assignment
     // repeatedly matched a real near-face dot's detection to a far-face
-    // slot's prediction (status.md's 2026-09-05 entry). >= 0 (not a
+    // slot's prediction. >= 0 (not a
     // stricter margin) since the two tags' calibrated normals aren't
-    // perfectly antiparallel in practice -- see that same entry for the
-    // real numbers -- and a small margin would risk culling a marker
+    // perfectly antiparallel in practice, and a small margin would risk
+    // culling a marker
     // that's genuinely still visible near-edge-on.
     if (local_normal.has_value()) {
         Eigen::Vector3d const world_normal = R * (*local_normal);

@@ -41,7 +41,7 @@ The document answers three questions:
 | Detection (Python) | `dot_blob_detector.py` (round + streak, subtract/blacklist background, chroma filter), `dot_tracklet.py` (`MotionGatedLinker`), `marker_pipeline.py` (ArUco + dots per camera, `run_parallel`) | `python/tests/detection/*`, `test_marker_pipeline.py` |
 | Definitions | `marker_body_to_skeleton.py`, `posetrak marker-body` CLI, `manage_capture_object.py` | `tests/skeleton`, `tests/cli`, `tests/db` |
 | Finalisation | `finalise_object_to_db()` (object-bound detection run → sequence + manifest) | `test_finalise_object.py` |
-| Tracker (C++) | `input_tracks`/`track`/`landmark`/`normal` on markers; `Skeleton::is_rigid_body()`; rigid Kabsch init incl. single-marker; init-window search; `Tracker::predict_step()/update_step()` split; `MarkerPrediction` seam with rigid closed form and articulated sigma-point implementation (batched, OpenMP); `resolve_dot_assignment()` (Hungarian, shared across subjects, tracklet gate relaxation, streak noise/velocity); three-pass wiring in both `run_track_from_db()` and `MultiPersonTracker::run()`; `load_unlabeled_candidates()`; `--seed-position`; `get_in_range()` binary search | `test_dot_assignment.cpp` (761 lines), `test_marker_prediction`, `test_tracker_integration`, `test_tracker_predict_update_split`, `test_session_reader`, … |
+| Tracker (C++) | `input_tracks`/`track`/`landmark`/`normal` on markers; `Skeleton::is_rigid_body()`; rigid Kabsch init incl. single-marker; init-window search; `Tracker::predict_step()/update_step()` split; `MarkerPrediction` seam with rigid closed form and articulated sigma-point implementation (batched, OpenMP); `resolve_dot_assignment()` (Hungarian, shared across subjects, tracklet gate relaxation, streak noise/velocity); three-pass wiring in both `run_track_from_db()` and `MultiPersonTracker::run()`; `load_unlabeled_candidates()`; `--seed-position`, `--subject-seed`; `get_in_range()` binary search | `test_dot_assignment.cpp` (761 lines), `test_marker_prediction`, `test_tracker_integration`, `test_tracker_predict_update_split`, `test_session_reader`, … |
 | GUI | `CaptureObjectsSection`, `ObjectPanel`/`ObjectCropGridWidget`, `ObjectRunTrackerDialog`, `StandaloneRunPanel`, marker mode in `RunDetectionDialog`, objects as Cutie targets | `python/tests/app/*` |
 
 ### 1.2 What is validated only through scripts
@@ -647,7 +647,8 @@ One interface, several providers, selected per subject per segment:
 | triangulation + IK | articulated persons | existing |
 | rigid Kabsch from labeled markers (ArUco) | props with ≥1 coded marker | existing |
 | single-marker placement | single-dot props | existing |
-| explicit seed (`--seed-position`, or a re-init point's pose) | any | existing, single subject only — must become per subject |
+| explicit seed (`--seed-position`, `--subject-seed`, `--object NAME=SKELETON@X,Y,Z`, or a re-init point's pose) | any; sufficient alone only for a single-dot body (position, identity orientation) | existing; per subject since the person + prop pull request |
+| multi-dot body without a coded marker | dots-only props with several dots | **not supported**: refused with an error. Needs position *and* orientation, i.e. pairwise-distance template registration against the marker body (algorithms doc §4.1; out of scope in the dot-assignment design §9). A coded marker on the body avoids it |
 | multi-view dot triangulation seed | dots-only subjects | **new**: productize the ad-hoc "triangulate a seed from whichever cameras have a sample" work from the ball case |
 | Cutie manual-click mask → coarse position | dots-only props | later (prop plan §5) |
 
@@ -658,6 +659,17 @@ beyond that. Not an architecture item; a gate in WS6 (profile with the
 torso+arm module before designing anything). Candidate remedies if it
 binds: sequential per-camera updates, or exploiting the block structure
 of the innovation covariance — both are internal to `ukf.cpp`.
+
+The dot assignment is a second cost that grows with the candidate count, not
+the marker count. `solve_assignment` is O(n³) on a square matrix padded to
+max(rows, cols), and it runs once per camera per tracker step. Measured on the
+optimized build: 340 candidates × 240 subject slots take 17.7 ms per camera per
+step, 700 × 240 take 175 ms, while the candidate-pool merge before it takes
+0.07 ms and 0.3 ms. Three subjects with 80 dots each plus props and false
+detections sit between those two. Remedy when it binds: gate before solving
+(drop candidates that no slot's gate reaches, or split the matrix into
+connected components of the gate graph); both are internal to
+`dot_assignment.cpp`.
 
 ### 3.7 Segments and re-initialization (D8)
 
@@ -836,8 +848,8 @@ Harri: I think there have been some tests failing in main; likely worth handling
    skeleton YAML, `requires_topology`/`requires_joints` on modules and
    attachment sets, and a refuse-with-a-clear-error check in the
    composer and in `augment-skeleton`.
-4. Per-subject `--seed` on multi-subject runs; multi-view dot
-   triangulation seed provider (§3.6.4).
+4. Multi-view dot triangulation seed provider (§3.6.4); the per-subject
+   seed exists (§10.1).
 5. Object subjects allowed in `posetrak track run-persons` rosters (they
    already are mechanically; make the CLI/GUI resolvers list them).
    5a. **First step of this item, before the composer work is called
@@ -860,7 +872,7 @@ for, and one no current capture has ever exercised.
 >
 > | PR | Content | Replaces plan items |
 > |---|---|---|
-> | 1 | Person + prop tracking: candidate ownership and config agreement (§3.5.1 revision), the seed applies to the dots-only subject in multi-subject runs, `track run-persons --objects`, a person + ball validation case | 1a (reduced), 4 (reduced), 5, 5a |
+> | 1 | Person + prop tracking: candidate ownership and config agreement (§3.5.1 revision), a per-subject seed, `track run-persons --object`, a person + ball validation case | 1a (reduced), 4 (reduced), 5, 5a |
 > | 2 | `detect run --detector aruco\|dots`, object-bound or standalone, with the dot parameter surface | 2 (first part) |
 > | 3 | `capture object` commands, `sequence finalise-object`, `sequence add-dots` | 1 (as narrower commands) |
 > | 4 | `detect import-2d`, anonymous layout; the labeled layout's `config_json` format is documented, not implemented | 2 (second part, reduced) |
@@ -1274,11 +1286,17 @@ the ball's sequence.
   Subjects with different sequence ranges are therefore not time-aligned unless
   they share a start and end; `track run-persons` now defaults to the
   intersection of the subjects' ranges and takes `--start-time`/`--end-time`.
-- `--seed-position` was only wired for a single subject. In a multi-subject run
-  it applies to the one subject that cannot initialise from observations and is
-  an error if there is none or more than one.
+- `--seed-position` was only wired for a single subject. The first multi-subject
+  version applied it to "the one subject that cannot initialise", which leaves
+  it ambiguous when two objects need a seed and lets the wrong object take it
+  when only one does. The seed is now a property of the subject:
+  `PersonSpec::seed_position`, `--subject-seed INDEX X Y Z` on the tracker and
+  `--object NAME=SKELETON@X,Y,Z` on `track run-persons`. A dots-only subject
+  without a seed, and a multi-dot dots-only body with or without one, are
+  errors that name the subject.
 - No code writes `tracking_run_persons.capture_object_id`; objects in a roster
-  therefore need their skeleton given explicitly (`--objects NAME=SKELETON`).
+  therefore need their skeleton given explicitly (`--object NAME=SKELETON`,
+  repeated for several objects).
 
 ### 10.2 Changes and deferrals
 
@@ -1289,7 +1307,9 @@ the ball's sequence.
 | D9 per-source noise | `pose_sequence_sources.noise_std` read by `SessionReader` | Deferred; per-row `noise_scale` already stored | No case weighs sources differently; the loader ignores the stored value today | A case combines hand-placed and automatic sources and needs them weighed differently |
 | `sequence compose` (§3.5) | One composer, refactoring both `finalise*` functions | Narrower commands (`capture object`, `sequence finalise-object`, `sequence add-dots`) as separate pull requests | Each replaces one real script without the sources table it was designed around | The sources table is built |
 | Legacy copied-rows path (§3.5.1) | Kept alongside the new loader | Not needed; there is no second loader | Nothing changed in loading | With the sources table |
-| Multi-view seed provider (§3.6.4) | Productized triangulation seed | Deferred; the seed applies to the dots-only subject in multi-subject runs | Choosing the ball among candidates is the hard part; an imported single track removes the ambiguity | The external-track import (PR 4) exists and can supply a seed by convention |
+| Multi-view seed provider (§3.6.4) | Productized triangulation seed | Deferred; a seed is given per subject | Choosing the ball among candidates is the hard part; an imported single track removes the ambiguity | The external-track import (PR 4) exists and can supply a seed by convention |
+| Multi-dot dots-only initialization | Not in this plan; base design phase 2 and dot-assignment design §9 place it out of scope | Refused with an error; a single-dot body starts from a seed position | A seed carries no orientation; a body with several dots needs template registration, which is a separate algorithm | A dots-only prop with several dots and no coded marker is captured (registration by pairwise-distance RANSAC, algorithms doc §4.1) |
+| Dot-assignment solver scaling (§3.6.5) | Not identified | Unchanged (O(n³) per camera per step); measured, with the remedy named | Real captures so far stay near 340 candidates | A case with several hundred candidates per camera and step runs too slowly to validate |
 | `track export-2d` (§3.10) | Per-camera CSV writer | Deferred | No consumer | Something reads the export |
 | Labeled `detect import-2d` layout (D4) | Implemented in WS1 | The `config_json` format and `label_map` are documented; only the anonymous layout is implemented | The first labeled user is later; the format costs nothing to settle now | A labeled external project exists |
 | `marker-set` CLI, `marker_attachment_sets` table (D5, §3.2) | WS1 item 3, gating the torso+arm processing | The catalog module file and loader come first (PR 5); the CLI and table follow the first GUI consumer | The scripts work and are protected by D11; what blocked a second module was the hard-coded slot tables | The tracklet-group labeling panel or another app feature needs the fitting functions; `python/tools` is not shipped, so app code must not import from it |

@@ -14,6 +14,7 @@ from __future__ import annotations
 import sqlite3
 import struct
 import sys
+from typing import NamedTuple
 
 import numpy as np
 
@@ -118,47 +119,46 @@ def load_camera_states(conn: sqlite3.Connection, shot_id: str) -> dict[str, CamC
     return states
 
 
-def load_camera_intrinsics(conn: sqlite3.Connection, camera_label: str, shot_id: str) -> CamCalibState:
-    """The intrinsics of a camera as calibrated for a capture, without extrinsics.
+class IntrinsicsNotFoundError(ValueError):
+    """No intrinsics calibration has the given id."""
 
-    For a video that is not itself a capture (an orbit video of a prop) but was filmed
-    with a camera and mode that a capture also used: that capture's calibration is
-    reused.
+
+class Intrinsics(NamedTuple):
+    """A camera's intrinsics calibration, ready for geometry."""
+
+    state: CamCalibState                # intrinsics only: no extrinsics
+    image_width: int | None             # the image size the calibration was made for
+    image_height: int | None
+    calibration_id: str
+
+
+def load_intrinsics(conn: sqlite3.Connection, calibration_id: str) -> Intrinsics:
+    """Load an intrinsics calibration by id.
 
     Parameters
     ----------
     conn:
-        Connection to a session database, with ``sqlite3.Row`` rows.
-    camera_label:
-        ``camera_instances.label`` of the camera.
-    shot_id:
-        A capture that has a video of this camera.
+        Connection to a session or registry database, with ``sqlite3.Row`` rows.
+    calibration_id:
+        ``intrinsics_calibrations.id``, as `posetrak calib list` shows it; a unique prefix is enough.
 
     Raises
     ------
+    IntrinsicsNotFoundError
+        If no calibration has that id.
     ValueError
-        If the camera is unknown, was not used in the capture, or has no intrinsics
-        calibration there.
+        If the prefix matches several calibrations.
     """
-    cam_row = conn.execute("SELECT id FROM camera_instances WHERE label = ?", (camera_label,)).fetchone()
-    if cam_row is None:
-        raise ValueError(f"no camera with label {camera_label!r}")
-    row = conn.execute(
-        "SELECT cv.intrinsics_calibration_id AS cv_calib_id, "
-        "       cm.default_intrinsics_calibration_id AS mode_default_calib_id "
-        "FROM capture_videos cv LEFT JOIN camera_modes cm ON cm.id = cv.camera_mode_id "
-        "WHERE cv.shot_id = ? AND cv.camera_instance_id = ?",
-        (shot_id, cam_row["id"]),
-    ).fetchone()
-    if row is None:
-        raise ValueError(f"camera {camera_label!r} has no video in capture {shot_id!r}")
-    intrinsics_id = row["cv_calib_id"] or row["mode_default_calib_id"]
-    if intrinsics_id is None:
-        raise ValueError(f"camera {camera_label!r} has no intrinsics calibration in capture {shot_id!r}")
-    ic = conn.execute("SELECT * FROM intrinsics_calibrations WHERE id = ?", (intrinsics_id,)).fetchone()
-    if ic is None:
-        raise ValueError(f"intrinsics_calibrations row not found: {intrinsics_id!r}")
-    return CamCalibState(video_id=cam_row["id"], label=camera_label, **_resolve_intrinsics(ic))
+    rows = conn.execute(
+        "SELECT * FROM intrinsics_calibrations WHERE id LIKE ? || '%'", (calibration_id,)
+    ).fetchall()
+    if not rows:
+        raise IntrinsicsNotFoundError(f"no intrinsics calibration {calibration_id!r}")
+    if len(rows) > 1:
+        raise ValueError(f"intrinsics calibration prefix {calibration_id!r} is ambiguous ({len(rows)} matches)")
+    ic = rows[0]
+    state = CamCalibState(video_id=ic["id"], label=ic["id"], **_resolve_intrinsics(ic))
+    return Intrinsics(state, ic["image_width"], ic["image_height"], ic["id"])
 
 
 def load_sync_table(conn: sqlite3.Connection, shot_id: str) -> tuple[SyncTable, dict]:

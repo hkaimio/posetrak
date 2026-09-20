@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Marker body commands: import, list, show, export, to-skeleton, calibrate.
+"""Marker body commands: import, list, show, export, to-skeleton, calibrate, calibrate-video.
 
 See docs/roadmap/features/extrinsics-improvements/
 extrinsics-improvements-design.md, section 10 ("Marker body definitions:
@@ -22,6 +22,11 @@ import click
 
 from app.setup.fiducial_markers import load_marker_body_yaml
 from posetrak.calibration.rigid_marker_body import CalibrationOptions, calibrate_rigid_marker_body
+from posetrak.calibration.video_marker_body import (
+    VideoCalibrationOptions,
+    calibrate_marker_body_from_video,
+    parse_marker_sizes,
+)
 from posetrak.db.db import open_registry, open_session, resolve_id_prefix
 from posetrak.db.manage_marker_body import import_marker_body, import_marker_body_str, list_marker_bodies
 from posetrak.db.manage_skeleton import import_skeleton_str
@@ -411,6 +416,175 @@ def marker_body_calibrate(
             body_id = import_marker_body_str(
                 conn, result.yaml, name=name, source=f"calibrated from capture {capture_id}",
             )
+        finally:
+            conn.close()
+        click.echo(f"marker_body_definition_id: {body_id}")
+
+
+_VIDEO_DEFAULTS = VideoCalibrationOptions(body_markers={"0": 1.0}, reference_id="0")
+
+
+@marker_body_group.command("calibrate-video")
+@click.option("--video", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Video of one camera moving around the stationary prop.")
+@click.option("--camera", required=True, metavar="LABEL", help="Label of the camera that filmed it.")
+@click.option("--intrinsics-capture", required=True, metavar="ID",
+              help="A capture in which this camera, in the same mode, has calibrated intrinsics; the "
+                   "video is not a capture of its own (prefix accepted).")
+@click.option("--body-markers", required=True, metavar="ID[:SIZE],...",
+              help="The ArUco markers on the prop, each optionally with its side length in metres.")
+@click.option("--body-marker-size", type=float, default=None, metavar="M",
+              help="Side length of the body markers that give none.")
+@click.option("--reference-id", required=True, help="The body marker whose frame becomes the prop's frame.")
+@click.option("--anchor-markers", default="", metavar="ID[:SIZE],...",
+              help="ArUco markers around the prop that are not part of it. They track the camera while the "
+                   "prop's markers face away. All must stand still. None are needed when the prop's own "
+                   "markers cover every side.")
+@click.option("--anchor-marker-size", type=float, default=None, metavar="M",
+              help="Side length of the anchor markers that give none.")
+@click.option("--dictionary", default=_VIDEO_DEFAULTS.dictionary, show_default=True,
+              help="ArUco dictionary of all the markers.")
+@click.option("--stride", type=int, default=_VIDEO_DEFAULTS.stride, show_default=True,
+              help="Process every Nth frame.")
+@click.option("--first-frame", type=int, default=None, help="First video frame to use. Default: the start.")
+@click.option("--last-frame", type=int, default=None, help="Video frame to stop before. Default: the end.")
+@click.option("--min-frame-markers", type=int, default=_VIDEO_DEFAULTS.min_frame_markers, show_default=True,
+              help="Known markers a frame must show to be used.")
+@click.option("--name", default=_VIDEO_DEFAULTS.name, show_default=True, help="Name of the marker body.")
+@click.option("--output", default=None, metavar="PATH", help="Write the marker body YAML here.")
+@click.option("--import", "import_to_session", is_flag=True, default=False,
+              help="Import the marker body into the session (its ID is printed).")
+@click.option("--detect-dots", is_flag=True, default=False, help="Also solve the prop's reflective dots.")
+@click.option("--dot-threshold", type=int, default=_VIDEO_DEFAULTS.dot_threshold, show_default=True,
+              help="Brightness threshold of a dot.")
+@click.option("--dot-min-area", type=float, default=_VIDEO_DEFAULTS.dot_min_area, show_default=True)
+@click.option("--dot-max-area", type=float, default=_VIDEO_DEFAULTS.dot_max_area, show_default=True)
+@click.option("--dot-min-compactness", type=float, default=_VIDEO_DEFAULTS.dot_min_compactness, show_default=True)
+@click.option("--dot-max-distance-m", type=float, default=_VIDEO_DEFAULTS.dot_max_distance_m, show_default=True,
+              help="Keep only dots this close to the reference marker's centre: the prop's reach. "
+                   "Raise it for a long prop.")
+@click.option("--dot-min-views", type=int, default=_VIDEO_DEFAULTS.dot_min_views, show_default=True,
+              help="Frames a dot must be matched in.")
+@click.option("--dot-min-parallax-deg", type=float, default=_VIDEO_DEFAULTS.dot_min_parallax_deg,
+              show_default=True, help="Least angle between the viewing rays of a dot's first triangulation.")
+@click.option("--dot-max-reprojection-px", type=float, default=_VIDEO_DEFAULTS.dot_max_reprojection_px,
+              show_default=True)
+@click.option("--dot-cluster-tolerance-m", type=float, default=_VIDEO_DEFAULTS.dot_cluster_tolerance_m,
+              show_default=True, help="Largest distance for two triangulations to be the same dot.")
+@click.option("--dot-match-gate-px", type=float, default=_VIDEO_DEFAULTS.dot_match_gate_px, show_default=True,
+              help="Largest distance between a dot's projection and a candidate for them to match.")
+@click.option("--dot-marker-exclude-scale", type=float, default=_VIDEO_DEFAULTS.dot_marker_exclude_scale,
+              show_default=True,
+              help="Ignore dot candidates inside a marker's quad grown by this factor: the white cells "
+                   "of a printed marker are bright too. Keep it small when dots sit right beside a marker. "
+                   "0 turns it off.")
+@click.option("--dot-max-rms-px", type=float, default=_VIDEO_DEFAULTS.dot_max_rms_px, show_default=True,
+              help="Drop a dot whose views disagree by more than this rms: the dots of a prop reproject "
+                   "within about a pixel, reflections and other bright things do not.")
+@click.pass_obj
+def marker_body_calibrate_video(
+    obj: dict,
+    video: Path,
+    camera: str,
+    intrinsics_capture: str,
+    body_markers: str,
+    body_marker_size: float | None,
+    reference_id: str,
+    anchor_markers: str,
+    anchor_marker_size: float | None,
+    dictionary: str,
+    stride: int,
+    first_frame: int | None,
+    last_frame: int | None,
+    min_frame_markers: int,
+    name: str,
+    output: str | None,
+    import_to_session: bool,
+    detect_dots: bool,
+    dot_threshold: int,
+    dot_min_area: float,
+    dot_max_area: float,
+    dot_min_compactness: float,
+    dot_max_distance_m: float,
+    dot_min_views: int,
+    dot_min_parallax_deg: float,
+    dot_max_reprojection_px: float,
+    dot_cluster_tolerance_m: float,
+    dot_match_gate_px: float,
+    dot_marker_exclude_scale: float,
+    dot_max_rms_px: float,
+) -> None:
+    """Solve a rigid marker body from a video of one camera moving around it.
+
+    The prop and everything around it stand still; only the camera moves. The prop carries
+    ArUco markers (--body-markers) and, with --detect-dots, reflective dots. Extra ArUco markers
+    around it (--anchor-markers) are not part of the prop: they keep the camera tracked while the
+    prop's own markers face away, and may be larger. A prop whose markers cover every side needs none.
+
+    The camera's track and every marker's pose are solved together from the marker corners
+    seen, in the frame of the reference marker, and the known marker sizes fix the scale. A prop
+    marker that is never seen in a frame together with the markers linking it to the reference is
+    left out, and the command says so. Dots come from the camera track. Only dots within
+    --dot-max-distance-m of the reference marker are kept.
+
+    The session is only read, unless --import is given. Use `marker-body calibrate` instead when
+    several fixed, calibrated cameras filmed the prop.
+
+    Example:
+
+        posetrak -s session.db marker-body calibrate-video --video orbit.mp4 \\
+            --camera insta_ace2_pro --intrinsics-capture <id> \\
+            --body-markers 2,3 --body-marker-size 0.095 --reference-id 2 \\
+            --anchor-markers 0,1 --anchor-marker-size 0.19 --detect-dots --output body.yaml
+    """
+    if not output and not import_to_session:
+        raise click.UsageError("Give --output PATH, --import, or both: there is nowhere to put the result.")
+    session_path = obj.get("session")
+    if not session_path:
+        raise click.UsageError(
+            "A session DB path is required. Use --session PATH or set $POSETRAK_SESSION_DB."
+        )
+    try:
+        options = VideoCalibrationOptions(
+            body_markers=parse_marker_sizes(body_markers, body_marker_size, "--body-markers"),
+            reference_id=reference_id.strip(),
+            anchor_markers=parse_marker_sizes(anchor_markers, anchor_marker_size, "--anchor-markers"),
+            dictionary=dictionary, name=name, stride=stride, first_frame=first_frame, last_frame=last_frame,
+            min_frame_markers=min_frame_markers, detect_dots=detect_dots, dot_threshold=dot_threshold,
+            dot_min_area=dot_min_area, dot_max_area=dot_max_area, dot_min_compactness=dot_min_compactness,
+            dot_max_distance_m=dot_max_distance_m, dot_min_views=dot_min_views,
+            dot_min_parallax_deg=dot_min_parallax_deg, dot_max_reprojection_px=dot_max_reprojection_px,
+            dot_cluster_tolerance_m=dot_cluster_tolerance_m, dot_match_gate_px=dot_match_gate_px,
+            dot_marker_exclude_scale=dot_marker_exclude_scale, dot_max_rms_px=dot_max_rms_px,
+        )
+        options.validate()
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+    if not Path(session_path).is_file():
+        raise click.ClickException(f"Error opening session DB: {session_path} does not exist")
+    conn = sqlite3.connect(f"file:{session_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        capture_id = _resolve_prefix(conn, "captures", intrinsics_capture)
+        try:
+            result = calibrate_marker_body_from_video(
+                conn, str(video), camera, capture_id, options, log=lambda message: click.echo(message, err=True),
+            )
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+
+    for marker_id, stats in result.marker_stats.items():
+        click.echo(f"  marker {marker_id}: seen in {stats.frames} frames, reprojection rms {stats.rms_px:.2f} px", err=True)
+    if output:
+        Path(output).write_text(result.yaml, encoding="utf-8")
+        click.echo(f"Wrote {output}", err=True)
+    if import_to_session:
+        conn = _open_session(session_path)
+        try:
+            body_id = import_marker_body_str(conn, result.yaml, name=name, source=f"calibrated from video {video.name}")
         finally:
             conn.close()
         click.echo(f"marker_body_definition_id: {body_id}")

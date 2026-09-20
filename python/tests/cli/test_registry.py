@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -486,3 +487,118 @@ class TestSessionAwareCameraList:
         )
         assert result.exit_code == 0, result.output
         assert "No camera instances registered" in result.output
+
+
+# ---------------------------------------------------------------------------
+# calib show
+# ---------------------------------------------------------------------------
+
+
+def _calibration_row(
+    db_path: Path, calib_id: str, *, original: bool = True, coefficients=(0.1, -0.2, 0.001, 0.002, 0.03),
+    model: str = "radtan",
+) -> None:
+    """Fill in the stored OpenCV parameters of a calibration made by _make_session_with_cameras."""
+    import struct
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "UPDATE intrinsics_calibrations SET distortion_model = ?, calibration_tool = 'auto-charuco', "
+        "rms_error = 0.43, image_width = 1920, image_height = 1080, dist_coeffs = ?, matrix_original = ? "
+        "WHERE id = ?",
+        (model, struct.pack(f"<{len(coefficients)}d", *coefficients),
+         struct.pack("<9d", 900.5, 0, 950.25, 0, 901.5, 530.75, 0, 0, 1) if original else None, calib_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _show(db_path: Path, *args: str, json_mode: bool = False, use_registry: bool = False):
+    base = ["--registry", str(db_path)] if use_registry else ["--session", str(db_path)]
+    if json_mode:
+        base = ["--json", *base]
+    return CliRunner().invoke(main, [*base, "calib", "show", *args], catch_exceptions=False)
+
+
+class TestCalibShow:
+    def test_it_shows_both_matrices_and_the_distortion_coefficients_by_name(self, tmp_path: Path) -> None:
+        db_path, _, _, _, (calib_id,) = _make_session_with_cameras(tmp_path)
+        _calibration_row(db_path, calib_id)
+
+        result = _show(db_path, calib_id[:8])
+
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert f"id:               {calib_id}" in out
+        assert "AcmeCorp Cam X" in out and "auto-charuco, rms 0.430 px" in out and "1920 x 1080" in out
+        assert "camera_matrix (of the raw image: use with dist_coeffs)" in out
+        assert "fx 900.500000  fy 901.500000  cx 950.250000  cy 530.750000" in out          # the original
+        assert "dist_coeffs (k1, k2, p1, p2, k3)" in out and "0.100000000, -0.200000000" in out
+        assert "new_camera_matrix" in out and "fx 1000.000000  fy 1001.000000  cx 960.000000  cy 540.000000" in out
+
+    def test_json_is_one_object_with_opencv_arrays(self, tmp_path: Path) -> None:
+        db_path, _, _, mode_id, (calib_id,) = _make_session_with_cameras(tmp_path)
+        _calibration_row(db_path, calib_id)
+
+        result = _show(db_path, calib_id, json_mode=True)
+
+        record = json.loads(result.output)
+        assert record["id"] == calib_id and record["camera_mode_id"] == mode_id
+        assert record["camera_matrix"] == [[900.5, 0.0, 950.25], [0.0, 901.5, 530.75], [0.0, 0.0, 1.0]]
+        assert record["dist_coeffs"] == [0.1, -0.2, 0.001, 0.002, 0.03]
+        assert record["dist_coeff_names"] == ["k1", "k2", "p1", "p2", "k3"]
+        assert record["new_camera_matrix"] == [[1000.0, 0.0, 960.0], [0.0, 1001.0, 540.0], [0.0, 0.0, 1.0]]
+        assert (record["image_width"], record["image_height"], record["distortion_model"]) == (1920, 1080, "radtan")
+        assert record["has_original_matrix"] is True and record["rms_error_px"] == 0.43
+
+    def test_a_fisheye_calibration_names_its_four_coefficients(self, tmp_path: Path) -> None:
+        db_path, _, _, _, (calib_id,) = _make_session_with_cameras(tmp_path)
+        _calibration_row(db_path, calib_id, coefficients=(0.05, 0.01, -0.02, 0.003), model="fisheye")
+
+        record = json.loads(_show(db_path, calib_id, json_mode=True).output)
+        text = _show(db_path, calib_id).output
+
+        assert record["dist_coeff_names"] == ["k1", "k2", "k3", "k4"]
+        assert "OpenCV fisheye" in text and "dist_coeffs (k1, k2, k3, k4)" in text
+
+    def test_without_a_stored_original_matrix_the_two_are_the_same_and_it_says_so(self, tmp_path: Path) -> None:
+        db_path, _, _, _, (calib_id,) = _make_session_with_cameras(tmp_path)
+        _calibration_row(db_path, calib_id, original=False)
+
+        record = json.loads(_show(db_path, calib_id, json_mode=True).output)
+        text = _show(db_path, calib_id).output
+
+        assert record["camera_matrix"] == record["new_camera_matrix"] and record["has_original_matrix"] is False
+        assert "no separate original matrix is stored" in text
+
+    def test_a_calibration_without_distortion_coefficients_shows_zeros(self, tmp_path: Path) -> None:
+        db_path, _, _, _, (calib_id,) = _make_session_with_cameras(tmp_path)
+
+        record = json.loads(_show(db_path, calib_id, json_mode=True).output)
+
+        assert record["dist_coeffs"] == [0.0, 0.0, 0.0, 0.0] and record["dist_coeff_names"] == ["k1", "k2", "p1", "p2"]
+
+    def test_it_reads_the_registry_when_no_session_is_given(self, registry_db_path: Path, tmp_path: Path) -> None:
+        source, _, _, _, (calib_id,) = _make_session_with_cameras(tmp_path)
+        _calibration_row(source, calib_id)
+        CliRunner().invoke(main, ["--registry", str(registry_db_path), "--session", str(source),
+                                  "camera", "import-session"], catch_exceptions=False)
+
+        result = _show(registry_db_path, calib_id[:8], use_registry=True)
+
+        assert result.exit_code == 0, result.output
+        assert "fx 900.500000" in result.output
+
+    def test_unknown_and_ambiguous_ids_are_reported(self, tmp_path: Path) -> None:
+        db_path, _, _, _, calib_ids = _make_session_with_cameras(tmp_path, n_calibrations=2)
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("UPDATE intrinsics_calibrations SET id = 'aaaa-1' WHERE id = ?", (calib_ids[0],))
+        conn.execute("UPDATE intrinsics_calibrations SET id = 'aaaa-2' WHERE id = ?", (calib_ids[1],))
+        conn.commit()
+        conn.close()
+
+        unknown = _show(db_path, "zzzz")
+        ambiguous = _show(db_path, "aaaa")
+
+        assert unknown.exit_code != 0 and "No intrinsics calibration 'zzzz'" in unknown.output
+        assert ambiguous.exit_code != 0 and "matches 2 calibrations" in ambiguous.output

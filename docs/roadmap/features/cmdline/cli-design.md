@@ -111,6 +111,23 @@ posetrak skeleton scale ID \
   # Exactly one of --name or --output must be provided.
 ```
 
+### Marker bodies (rigid props)
+
+```
+posetrak marker-body import --file PATH [--global] [--name S]
+posetrak marker-body list
+posetrak marker-body show ID
+posetrak marker-body export ID [--output PATH]
+posetrak marker-body to-skeleton ID [--name S] [--output PATH]   # tracking skeleton of the prop
+
+posetrak marker-body calibrate --capture ID --time-start S --time-end S \
+        --marker-size M --marker-ids 2,3 --reference-id 2 [--camera LABEL]... \
+        [--detect-dots [--dot-threshold N] [--dot-bg-subtract] [--dot-gate-radius-mult X] ...] \
+        [--output PATH] [--import]
+  # Solves the geometry of a prop's ArUco markers (and dots) from multi-camera footage, in the
+  # frame of the reference marker. The session is only read. --output writes the marker body
+  # YAML; --import adds it to the session and prints its id.
+```
 
 ### Tracker config
 
@@ -172,7 +189,8 @@ posetrak detect run --type aruco|dots --capture ID --sync ID --start S --end S \
   # named by --dots-camera. dots: dots only, no coded-marker pass. Options that belong to
   # another run type are rejected. Stored as detector_type='aruco' either way.
 
-posetrak detect import-2d --capture ID --sync ID [--trial ID] [--object NAME|ID] [--source S]                           --camera LABEL CSV [--camera LABEL CSV]...
+posetrak detect import-2d --capture ID --sync ID [--trial ID] [--object NAME|ID] [--source S] \
+                          --camera LABEL CSV [--camera LABEL CSV]...
   # 2D point tracks made in another tool (Blender's Movie Clip Editor) as an external_2d run of
   # anonymous dot candidates. CSV columns: video_frame, pixel_x, pixel_y (raw pixels, origin top
   # left); blender_export_2d_tracks.py's output imports as it is. Several tracks of one camera get

@@ -427,12 +427,16 @@ says so.
 Film the prop with one camera that you move around it, while the prop and everything
 around it stay still. This method often needs less equipment and gives a better result.
 
-Give it the video, the camera, and a capture that used the same camera in the same mode,
-which supplies the camera's intrinsics:
+Give it the video and the **intrinsics calibration** of the camera that filmed it, in the mode
+it was filmed in. `posetrak calib list` shows the calibrations with their ids; a unique prefix
+of an id is enough. The video is not a capture, so it has no calibration of its own, and it
+must have the image size the calibration was made for: the command refuses a video of another
+size.
 
 ```bash
+posetrak -s session.db calib list        # find the calibration id of the camera and mode
 posetrak -s session.db marker-body calibrate-video --video orbit.mp4 \
-    --camera insta_ace2_pro --intrinsics-capture <capture> \
+    --intrinsics <calibration> \
     --body-markers 2,3:0.06 --body-marker-size 0.095 --reference-id 2 \
     --anchor-markers 0,1 --anchor-marker-size 0.19 \
     --detect-dots --output prop.yaml
@@ -444,8 +448,17 @@ posetrak -s session.db marker-body calibrate-video --video orbit.mp4 \
   track the camera while the prop's own markers face away, so they can be larger and
   need no measured position. They must stand still.
 - `--reference-id` is the prop marker whose frame becomes the prop's frame.
-- `--dictionary` (default `DICT_4X4_50`) applies to all markers. Sizes fix the scale of
-  the result, so measure the printed sizes.
+- `--dictionary` (default `DICT_4X4_50`) applies to all markers.
+
+!!! warning "Measure the marker sizes exactly"
+    The sizes fix the scale of the result and the distance of every marker, so a wrong size
+    spoils the fit. The size that counts is the **outer edge of the black border**, not the
+    printed sheet and not the pattern inside the border. After the fit the command checks the
+    sizes against each other and warns when one disagrees, for instance:
+    `warning: the footage fits marker '29' best at 1.20 times the size given (0.0457 m
+    instead of 0.0380 m), relative to the other markers`. It can only say that a marker
+    disagrees with the others, not which of them is right, so measure again before you
+    change a size. With fewer than three markers it cannot compare.
 
 Two kinds of target work:
 
@@ -464,9 +477,32 @@ markers. `--stride` (default 6) samples every sixth frame; `--first-frame` and
 The command reports how many frames it used, the reprojection error per marker (a healthy
 result is around one pixel), and any prop marker that no frames connect to the reference.
 Solving the dots also lists how many views back each one. Dots are only kept if they lie
-within `--dot-max-distance-m` of the reference marker (default 1 m; raise it for a long
-prop), if they are not on a marker's printed area, and if their views agree on a single
-point.
+within `--dot-max-distance-m` of the reference marker (default 1 m; lower it for a small
+prop such as a ball, raise it for a long one), if they are not on a marker's printed area,
+and if their views agree on a single point about as well as the markers do
+(`--dot-max-rms-px` sets a limit by hand).
+
+A prop that you film close up has big dots: a 10 mm dot is about 45 pixels across at 4K from
+40 cm. Raise `--dot-max-area` for it (the default suits dots that are a few pixels across).
+
+**Worked example: a ball.** A ball with an ArUco marker (`DICT_4X4_1000`, id 29), twelve 10 mm
+reflective dots, and four anchor markers of 9.5 cm (ids 0, 1, 14, 15) on the floor around it,
+filmed with one camera at 4K:
+
+```bash
+posetrak -s session.db marker-body calibrate-video --video ball-orbit.mp4 \
+    --intrinsics <calibration> --dictionary DICT_4X4_1000 \
+    --body-markers 29:0.0457 --reference-id 29 \
+    --anchor-markers 0,1,14,15 --anchor-marker-size 0.095 \
+    --detect-dots --dot-max-area 6000 --dot-max-distance-m 0.25 \
+    --name ball --output ball.yaml
+```
+
+Here the marker was first given as 3.8 cm, the command warned that 4.6 cm fits, and the
+measurement confirmed it. The dots that come out should lie on the ball. Fitting a sphere
+through the result is a good independent check: ten of the thirteen dots came out on one
+sphere 20 cm across to within a few millimetres, and the other three were bright things that
+are not on the ball.
 
 !!! tip "The prop's origin and axes"
     The result is in the frame of the reference marker. To put the origin and axes elsewhere
@@ -507,6 +543,9 @@ values rather than one for all.
 | `... has N anonymous-dot markers and no coded marker` | A prop with several dots and no ArUco marker cannot be started. | Add an ArUco marker. |
 | `marker '3': never seen together with the reference, left out` (`calibrate`), `body marker '3': not linked to the reference by any shared frame, left out` (`calibrate-video`) | The footage never puts that marker in the same instant or frame as the reference, directly or through anchors. | Film so that it is seen with the reference, or with markers that are. |
 | `the reference marker ... was never seen by 2 or more cameras at once` (`calibrate`), `... never seen in a frame together with another known marker` (`calibrate-video`) | The reference marker's pose could not be solved. | Check the marker id, the dictionary and the sizes, and that the markers are visible. |
+| `warning: the footage fits marker '29' best at 1.20 times the size given ...` | The marker's size disagrees with the others'. | Measure the outer edge of its black border again; fix the size that is wrong. |
+| `the video is 1920x1080 but intrinsics calibration ... is for 3840x2160` | The calibration is for another camera mode. | Use the calibration of the camera in the mode that filmed the video (`calib list`). |
+| `no intrinsics calibration '...' in the session or the registry` | The id is not one that `calib list` shows. | Check the id, or give a longer prefix. |
 | Reprojection error of several pixels | Some marker sizes are wrong, a marker is not flat or not still, or the intrinsics do not match the video. | Re-measure the printed sizes; check the mode of the camera. |
 | The tracker loses the prop | Not enough markers in view, or a marker id is repeated on another object. | Look at the detections; use more markers; give the ids per object. |
 

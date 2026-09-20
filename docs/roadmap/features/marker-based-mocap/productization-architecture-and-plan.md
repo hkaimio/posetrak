@@ -411,6 +411,27 @@ trust) → seed/init → track per segment → export, with gaps represented.
   for solving one from footage; the orbit variant
   (`calibrate_harness_from_orbit.py`) is a mode of the same command only if
   it generalizes without sword-specific code, else it stays a prototype.
+
+  > **Built (2026-09-19):** `posetrak marker-body calibrate` and the library
+  > `posetrak/calibration/rigid_marker_body.py`, split into three stages that can be used
+  > and tested apart: `collect_observations` (decode the footage, bucket marker corners and
+  > dot candidates by time), `solve_body` (reference pose, other markers in the reference
+  > frame, robust average, dot clustering) and the YAML writer.
+  > `posetrak/calibration/session_cameras.py` holds the camera and sync-table loaders,
+  > which about 25 tools import through `python/tools/calibrate_rigid_marker_body.py`; that
+  > script is now a shim that re-exports them, and its command line is replaced by a pointer
+  > to the new command. The solving stage had no test before; a synthetic scene (a body of
+  > known geometry moved through three projected cameras) now checks that the markers and
+  > dots are recovered to about 2-3 mm. One behaviour differs from the script: a reference
+  > marker that no camera pair ever saw is an error, where the script wrote a body holding
+  > only the reference. `--import` adds the result to the session, and `--camera` (repeatable)
+  > replaces `--camera-labels`. The orbit variant stays a prototype.
+  >
+  > *Checked on the 2026-09-06 capture:* re-solving the pen from 98 to 113 s on all six
+  > cameras (`--marker-size 0.095 --marker-ids 2,3 --reference-id 2`) gives marker 3's corners
+  > within 1.0 to 2.7 mm of the recorded pen calibration, from 9 co-occurrence samples. On
+  > eight seconds and four cameras the marker was never seen with the reference by two cameras
+  > at once, and the command said so and left it out.
 - **Catalog modules** (`catalog/modules/<module>.marker-module.yaml`):
   the redesign doc §1.9 file shape (`parent_joint`, `along/lateral/
   anterior`, `normal`, `mirror`). A module loader in `posetrak/markers/

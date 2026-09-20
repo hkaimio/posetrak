@@ -118,6 +118,49 @@ def load_camera_states(conn: sqlite3.Connection, shot_id: str) -> dict[str, CamC
     return states
 
 
+def load_camera_intrinsics(conn: sqlite3.Connection, camera_label: str, shot_id: str) -> CamCalibState:
+    """The intrinsics of a camera as calibrated for a capture, without extrinsics.
+
+    For a video that is not itself a capture (an orbit video of a prop) but was filmed
+    with a camera and mode that a capture also used: that capture's calibration is
+    reused.
+
+    Parameters
+    ----------
+    conn:
+        Connection to a session database, with ``sqlite3.Row`` rows.
+    camera_label:
+        ``camera_instances.label`` of the camera.
+    shot_id:
+        A capture that has a video of this camera.
+
+    Raises
+    ------
+    ValueError
+        If the camera is unknown, was not used in the capture, or has no intrinsics
+        calibration there.
+    """
+    cam_row = conn.execute("SELECT id FROM camera_instances WHERE label = ?", (camera_label,)).fetchone()
+    if cam_row is None:
+        raise ValueError(f"no camera with label {camera_label!r}")
+    row = conn.execute(
+        "SELECT cv.intrinsics_calibration_id AS cv_calib_id, "
+        "       cm.default_intrinsics_calibration_id AS mode_default_calib_id "
+        "FROM capture_videos cv LEFT JOIN camera_modes cm ON cm.id = cv.camera_mode_id "
+        "WHERE cv.shot_id = ? AND cv.camera_instance_id = ?",
+        (shot_id, cam_row["id"]),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"camera {camera_label!r} has no video in capture {shot_id!r}")
+    intrinsics_id = row["cv_calib_id"] or row["mode_default_calib_id"]
+    if intrinsics_id is None:
+        raise ValueError(f"camera {camera_label!r} has no intrinsics calibration in capture {shot_id!r}")
+    ic = conn.execute("SELECT * FROM intrinsics_calibrations WHERE id = ?", (intrinsics_id,)).fetchone()
+    if ic is None:
+        raise ValueError(f"intrinsics_calibrations row not found: {intrinsics_id!r}")
+    return CamCalibState(video_id=cam_row["id"], label=camera_label, **_resolve_intrinsics(ic))
+
+
 def load_sync_table(conn: sqlite3.Connection, shot_id: str) -> tuple[SyncTable, dict]:
     """Load the newest sync configuration of a capture.
 

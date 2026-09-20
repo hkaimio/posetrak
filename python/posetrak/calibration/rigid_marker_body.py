@@ -420,20 +420,18 @@ def solve_body(
         for i, cluster in enumerate(dot_clusters):
             log(f"  dot{i}: {len(cluster)} samples, per-axis std (m) {np.stack(cluster).std(axis=0)}")
 
-    lines = [f"name: {options.name}", "units: meters", "markers:"]
-    _append_marker(lines, ref_id, options, marker_local_corners(options.marker_size))
+    markers = [(ref_id, options.marker_size, marker_local_corners(options.marker_size))]
     corner_std: dict[str, np.ndarray] = {}
     for mid, samples in samples_by_marker.items():
         stacked = np.stack(samples)  # (N, 4, 3)
-        _append_marker(lines, mid, options, np.stack([robust_mean(stacked[:, i, :]) for i in range(4)]))
+        markers.append((mid, options.marker_size, np.stack([robust_mean(stacked[:, i, :]) for i in range(4)])))
         corner_std[mid] = np.stack([stacked[:, i, :].std(axis=0) for i in range(4)]).mean(axis=0)
         log(f"  marker '{mid}' corner std across samples (m): {corner_std[mid]}")
-    for i, cluster in enumerate(dot_clusters):
-        lines += [f"  - name: dot{i}", "    type: reflective_dot",
-                  f"    center: {_format_vector(robust_mean(np.stack(cluster)))}"]
 
     return CalibrationResult(
-        yaml="\n".join(lines) + "\n",
+        yaml=format_marker_body_yaml(
+            options.name, options.dictionary, markers, [robust_mean(np.stack(c)) for c in dot_clusters],
+        ),
         reference_solved=n_ref_solved,
         marker_samples={mid: len(s) for mid, s in samples_by_marker.items()},
         marker_corner_std=corner_std,
@@ -447,16 +445,47 @@ def _format_vector(v: np.ndarray) -> str:
     return "[" + ", ".join(f"{x:.6f}" for x in v) + "]"
 
 
-def _append_marker(lines: list[str], marker_id: str, options: CalibrationOptions, corners: np.ndarray) -> None:
-    lines += [
-        f"  - name: aruco_{marker_id}",
-        "    type: aruco",
-        f"    dictionary: {options.dictionary}",
-        f'    id: "{marker_id}"',
-        f"    size: {options.marker_size}",
-        "    corners:",
-    ]
-    lines += [f"      - {_format_vector(c)}" for c in corners]
+def format_marker_body_yaml(
+    name: str,
+    dictionary: str,
+    markers: list[tuple[str, float, np.ndarray]],
+    dot_centers: list[np.ndarray],
+) -> str:
+    """Write a solved marker body as marker body definition YAML.
+
+    Parameters
+    ----------
+    name:
+        Name of the body.
+    dictionary:
+        ArUco dictionary of the markers.
+    markers:
+        ``(marker id, side length, (4, 3) corners)`` in the order to write them; the
+        corners are in the body's frame, metres, in the order of ``marker_local_corners``.
+        They are written in the ``corners:`` form, the provenance-preserving form for
+        solved rather than designed geometry.
+    dot_centers:
+        The reflective dots' positions in the body's frame, written as ``dot0``, ``dot1``...
+
+    Returns
+    -------
+    str
+        The YAML text.
+    """
+    lines = [f"name: {name}", "units: meters", "markers:"]
+    for marker_id, size, corners in markers:
+        lines += [
+            f"  - name: aruco_{marker_id}",
+            "    type: aruco",
+            f"    dictionary: {dictionary}",
+            f'    id: "{marker_id}"',
+            f"    size: {size}",
+            "    corners:",
+        ]
+        lines += [f"      - {_format_vector(c)}" for c in corners]
+    for i, center in enumerate(dot_centers):
+        lines += [f"  - name: dot{i}", "    type: reflective_dot", f"    center: {_format_vector(center)}"]
+    return "\n".join(lines) + "\n"
 
 
 def robust_mean(samples: np.ndarray, trim_frac: float = 0.1) -> np.ndarray:

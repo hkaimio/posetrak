@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Reflective markers worn on the legs: the slot names, their order and the joint
+# each rides on. Every marker is written for the right side and mirrored to the
+# left (posetrak/markers/catalog.py).
+#
+# The markers ride the bone they sit near: hip on the thigh, the knee and ankle
+# markers on the shin (the ankle markers sit at the distal shin, not on the foot
+# bone), heel and toe on the foot.
+#
+# No nominal geometry (along/lateral/anterior) is authored here. Attachment sets
+# fitted from a capture carry the real offsets.
+module: leg
+requires_topology: reallusion-no-waist
+# The structure of the reallusion-no-waist rig: identical for the base skeletons, their
+# scaled copies and their dot-augmented versions (posetrak/markers/topology.py).
+requires_topology_hash: c962335e1aa10ef711c13f4a082ba1c188f726e9ce20afc0c542ef70a69922fe
+requires_joints: [thigh, shin, foot]
+
+markers:
+  - {name: hip_R, parent_joint: thigh.R, mirror: true}
+  - {name: knee_lat_R, parent_joint: shin.R, mirror: true}
+  - {name: knee_med_R, parent_joint: shin.R, mirror: true}
+  - {name: knee_front_R, parent_joint: shin.R, mirror: true}
+  - {name: ankle_lat_R, parent_joint: shin.R, mirror: true}
+  - {name: ankle_med_R, parent_joint: shin.R, mirror: true}
+  - {name: heel_R, parent_joint: foot.R, mirror: true}
+  - {name: toe_R, parent_joint: foot.R, mirror: true}

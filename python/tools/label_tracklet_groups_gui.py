@@ -117,6 +117,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.setup.extrinsics_solver import _proj_matrix, _undistort_pts  # noqa: E402
 from posetrak.detection.frame_source import iter_frames  # noqa: E402
+from posetrak.markers.catalog import catalog_module  # noqa: E402
 from tools.build_tracklet_groups import FKPredictor, collect_tracklets  # noqa: E402
 from tools.calibrate_rigid_marker_body import load_camera_states, load_sync_table  # noqa: E402
 from tools.prototype_fk_marker_prediction import _DEFAULT_TRIAL  # noqa: E402
@@ -621,12 +622,8 @@ class _MainWindow(QtWidgets.QMainWindow):
 
         # Real anatomical slot names -- distinct from _DEFAULT_TRIAL's own
         # keys (a_hip_R, k_Xp_R, ...), which are P-A's unlabelled FK probes,
-        # not real slots. Matches label_marker_slots_gui.py's leg catalog.
-        self.slot_names = [
-            "hip_R", "hip_L", "knee_lat_R", "knee_lat_L", "knee_med_R", "knee_med_L",
-            "knee_front_R", "knee_front_L", "ankle_lat_R", "ankle_lat_L", "ankle_med_R", "ankle_med_L",
-            "heel_R", "heel_L", "toe_R", "toe_L",
-        ]
+        # not real slots.
+        self.slot_names = catalog_module("leg").slot_names()
 
         self._build_ui()
         self._populate_list()

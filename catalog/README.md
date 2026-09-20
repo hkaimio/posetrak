@@ -16,7 +16,7 @@ working path read them by this relative path:
 | File | Read by |
 |---|---|
 | `ball.single-reflective-dot.*.yaml` | `python/tools/finalize_ball_blender_detection.py`, `finalize_ball_cutie_detection.py` |
-| `pen.calibrated.*.yaml`, `pad.calibrated.*.yaml` | `python/tools/setup_pen_pad_capture_objects.py` |
+| `pen.calibrated.*.yaml`, `pad.calibrated.*.yaml` | nothing; the script that read them is replaced by `posetrak marker-body import`, `capture object add` and `sequence finalise-object --object` |
 
 Remove them in the change that deletes those scripts (`posetrak sequence
 compose`, plan WS1 item 1).

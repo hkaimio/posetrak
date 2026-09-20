@@ -366,10 +366,10 @@ def finalise_object_to_db(
     ).fetchone()
     if run is None:
         raise ValueError(f"detection_runs row not found: {detection_run_id!r}")
-    if run["detector_type"] != "aruco":
+    if run["detector_type"] not in ("aruco", "external_2d"):
         raise ValueError(
             f"detection run {detection_run_id!r} is a {run['detector_type']!r} run, "
-            "not a marker run -- use finalise_to_db for pose detection runs"
+            "not a marker or imported 2D run -- use finalise_to_db for pose detection runs"
         )
     if run["capture_object_id"] is None:
         raise ValueError(

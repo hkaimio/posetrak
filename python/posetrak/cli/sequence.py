@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import click
 
-from posetrak.cli.detect import _resolve_capture_object
+from posetrak.cli.detect import _camera_id, _resolve_capture_object
 from posetrak.cli.session import _open_session_required, _resolve
 from posetrak.db.object_marker_run import derive_object_marker_run
 from posetrak.db.sequence_dots import add_dots_to_sequence
@@ -80,27 +80,35 @@ def sequence_finalise_object(obj: dict, run: str, object_ref: str | None, with_d
 @sequence_group.command("add-dots")
 @click.option(
     "--detection-run", "run", required=True, metavar="UUID",
-    help="A marker run that detected dots (`detect run --type dots`); prefix accepted.",
+    help="A run that detected dots (`detect run --type dots`, `detect import-2d`); prefix accepted.",
 )
 @click.option("--sequence", required=True, metavar="UUID", help="Sequence to extend (prefix accepted).")
 @click.option(
+    "--camera", "cameras", multiple=True, metavar="LABEL",
+    help="Copy only this camera's dots; repeat for several. Default: every camera of the run.",
+)
+@click.option(
     "--replace", is_flag=True, default=False,
-    help="Delete the sequence's existing dot rows first. Refused once the sequence is tracked or edited.",
+    help="Delete the dot rows this run already added to the sequence first. Refused once the "
+         "sequence is tracked or edited.",
 )
 @click.pass_obj
-def sequence_add_dots(obj: dict, run: str, sequence: str, replace: bool) -> None:
+def sequence_add_dots(obj: dict, run: str, sequence: str, cameras: tuple[str, ...], replace: bool) -> None:
     """Attach a run's reflective-dot candidates to an existing sequence.
 
     For dots worn on a person: the person's sequence comes from a pose run, and
     the dots come from a separate dots run over the same capture and sync
-    configuration. Body and hand rows of the sequence are not touched.
+    configuration. Body and hand rows of the sequence are not touched. Dots of
+    several runs can be added to one sequence, each for the cameras it is good on
+    (--camera), for instance a hand-tracked run and an automatic one.
     """
     conn = _open_session_required(obj)
     try:
         run_id = _resolve(conn, "detection_runs", run)
         sequence_id = _resolve(conn, "pose_observation_sequences", sequence)
         try:
-            result = add_dots_to_sequence(conn, run_id, sequence_id, replace=replace)
+            camera_ids = {_camera_id(conn, label, "--camera") for label in cameras} or None
+            result = add_dots_to_sequence(conn, run_id, sequence_id, cameras=camera_ids, replace=replace)
         except (ValueError, RuntimeError) as exc:
             raise click.ClickException(str(exc)) from exc
     finally:

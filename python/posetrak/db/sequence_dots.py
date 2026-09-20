@@ -14,12 +14,17 @@ on the person, detected by a separate dots run, are added afterwards with
 
 The copy is additive: body and hand rows of the sequence are untouched, and
 each copied row records the dots run it came from in
-``pose_observations.detection_run_id``.
+``pose_observations.detection_run_id``. Dots from several runs may be added to
+one sequence, for instance a hand-tracked run on some cameras and an automatic
+run on another.
 """
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Collection
 from typing import NamedTuple
+
+from posetrak.db.sync_lookup import load_sync_table
 
 
 class AddDotsResult(NamedTuple):
@@ -35,6 +40,7 @@ def add_dots_to_sequence(
     detection_run_id: str,
     sequence_id: str,
     *,
+    cameras: Collection[str] | None = None,
     replace: bool = False,
 ) -> AddDotsResult:
     """Copy one run's dot candidates into an existing sequence.
@@ -44,15 +50,21 @@ def add_dots_to_sequence(
     session:
         Open connection to a posetrak session database.
     detection_run_id:
-        A marker run (``detector_type='aruco'``) that detected dots.
+        A run that detected dots: a marker run, or an imported external 2D run.
     sequence_id:
         The ``pose_observation_sequences`` row that receives them. Its sync
         configuration must be the run's, or frames would map to the wrong
         timestamps.
+    cameras:
+        ``camera_instances`` IDs to copy dots for; all cameras of the run when
+        omitted.
     replace:
-        Delete the sequence's existing ``dots`` rows first. Refused for a
-        sequence that has tracking runs or manual edits, because the dots those
-        results were computed from would no longer exist.
+        Delete the sequence's existing dot rows for the cameras being copied
+        first. Without it, a camera the sequence already has dots for is an
+        error: a sequence holds one dot row per camera and frame, whichever run
+        it came from. Refused for a sequence that has tracking runs or manual
+        edits, because the dots those results were computed from would no longer
+        exist.
 
     Returns
     -------
@@ -64,14 +76,14 @@ def add_dots_to_sequence(
     ------
     ValueError
         If the sequence or run does not exist, their sync configurations
-        differ, or the run has no dot candidates.
+        differ, the run has no dot candidates, or none of them map to a camera
+        and sync timestamp of the sequence.
     RuntimeError
-        If the sequence already has ``dots`` rows and *replace* is false, or is
-        tracked or edited and *replace* is true.
+        If the sequence already has dots for a camera being copied and *replace*
+        is false, or is tracked or edited and *replace* is true.
     """
-    # Imported here: these live in the GUI application's packages.
+    # Imported here: it lives in the GUI application's package.
     from app.pose.db_cache import DOT_REGION_TYPE, DOT_TRACK_ID
-    from app.setup.db_context import SyncPoint, SyncTable
 
     seq = session.execute(
         "SELECT shot_id, sync_config_id FROM pose_observation_sequences WHERE id = ?",
@@ -104,40 +116,7 @@ def add_dots_to_sequence(
             "`detect run --type dots` (or --dots-camera with --type aruco) first"
         )
 
-    existing = session.execute(
-        "SELECT COUNT(*) FROM pose_observations WHERE sequence_id = ? AND source = 'dots'",
-        (sequence_id,),
-    ).fetchone()[0]
-    if existing:
-        if not replace:
-            raise RuntimeError(
-                f"sequence {sequence_id!r} already has {existing} 'dots' rows; "
-                "pass replace (--replace on the command line) to delete them and copy again"
-            )
-        tracked_or_edited = session.execute(
-            "SELECT 1 FROM tracking_runs WHERE observation_sequence_id = ? "
-            "UNION SELECT 1 FROM pose_observation_edits WHERE sequence_id = ? LIMIT 1",
-            (sequence_id, sequence_id),
-        ).fetchone()
-        if tracked_or_edited:
-            raise RuntimeError(
-                f"sequence {sequence_id!r} has tracking results or manual edits, so its dots "
-                "cannot be replaced; make a new sequence instead"
-            )
-
-    sync_rows = session.execute(
-        "SELECT sp.shot_video_id, sp.video_frame, sp.timestamp_s, sv.actual_fps "
-        "FROM sync_points sp JOIN capture_videos sv ON sv.id = sp.shot_video_id "
-        "WHERE sp.sync_config_id = ?",
-        (sync_config_id,),
-    ).fetchall()
-    sync_table = SyncTable(
-        [
-            SyncPoint(camera_instance_id="", shot_video_id=r[0], video_frame=r[1], timestamp_s=r[2])
-            for r in sync_rows
-        ],
-        {r[0]: float(r[3]) for r in sync_rows},
-    )
+    sync_table = load_sync_table(session, sync_config_id)
     camera_by_video = {
         r[0]: r[1]
         for r in session.execute(
@@ -151,6 +130,8 @@ def add_dots_to_sequence(
         camera_instance_id = camera_by_video.get(shot_video_id)
         if camera_instance_id is None:
             skipped_no_camera += 1
+            continue
+        if cameras is not None and camera_instance_id not in cameras:
             continue
         timestamp_s = sync_table.frame_to_global_time(int(video_frame), shot_video_id)
         if timestamp_s is None:
@@ -167,10 +148,34 @@ def add_dots_to_sequence(
             f"none of the {len(kp_rows)} dot rows of run {detection_run_id!r} could be mapped to a "
             "camera and a sync timestamp of this sequence"
         )
+    target_cameras = sorted({row[1] for row in obs_rows})
+    placeholders = ",".join("?" * len(target_cameras))
+    existing = session.execute(
+        "SELECT COUNT(*) FROM pose_observations "
+        f"WHERE sequence_id = ? AND source = 'dots' AND camera_instance_id IN ({placeholders})",
+        (sequence_id, *target_cameras),
+    ).fetchone()[0]
     if existing:
+        if not replace:
+            raise RuntimeError(
+                f"sequence {sequence_id!r} already has {existing} dot rows for these cameras; "
+                "restrict the copy to other cameras (--camera), or pass replace (--replace on the "
+                "command line) to swap them for this run's"
+            )
+        tracked_or_edited = session.execute(
+            "SELECT 1 FROM tracking_runs WHERE observation_sequence_id = ? "
+            "UNION SELECT 1 FROM pose_observation_edits WHERE sequence_id = ? LIMIT 1",
+            (sequence_id, sequence_id),
+        ).fetchone()
+        if tracked_or_edited:
+            raise RuntimeError(
+                f"sequence {sequence_id!r} has tracking results or manual edits, so its dots "
+                "cannot be replaced; make a new sequence instead"
+            )
         session.execute(
-            "DELETE FROM pose_observations WHERE sequence_id = ? AND source = 'dots'",
-            (sequence_id,),
+            "DELETE FROM pose_observations "
+            f"WHERE sequence_id = ? AND source = 'dots' AND camera_instance_id IN ({placeholders})",
+            (sequence_id, *target_cameras),
         )
     session.executemany(
         "INSERT INTO pose_observations "

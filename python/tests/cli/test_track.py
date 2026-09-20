@@ -66,6 +66,32 @@ class TestTrackList:
         assert result.exit_code == 0, result.output
         assert run_id[:8] in result.output
 
+    def test_filters_by_sequence_prefix(self, seeded_session_db_path: Path, capture_id: str, sync_id: str) -> None:
+        conn = sqlite3.connect(str(seeded_session_db_path))
+        conn.execute(
+            "INSERT INTO pose_observation_sequences (id, shot_id, sync_config_id, time_start_s, time_end_s) "
+            "VALUES ('seq-abc', ?, ?, 0, 1)", (capture_id, sync_id),
+        )
+        conn.commit()
+        conn.close()
+        other = _seed_run(seeded_session_db_path)
+        conn = sqlite3.connect(str(seeded_session_db_path))
+        mine = generate_id()
+        conn.execute(
+            "INSERT INTO tracking_runs (id, observation_sequence_id, tracker_config_id, skeleton_id, "
+            " extrinsic_calibration_id, sync_config_id, ran_at, posetrak_version, active_camera_ids, marker_names) "
+            "VALUES (?,?,?,?,?,?,?,'0.1.0','[]','[]')",
+            (mine, "seq-abc", generate_id(), generate_id(), generate_id(), generate_id(),
+             dt.datetime.now(dt.timezone.utc).isoformat()),
+        )
+        conn.commit()
+        conn.close()
+
+        result = _invoke(["track", "list", "--sequence", "seq-a"], seeded_session_db_path)
+
+        assert result.exit_code == 0, result.output
+        assert mine[:8] in result.output and other[:8] not in result.output
+
     def test_json_mode(self, seeded_session_db_path: Path) -> None:
         run_id = _seed_run(seeded_session_db_path)
         result = _invoke(["--json", "track", "list"], seeded_session_db_path)
@@ -772,7 +798,7 @@ class TestResolveTrialObjects:
         conn = sqlite3.connect(str(seeded_session_db_path))
         conn.row_factory = sqlite3.Row
 
-        with pytest.raises(ValueError, match="No finalised sequence"):
+        with pytest.raises(ValueError, match="No finalised sequence.*detect it with --trial"):
             resolve_trial_objects(conn, info["trial_id"], [("ball", obj["skel_id"], None)])
 
 

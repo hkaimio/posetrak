@@ -198,7 +198,7 @@ def _build_run_config(
 @click.option("--vel-half-life", default=None, type=float, help="Velocity decay half-life (s). Default 0.25.")
 @click.option("--calib-noise-std", default=None, type=float, help="Calibration (extrinsic) noise std (px). Default 60.")
 @click.option("--pose-noise-std", default=None, type=float, help="Pose estimation noise std (px). Default 0.")
-@click.option("--outlier-threshold", default=None, type=float, help="Mahalanobis outlier threshold (σ). Default 4.")
+@click.option("--outlier-threshold", default=None, type=float, help="Mahalanobis outlier threshold (sigma). Default 4.")
 @click.option("--tracker-fps", default=None, type=float, help="Target tracker frame rate (Hz). Default 120.")
 @click.option("--use-relative-obs", is_flag=True, default=False, help="Enable child-minus-parent relative observations.")
 @click.option("--relative-min-conf", default=None, type=float, help="Min keypoint confidence for relative pairs. Default 0.5.")
@@ -502,7 +502,11 @@ def resolve_trial_objects(
             (trial_id, object_row["id"]),
         ).fetchall()
         if not seq_rows:
-            raise ValueError(f"No finalised sequence for object {name!r} in trial {trial_id!r}.")
+            raise ValueError(
+                f"No finalised sequence for object {name!r} in trial {trial_id!r}. An object's sequence "
+                "belongs to a trial through its detection run: detect it with --trial <trial> "
+                "(`detect run` or `detect import-2d`), then `sequence finalise-object`."
+            )
         if len(seq_rows) > 1:
             raise ValueError(
                 f"Ambiguous: {len(seq_rows)} sequences exist for object {name!r} in trial "
@@ -705,7 +709,7 @@ def cmd_list(ctx: click.Context, sequence: str | None) -> None:
     sequence_id: str | None = None
     if sequence is not None:
         try:
-            sequence_id = resolve_id_prefix(conn, "observation_sequences", sequence)
+            sequence_id = resolve_id_prefix(conn, "pose_observation_sequences", sequence)
         except ValueError as exc:
             fail(str(exc))
 

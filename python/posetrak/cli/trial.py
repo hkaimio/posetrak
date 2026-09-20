@@ -511,8 +511,8 @@ def cmd_export(
       detection-only  — above + detection runs, observations, edits
       full            — above + tracking runs, configs, skeletons
 
-    Default scope: capture → capture-only; trial/detection → detection-only;
-    tracking-run → full.
+    Default scope: capture -> capture-only; trial/detection -> detection-only;
+    tracking-run -> full.
 
     Examples:
 

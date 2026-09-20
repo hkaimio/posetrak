@@ -438,8 +438,8 @@ trust) → seed/init → track per segment → export, with gaps represented.
   > material says otherwise: one camera moving around a stationary prop is often easier,
   > faster and more accurate than a fixed multi-camera rig, and the multi-camera method
   > gave the sword harness a stable in-plane bias that more samples did not remove. The
-  > command takes a video, the camera's label and a capture to borrow its intrinsics from
-  > (`posetrak/calibration/video_marker_body.py`). The scene is the prop's markers
+  > command takes a video and the id of an intrinsics calibration (`calib list`), which it
+  > checks against the video's image size (`posetrak/calibration/video_marker_body.py`). The scene is the prop's markers
   > (`--body-markers`, each with its own size) and optional anchors (`--anchor-markers`,
   > any size): further markers around the prop that are not part of it and only track the
   > camera when the prop's markers face away. A prop with markers on every side needs no
@@ -460,8 +460,11 @@ trust) → seed/init → track per segment → export, with gaps represented.
   > marker's quad grown by `--dot-marker-exclude-scale` (default 1.15, since the white
   > cells of a printed marker are bright, but dots are often mounted right beside a marker:
   > at 1.3 one of the two harness dots lost most of its views); and dots whose views
-  > disagree by more than `--dot-max-rms-px` (default 1.5). Background subtraction is not
-  > used, as it needs a stationary camera.
+  > disagree by more than `--dot-max-rms-px` (default: 0.8 times the markers' own
+  > reprojection error, at least 1 px; a fixed 1.5 px, tuned on the harness, rejected true
+  > dots on a noisier camera track). The distance limit is held to the final position of a
+  > dot, with a looser one for the rough first triangulation, whose depth is still
+  > uncertain. Background subtraction is not used, as it needs a stationary camera.
   >
   > *Checked on real footage.* Sword harness orbit (anchors 0 and 1, body markers 2 and 3,
   > 0.095 m): 1365 frames, reprojection rms 1.29 px; marker 3's corners are within 2.7 to
@@ -479,6 +482,29 @@ trust) → seed/init → track per segment → export, with gaps represented.
   > truth to compare. Synthetic scenes of both target types, with pixel noise, wrong
   > corners, a broken tracklet, marker cells, a wobbling bright thing and a distant lamp,
   > recover the markers and dots to a few millimetres.
+  >
+  > *A wrong marker size is caught.* The sizes fix the scale and the depth of every marker,
+  > and they are easy to give wrongly: the size that counts is the outer edge of the black
+  > border. On a ball with one ArUco marker (given as 3.8 cm), four anchors (9.5 cm) and
+  > twelve reflective dots (GoPro, 4K, 786 usable frames) the fit was poor, 3 px overall and
+  > 9.7 px on the ball's marker, with relative poses that scattered by centimetres while
+  > their rotations agreed to 1 to 3 degrees, which is the signature of a depth-scale error.
+  > A sweep of the marker's size had its minimum at 4.6 cm (3.8 cm times 6/5: what is
+  > measured across five of the marker's six cells), where the marker's error fell to 1.75
+  > px. The command now fits a size for every marker after the main fit and warns when one
+  > differs by more than 5% from the typical one, relative to the others (only the sizes
+  > relative to each other can be judged, so it says which marker disagrees, not which of the
+  > two sizes is right; with fewer than three markers it says nothing). On that footage it
+  > reports marker 29 at 1.20 times the size given. With the fitted size the 12 dots of the
+  > ball appear: 10 of the 13 recovered lie on one sphere 204 mm across to within about 2 mm
+  > rms, and the marker is 5 mm from its surface. The other three are stray bright things.
+  > The camera track still fits only to about 3 px there; the residual follows neither camera
+  > speed nor position in the image, so it is not blur or distortion, and the anchors' sizes
+  > are the next suspect.
+  >
+  > *Intrinsics.* The video is not a capture, so `--intrinsics` names an intrinsics
+  > calibration (`calib list`), looked up in the session and then the registry, and the
+  > command refuses a video whose image size is not the one it was calibrated for.
   >
   > *Not built:* setting the prop's origin and orientation. The result is in the reference
   > marker's frame; moving it is one rigid transform of every corner and dot, left to a

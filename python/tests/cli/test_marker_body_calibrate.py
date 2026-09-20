@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 from click.testing import CliRunner
 
 from posetrak.calibration.rigid_marker_body import CalibrationResult
@@ -147,6 +148,27 @@ def test_the_session_is_only_read_unless_import_is_given(
 
 # ------------------------------------------------------------------ calibrate-video
 
+_INTRINSICS_ID = "abcd1234-0000-4000-8000-000000000001"
+
+
+def _add_intrinsics(db_path: Path, calibration_id: str = _INTRINSICS_ID, *, width: int = 3840, height: int = 2160) -> None:
+    """An intrinsics calibration row (foreign keys are not enforced on this plain connection)."""
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO intrinsics_calibrations (id, camera_mode_id, calibrated_at, distortion_model, fx, fy, cx, cy, "
+        "image_width, image_height) VALUES (?, 'mode', '2026-09-06', 'radtan', 1898.0, 1895.0, 1920.0, 1080.0, ?, ?)",
+        (calibration_id, width, height),
+    )
+    conn.commit()
+    conn.close()
+
+
+@pytest.fixture()
+def session_with_intrinsics(seeded_session_db_path: Path) -> Path:
+    _add_intrinsics(seeded_session_db_path)
+    return seeded_session_db_path
+
+
 def _video_stub():
     from posetrak.calibration.video_marker_body import VideoCalibrationResult
 
@@ -157,69 +179,102 @@ def _video_stub():
     )
 
 
-def _video_args(tmp_path: Path, capture_id: str, *extra: str) -> list[str]:
+def _video_args(tmp_path: Path, *extra: str) -> list[str]:
     video = tmp_path / "orbit.mp4"
     video.write_bytes(b"")
-    return ["--video", str(video), "--camera", "cam1", "--intrinsics-capture", capture_id[:8],
+    return ["--video", str(video), "--intrinsics", _INTRINSICS_ID[:8],
             "--body-markers", "2,3:0.06", "--body-marker-size", "0.095", "--reference-id", "2",
             "--anchor-markers", "0,1", "--anchor-marker-size", "0.19", *extra]
 
 
-def _invoke_video(session_path: Path, *args: str):
-    return CliRunner().invoke(main, ["--session", str(session_path), "marker-body", "calibrate-video", *args],
-                              catch_exceptions=False)
+def _invoke_video(session_path: Path, *args: str, registry_path: Path | None = None):
+    base = ["--session", str(session_path)]
+    if registry_path is not None:
+        base = ["--registry", str(registry_path), *base]
+    return CliRunner().invoke(main, [*base, "marker-body", "calibrate-video", *args], catch_exceptions=False)
 
 
-def test_a_video_calibration_reaches_the_library_with_marker_sizes_and_writes_the_result(
-    seeded_session_db_path: Path, capture_id: str, tmp_path: Path
+def test_a_video_calibration_reaches_the_library_with_the_intrinsics_and_marker_sizes(
+    session_with_intrinsics: Path, tmp_path: Path
 ) -> None:
     out = tmp_path / "body.yaml"
 
     with _video_stub() as calibrate:
-        result = _invoke_video(seeded_session_db_path, *_video_args(tmp_path, capture_id, "--output", str(out),
-                                                                     "--detect-dots", "--stride", "3"))
+        result = _invoke_video(session_with_intrinsics, *_video_args(
+            tmp_path, "--output", str(out), "--detect-dots", "--stride", "3"))
 
     assert result.exit_code == 0, result.output
     assert out.read_text(encoding="utf-8") == _BODY_YAML
-    _, video, camera, shot_id, options = calibrate.call_args.args
-    assert (video.endswith("orbit.mp4"), camera, shot_id) == (True, "cam1", capture_id)
+    video, intrinsics, options = calibrate.call_args.args
+    assert video.endswith("orbit.mp4")
+    assert (intrinsics.calibration_id, intrinsics.image_width, intrinsics.image_height) == (_INTRINSICS_ID, 3840, 2160)
+    assert intrinsics.state.K[0, 0] == pytest.approx(1898.0)
     assert options.body_markers == {"2": 0.095, "3": 0.06}
     assert options.anchor_markers == {"0": 0.19, "1": 0.19}
     assert (options.reference_id, options.detect_dots, options.stride) == ("2", True, 3)
 
 
-def test_a_video_calibration_can_be_imported_into_the_session(
-    seeded_session_db_path: Path, capture_id: str, tmp_path: Path
+def test_the_intrinsics_are_found_in_the_registry_when_the_session_lacks_them(
+    seeded_session_db_path: Path, registry_db_path: Path, tmp_path: Path
 ) -> None:
-    with _video_stub():
-        result = _invoke_video(seeded_session_db_path, *_video_args(tmp_path, capture_id, "--import", "--name", "bokken"))
+    _add_intrinsics(registry_db_path)
+
+    with _video_stub() as calibrate:
+        result = _invoke_video(seeded_session_db_path, *_video_args(tmp_path, "--output", str(tmp_path / "b.yaml")),
+                               registry_path=registry_db_path)
 
     assert result.exit_code == 0, result.output
-    conn = sqlite3.connect(str(seeded_session_db_path))
+    assert calibrate.call_args.args[1].calibration_id == _INTRINSICS_ID
+
+
+def test_unknown_intrinsics_are_reported_before_any_work(
+    seeded_session_db_path: Path, registry_db_path: Path, tmp_path: Path
+) -> None:
+    with _video_stub() as calibrate:
+        result = _invoke_video(seeded_session_db_path, *_video_args(tmp_path, "--output", str(tmp_path / "b.yaml")),
+                               registry_path=registry_db_path)
+
+    assert result.exit_code != 0
+    assert "no intrinsics calibration 'abcd1234'" in result.output and "posetrak calib list" in result.output
+    calibrate.assert_not_called()
+
+
+def test_an_ambiguous_intrinsics_prefix_is_reported(session_with_intrinsics: Path, tmp_path: Path) -> None:
+    _add_intrinsics(session_with_intrinsics, "abcd1234-0000-4000-8000-000000000002")
+
+    with _video_stub() as calibrate:
+        result = _invoke_video(session_with_intrinsics, *_video_args(tmp_path, "--output", str(tmp_path / "b.yaml")))
+
+    assert result.exit_code != 0 and "ambiguous" in result.output
+    calibrate.assert_not_called()
+
+
+def test_a_video_calibration_can_be_imported_into_the_session(session_with_intrinsics: Path, tmp_path: Path) -> None:
+    with _video_stub():
+        result = _invoke_video(session_with_intrinsics, *_video_args(tmp_path, "--import", "--name", "bokken"))
+
+    assert result.exit_code == 0, result.output
+    conn = sqlite3.connect(str(session_with_intrinsics))
     rows = conn.execute("SELECT name, source FROM marker_body_definitions").fetchall()
     conn.close()
     assert rows == [("bokken", "calibrated from video orbit.mp4")]
 
 
-def test_a_prop_without_anchors_needs_no_anchor_options(
-    seeded_session_db_path: Path, capture_id: str, tmp_path: Path
-) -> None:
+def test_a_prop_without_anchors_needs_no_anchor_options(session_with_intrinsics: Path, tmp_path: Path) -> None:
     video = tmp_path / "box.mp4"
     video.write_bytes(b"")
 
     with _video_stub() as calibrate:
         result = _invoke_video(
-            seeded_session_db_path, "--video", str(video), "--camera", "cam1", "--intrinsics-capture", capture_id,
+            session_with_intrinsics, "--video", str(video), "--intrinsics", _INTRINSICS_ID,
             "--body-markers", "2:0.1,3:0.1,4:0.1", "--reference-id", "2", "--output", str(tmp_path / "b.yaml"),
         )
 
     assert result.exit_code == 0, result.output
-    assert calibrate.call_args.args[4].anchor_markers == {}
+    assert calibrate.call_args.args[2].anchor_markers == {}
 
 
-def test_bad_video_options_are_rejected_before_any_work(
-    seeded_session_db_path: Path, capture_id: str, tmp_path: Path
-) -> None:
+def test_bad_video_options_are_rejected_before_any_work(session_with_intrinsics: Path, tmp_path: Path) -> None:
     cases = [
         (["--body-markers", "2,3", "--body-marker-size", "0"], "marker sizes must be positive"),
         (["--body-markers", "2,3"], "no size"),
@@ -227,22 +282,22 @@ def test_bad_video_options_are_rejected_before_any_work(
         (["--anchor-markers", "2:0.2"], "cannot be both body and anchor markers"),
     ]
     for change, message in cases:
-        args = _video_args(tmp_path, capture_id, "--output", str(tmp_path / "b.yaml"))
+        args = _video_args(tmp_path, "--output", str(tmp_path / "b.yaml"))
         for flag, value in zip(change[::2], change[1::2]):
             args[args.index(flag) + 1] = value
         if "--body-markers" in change and "--body-marker-size" not in change:
             del args[args.index("--body-marker-size"):args.index("--body-marker-size") + 2]
 
         with _video_stub() as calibrate:
-            result = _invoke_video(seeded_session_db_path, *args)
+            result = _invoke_video(session_with_intrinsics, *args)
 
         assert result.exit_code != 0 and message in result.output, (change, result.output)
         calibrate.assert_not_called()
 
 
-def test_a_video_result_with_nowhere_to_go_is_rejected(seeded_session_db_path: Path, capture_id: str, tmp_path: Path) -> None:
+def test_a_video_result_with_nowhere_to_go_is_rejected(session_with_intrinsics: Path, tmp_path: Path) -> None:
     with _video_stub() as calibrate:
-        result = _invoke_video(seeded_session_db_path, *_video_args(tmp_path, capture_id))
+        result = _invoke_video(session_with_intrinsics, *_video_args(tmp_path))
 
     assert result.exit_code != 0 and "nowhere to put the result" in result.output
     calibrate.assert_not_called()

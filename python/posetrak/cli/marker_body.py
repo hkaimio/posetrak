@@ -22,6 +22,7 @@ import click
 
 from app.setup.fiducial_markers import load_marker_body_yaml
 from posetrak.calibration.rigid_marker_body import CalibrationOptions, calibrate_rigid_marker_body
+from posetrak.calibration.session_cameras import IntrinsicsNotFoundError, load_intrinsics
 from posetrak.calibration.video_marker_body import (
     VideoCalibrationOptions,
     calibrate_marker_body_from_video,
@@ -424,13 +425,36 @@ def marker_body_calibrate(
 _VIDEO_DEFAULTS = VideoCalibrationOptions(body_markers={"0": 1.0}, reference_id="0")
 
 
+def _find_intrinsics(obj: dict, session_path: str, calibration_id: str):
+    """An intrinsics calibration of the session, else of the registry."""
+    conn = sqlite3.connect(f"file:{session_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        return load_intrinsics(conn, calibration_id)
+    except IntrinsicsNotFoundError:
+        pass
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    registry = _open_registry(obj)
+    try:
+        return load_intrinsics(registry, calibration_id)
+    except ValueError as exc:
+        raise click.ClickException(
+            f"{exc} in the session or the registry; `posetrak calib list` shows the calibrations"
+        ) from exc
+    finally:
+        registry.close()
+
+
 @marker_body_group.command("calibrate-video")
 @click.option("--video", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path),
               help="Video of one camera moving around the stationary prop.")
-@click.option("--camera", required=True, metavar="LABEL", help="Label of the camera that filmed it.")
-@click.option("--intrinsics-capture", required=True, metavar="ID",
-              help="A capture in which this camera, in the same mode, has calibrated intrinsics; the "
-                   "video is not a capture of its own (prefix accepted).")
+@click.option("--intrinsics", required=True, metavar="ID",
+              help="Intrinsics calibration of the camera, in the mode that filmed the video: an id from "
+                   "`posetrak calib list`, a unique prefix is enough. Looked up in the session, then in "
+                   "the registry. The video's image size must be the one it was calibrated for.")
 @click.option("--body-markers", required=True, metavar="ID[:SIZE],...",
               help="The ArUco markers on the prop, each optionally with its side length in metres.")
 @click.option("--body-marker-size", type=float, default=None, metavar="M",
@@ -457,8 +481,11 @@ _VIDEO_DEFAULTS = VideoCalibrationOptions(body_markers={"0": 1.0}, reference_id=
 @click.option("--detect-dots", is_flag=True, default=False, help="Also solve the prop's reflective dots.")
 @click.option("--dot-threshold", type=int, default=_VIDEO_DEFAULTS.dot_threshold, show_default=True,
               help="Brightness threshold of a dot.")
-@click.option("--dot-min-area", type=float, default=_VIDEO_DEFAULTS.dot_min_area, show_default=True)
-@click.option("--dot-max-area", type=float, default=_VIDEO_DEFAULTS.dot_max_area, show_default=True)
+@click.option("--dot-min-area", type=float, default=_VIDEO_DEFAULTS.dot_min_area, show_default=True,
+              help="Smallest dot, in pixels of area.")
+@click.option("--dot-max-area", type=float, default=_VIDEO_DEFAULTS.dot_max_area, show_default=True,
+              help="Largest dot, in pixels of area. Raise it for a prop filmed close up: a 10 mm dot is "
+                   "about 45 px across, 1600 px of area, at 4K from 0.4 m.")
 @click.option("--dot-min-compactness", type=float, default=_VIDEO_DEFAULTS.dot_min_compactness, show_default=True)
 @click.option("--dot-max-distance-m", type=float, default=_VIDEO_DEFAULTS.dot_max_distance_m, show_default=True,
               help="Keep only dots this close to the reference marker's centre: the prop's reach. "
@@ -478,15 +505,15 @@ _VIDEO_DEFAULTS = VideoCalibrationOptions(body_markers={"0": 1.0}, reference_id=
               help="Ignore dot candidates inside a marker's quad grown by this factor: the white cells "
                    "of a printed marker are bright too. Keep it small when dots sit right beside a marker. "
                    "0 turns it off.")
-@click.option("--dot-max-rms-px", type=float, default=_VIDEO_DEFAULTS.dot_max_rms_px, show_default=True,
-              help="Drop a dot whose views disagree by more than this rms: the dots of a prop reproject "
-                   "within about a pixel, reflections and other bright things do not.")
+@click.option("--dot-max-rms-px", type=float, default=None,
+              help="Drop a dot whose views disagree by more than this rms. Default: 0.8 times the reprojection "
+                   "error of the markers (at least 1 px): the dots of a prop reproject better than that, "
+                   "reflections and other bright things do not.")
 @click.pass_obj
 def marker_body_calibrate_video(
     obj: dict,
     video: Path,
-    camera: str,
-    intrinsics_capture: str,
+    intrinsics: str,
     body_markers: str,
     body_marker_size: float | None,
     reference_id: str,
@@ -533,7 +560,7 @@ def marker_body_calibrate_video(
     Example:
 
         posetrak -s session.db marker-body calibrate-video --video orbit.mp4 \\
-            --camera insta_ace2_pro --intrinsics-capture <id> \\
+            --intrinsics <calibration-id> \\
             --body-markers 2,3 --body-marker-size 0.095 --reference-id 2 \\
             --anchor-markers 0,1 --anchor-marker-size 0.19 --detect-dots --output body.yaml
     """
@@ -563,18 +590,13 @@ def marker_body_calibrate_video(
 
     if not Path(session_path).is_file():
         raise click.ClickException(f"Error opening session DB: {session_path} does not exist")
-    conn = sqlite3.connect(f"file:{session_path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
+    calibration = _find_intrinsics(obj, session_path, intrinsics)
     try:
-        capture_id = _resolve_prefix(conn, "captures", intrinsics_capture)
-        try:
-            result = calibrate_marker_body_from_video(
-                conn, str(video), camera, capture_id, options, log=lambda message: click.echo(message, err=True),
-            )
-        except ValueError as exc:
-            raise click.ClickException(str(exc)) from exc
-    finally:
-        conn.close()
+        result = calibrate_marker_body_from_video(
+            str(video), calibration, options, log=lambda message: click.echo(message, err=True),
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     for marker_id, stats in result.marker_stats.items():
         click.echo(f"  marker {marker_id}: seen in {stats.frames} frames, reprojection rms {stats.rms_px:.2f} px", err=True)

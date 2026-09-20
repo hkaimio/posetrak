@@ -37,8 +37,8 @@ lands.
 | `prototype_ball_tracking.py` | A single reflective ball can be positioned in 3D from per-camera 2D tracks, with a cross-camera consistency check | The consistency check becomes the cross-camera corroboration cost modifier (plan §3.6.2, WS2 item 3) |
 | `prototype_shin_rigid_cluster_fit.py` | Marker offsets on one segment can be fitted from that segment's own triangulated rigid cluster, independent of the tracked skeleton's bone lengths, so a weak marker is carried by the stronger ones (skeleton-scaling design §2.1) | Skeleton scaling from rigid clusters (plan WS6 item 4) |
 | `prototype_pen_band_tracking.py`, `prototype_track_pen_trajectory.py` | 6-DOF trajectory of a pen from its ArUco tags and reflective bands | Feeds `blender/export_pen_pad_to_blender.py`; no package equivalent planned |
-| `prototype_calibrate_pen_and_pad.py` | Rigid-body geometry calibration, hardcoded to one capture's pen and pad | General path is `calibrate_rigid_marker_body.py` → `posetrak marker-body calibrate` (WS1 item 3) |
-| `calibrate_harness_from_orbit.py` | Recalibrating a rigid body from one moving camera orbiting the stationary rig | Becomes a mode of `marker-body calibrate` only if it generalizes without prop-specific code |
+| `prototype_calibrate_pen_and_pad.py` | Rigid-body geometry calibration, hardcoded to one capture's pen and pad | General paths are `posetrak marker-body calibrate` (fixed cameras) and `calibrate-video` (one moving camera) |
+| `calibrate_harness_from_orbit.py` | Recalibrating a rigid body from one moving camera orbiting the stationary rig, anchored by static markers | Absorbed by `posetrak marker-body calibrate-video` (`posetrak/calibration/video_marker_body.py`), which needs no old body for its dots; delete once it has been used on a second prop |
 
 ## Superseded
 

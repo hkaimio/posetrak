@@ -425,13 +425,65 @@ trust) → seed/init → track per segment → export, with gaps represented.
   > dots are recovered to about 2-3 mm. One behaviour differs from the script: a reference
   > marker that no camera pair ever saw is an error, where the script wrote a body holding
   > only the reference. `--import` adds the result to the session, and `--camera` (repeatable)
-  > replaces `--camera-labels`. The orbit variant stays a prototype.
+  > replaces `--camera-labels`. The single-camera orbit variant is `marker-body calibrate-video`, below.
   >
   > *Checked on the 2026-09-06 capture:* re-solving the pen from 98 to 113 s on all six
   > cameras (`--marker-size 0.095 --marker-ids 2,3 --reference-id 2`) gives marker 3's corners
   > within 1.0 to 2.7 mm of the recorded pen calibration, from 9 co-occurrence samples. On
   > eight seconds and four cameras the marker was never seen with the reference by two cameras
   > at once, and the command said so and left it out.
+  >
+  > **Single-camera calibration (`marker-body calibrate-video`, 2026-09-20).** The first
+  > version treated the orbit variant as a corner case that might stay a prototype. The
+  > material says otherwise: one camera moving around a stationary prop is often easier,
+  > faster and more accurate than a fixed multi-camera rig, and the multi-camera method
+  > gave the sword harness a stable in-plane bias that more samples did not remove. The
+  > command takes a video, the camera's label and a capture to borrow its intrinsics from
+  > (`posetrak/calibration/video_marker_body.py`). The scene is the prop's markers
+  > (`--body-markers`, each with its own size) and optional anchors (`--anchor-markers`,
+  > any size): further markers around the prop that are not part of it and only track the
+  > camera when the prop's markers face away. A prop with markers on every side needs no
+  > anchors. Two kinds of target are covered: markers on the prop only, and a prop with
+  > one marker plus anchors. Camera poses and marker poses are fitted together (sparse
+  > bundle adjustment, robust loss, a second pass without badly fitting sightings) from a
+  > start built by chaining each marker pair's most representative relative pose out from
+  > the reference marker; the reference marker fixes the frame and the marker sizes fix the
+  > scale. A prop marker no chain of shared frames links to the reference is left out and
+  > reported. Frames need two known markers to be used.
+  >
+  > Dots come from the camera track. A dot candidate has no identity, so candidates are
+  > linked into tracklets (`MotionGatedLinker`), each tracklet is triangulated, the points
+  > are clustered into physical dots, and every dot is matched again in all frames by
+  > projection and triangulated from all matches. No old body is needed, unlike the
+  > prototype. Three filters keep other bright things out, each set from the real footage:
+  > only dots within `--dot-max-distance-m` of the reference marker; candidates inside a
+  > marker's quad grown by `--dot-marker-exclude-scale` (default 1.15, since the white
+  > cells of a printed marker are bright, but dots are often mounted right beside a marker:
+  > at 1.3 one of the two harness dots lost most of its views); and dots whose views
+  > disagree by more than `--dot-max-rms-px` (default 1.5). Background subtraction is not
+  > used, as it needs a stationary camera.
+  >
+  > *Checked on real footage.* Sword harness orbit (anchors 0 and 1, body markers 2 and 3,
+  > 0.095 m): 1365 frames, reprojection rms 1.29 px; marker 3's corners are within 2.7 to
+  > 4.2 mm of the earlier prototype's recalibration. Dots: without the filters, 23 dots, of
+  > which two match the earlier calibration (2.1 and 6.7 mm) and the rest are marker cells
+  > and reflections (reprojection rms 1.76 px and above, against 0.6 to 0.85 px for the
+  > true ones); with them, exactly those two. The earlier calibration's other two harness
+  > dots were detected in 8 and 0 of about 1400 frames at the standard threshold, so
+  > finding them is a detection question, not a solving one. Calibration box with markers
+  > on every side and reflective dots (5 markers of 0.145 m, no anchors): all linked, 639
+  > frames, reprojection rms 0.96 px, and the marker centres lie 2 to 7 mm from where the
+  > recorded rig geometry of the same box puts them; the face normals are within 3.2 degrees
+  > of a right-angled box (the recorded geometry is within 4.6, and its reference marker is
+  > itself 8.7 mm off a square). Six dots came out, 200 to 630 views each, with no ground
+  > truth to compare. Synthetic scenes of both target types, with pixel noise, wrong
+  > corners, a broken tracklet, marker cells, a wobbling bright thing and a distant lamp,
+  > recover the markers and dots to a few millimetres.
+  >
+  > *Not built:* setting the prop's origin and orientation. The result is in the reference
+  > marker's frame; moving it is one rigid transform of every corner and dot, left to a
+  > post-processing step for now. Colour patches around the dots, for the hue hypothesis
+  > (§3.6.2), are not read.
 - **Catalog modules** (`catalog/modules/<module>.marker-module.yaml`):
   the redesign doc §1.9 file shape (`parent_joint`, `along/lateral/
   anterior`, `normal`, `mirror`). A module loader in `posetrak/markers/
@@ -1433,6 +1485,7 @@ the ball's sequence.
 | Labeled `detect import-2d` layout (D4) | Implemented in WS1 | The `config_json` format and `label_map` are documented; only the anonymous layout is implemented | The first labeled user is later; the format costs nothing to settle now | A labeled external project exists |
 | `marker-set` CLI, `marker_attachment_sets` table (D5, §3.2) | WS1 item 3, gating the torso+arm processing | The catalog module file and loader come first (PR 5); the CLI and table follow the first GUI consumer | The scripts work and are protected by D11; what blocked a second module was the hard-coded slot tables | The tracklet-group labeling panel or another app feature needs the fitting functions; `python/tools` is not shipped, so app code must not import from it |
 | `detect run` selector (§3.4, WS1 item 2) | `--detector aruco\|dots` | `--type pose\|aruco\|dots`; `--detector` stays the person detector model. `dots` runs the dot detector without a coded-marker pass (`MarkerDetectionPipeline(detect_coded=False)`) | `--detector` already names the YOLOX model on `detect run`, so reusing it for the run kind would make one option mean two things. Marker runs, with or without dots, are stored as `detector_type='aruco'`, as before, so there is no data or schema change and no `dots` value in the column | A consumer needs to tell a dots-only run from an ArUco run without reading `config_json.marker_ids` |
+| Orbit variant of marker body calibration (§3.2) | A mode of `marker-body calibrate` only if it generalises without prop-specific code; otherwise a prototype | Its own command, `marker-body calibrate-video`, from PR 7 | One camera moving around the prop is often easier, faster and more accurate than a fixed rig, and is the expected way to capture a typical target (one marker, several dots, anchors around) | (not deferred) |
 | `marker-body calibrate` (§3.2) | CLI command | Kept, and scheduled as PR 6 with the old module re-exporting its helpers | The application needs calibration; the re-export keeps about 27 importing tools working | (not deferred) |
 
 ### 10.3 Status of decisions

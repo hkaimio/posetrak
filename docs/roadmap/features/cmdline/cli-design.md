@@ -127,6 +127,18 @@ posetrak marker-body calibrate --capture ID --time-start S --time-end S \
   # Solves the geometry of a prop's ArUco markers (and dots) from multi-camera footage, in the
   # frame of the reference marker. The session is only read. --output writes the marker body
   # YAML; --import adds it to the session and prints its id.
+
+posetrak marker-body calibrate-video --video PATH --camera LABEL --intrinsics-capture ID \
+        --body-markers 2,3:0.06 --body-marker-size M --reference-id 2 \
+        [--anchor-markers 0,1 --anchor-marker-size M] [--dictionary D] [--stride N] \
+        [--detect-dots [--dot-max-distance-m X] [--dot-marker-exclude-scale X] [--dot-max-rms-px X] ...] \
+        [--output PATH] [--import]
+  # The same, from a video of ONE camera moving around a stationary prop, with no fixed rig. The
+  # prop's markers and, optionally, anchor markers around it (not part of the prop, any size) track
+  # the camera; a prop whose markers cover all sides needs no anchors. Camera track and marker poses
+  # are solved together, the reference marker fixes the frame and the marker sizes the scale. Dots
+  # come from the camera track. The video is not a capture: its camera intrinsics are taken from a
+  # capture that used the same camera and mode.
 ```
 
 ### Tracker config

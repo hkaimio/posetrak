@@ -56,6 +56,7 @@ nav:
       - Segmenting multi-person scenes: user-guide/segmentation.md
       - Analyzing poses: user-guide/analyzing-poses.md
       - Tracking & troubleshooting: user-guide/tracking-troubleshooting.md
+      - Marker-based capture (command line): user-guide/marker-based-capture.md
       - Retargeting to Blender: user-guide/retargeting-blender.md
   - Architecture:
       - Overview: architecture/overview.md

@@ -366,3 +366,88 @@ class TestCollect:
         assert len(frames) == 6 and all(len(f.dots) == 1 for f in frames)
         assert len({f.dots[0][2] for f in frames}) == 1 and frames[0].dots[0][2] >= 0
         assert frames[5].dots[0][0] == pytest.approx(65.0, abs=1.0)
+
+
+# ---------------------------------------------------------- intrinsics of the video
+
+
+def _intrinsics(width: int | None = 3840, height: int | None = 2160):
+    from posetrak.calibration.session_cameras import Intrinsics
+
+    return Intrinsics(_state(), width, height, "cc817fba-8d98-42fe-b787-3cae93e32682")
+
+
+class TestCalibrateFromVideo:
+    def _options(self) -> VideoCalibrationOptions:
+        return VideoCalibrationOptions(body_markers={"2": 0.1, "3": 0.1}, reference_id="2")
+
+    def test_a_video_of_another_image_size_than_the_calibration_is_refused(self) -> None:
+        from posetrak.calibration.video_marker_body import calibrate_marker_body_from_video
+
+        with patch("posetrak.calibration.video_marker_body._video_size", return_value=(1920, 1080)):
+            with pytest.raises(ValueError, match=r"the video is 1920x1080 but intrinsics calibration cc817fba is for 3840x2160"):
+                calibrate_marker_body_from_video("v.mp4", _intrinsics(), self._options())
+
+    def test_a_video_that_cannot_be_opened_is_reported(self) -> None:
+        from posetrak.calibration.video_marker_body import calibrate_marker_body_from_video
+
+        with patch("posetrak.calibration.video_marker_body._video_size", return_value=(0, 0)):
+            with pytest.raises(ValueError, match="cannot open the video"):
+                calibrate_marker_body_from_video("nope.mp4", _intrinsics(), self._options())
+
+    def test_a_matching_size_or_a_calibration_without_a_recorded_size_goes_on_to_the_footage(self) -> None:
+        from posetrak.calibration.video_marker_body import calibrate_marker_body_from_video
+
+        for intrinsics in (_intrinsics(), _intrinsics(None, None)):
+            with patch("posetrak.calibration.video_marker_body._video_size", return_value=(3840, 2160)), \
+                    patch("posetrak.calibration.video_marker_body.collect_video_observations", return_value=[]) as collect, \
+                    patch("posetrak.calibration.video_marker_body.solve_video_body", return_value="solved"):
+                assert calibrate_marker_body_from_video("v.mp4", intrinsics, self._options()) == "solved"
+            assert collect.call_args.args[1] is intrinsics.state
+
+    def test_the_size_of_a_real_video_file_is_read(self, tmp_path) -> None:
+        from posetrak.calibration.video_marker_body import _video_size
+
+        path = str(tmp_path / "tiny.avi")
+        writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"MJPG"), 10.0, (64, 48))
+        for _ in range(3):
+            writer.write(np.zeros((48, 64, 3), dtype=np.uint8))
+        writer.release()
+
+        assert _video_size(path) == (64, 48)
+        assert _video_size(str(tmp_path / "missing.avi")) == (0, 0)
+
+
+class TestSizeCheck:
+    def test_a_marker_whose_given_size_is_wrong_is_reported_with_the_size_that_fits(self) -> None:
+        frames = _prop_with_anchors().frames(_orbit(48), np.random.default_rng(1))
+        options = VideoCalibrationOptions(
+            body_markers={"2": 0.10, "3": 0.064},                   # the scene's marker 3 is 0.08 m
+            reference_id="2", anchor_markers={str(10 + k): 0.15 for k in range(8)},
+        )
+        log: list[str] = []
+
+        result = solve_video_body(frames, _state(), options, log=log.append)
+
+        assert result.size_ratios["3"] == pytest.approx(1.25, abs=0.03)
+        assert all(r == pytest.approx(1.0, abs=0.03) for m, r in result.size_ratios.items() if m != "3")
+        warnings = [line for line in log if "warning" in line]
+        assert len(warnings) == 1 and "marker '3'" in warnings[0] and "1.25 times" in warnings[0] and "instead of 0.0640 m" in warnings[0]
+
+    def test_right_sizes_give_no_warning(self) -> None:
+        frames = _prop_with_anchors().frames(_orbit(48), np.random.default_rng(1))
+        log: list[str] = []
+
+        result = solve_video_body(frames, _state(), _prop_options(), log=log.append)
+
+        assert not [line for line in log if "warning" in line]
+        assert all(r == pytest.approx(1.0, abs=0.03) for r in result.size_ratios.values())
+
+    def test_too_few_markers_to_compare_sizes_are_not_judged(self) -> None:
+        markers = {"2": (0.10, (np.eye(3), np.zeros(3))), "3": (0.08, _face(np.array([0.2, 0.0, 0.0]), np.array([0.0, 0.0, 1.0])))}
+        frames = _Scene(markers).frames(_orbit(48), np.random.default_rng(1))
+        options = VideoCalibrationOptions(body_markers={"2": 0.10, "3": 0.08}, reference_id="2")
+
+        result = solve_video_body(frames, _state(), options)
+
+        assert result.size_ratios == {}

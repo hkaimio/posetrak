@@ -38,18 +38,20 @@ dots within a set distance of the reference marker are kept, since a camera orbi
 sees the rest of the room. Candidates inside a marker's quad are ignored, because the
 white cells of a printed marker are bright too; the quad is grown only a little, as a
 prop's dots are often mounted right beside a marker. And a dot whose views do not agree
-on one point is dropped: on real footage the dots of a prop reproject within about a pixel
-while reflections and other bright things that only look static do not. Background
-subtraction is not used: it needs a stationary camera.
+on one point is dropped. How well is judged against the camera track itself, since the
+track's error is in every view: by default a dot must reproject within 0.8 times the markers'
+own reprojection error (and at least 1 pixel). On the sword harness, whose track fit to 1.3
+pixels, the dots of the prop reproject within 0.6 to 0.8 pixels and marker cells and
+reflections at 1.8 or more; on a ball whose track fit to 3 pixels, its dots come out between
+1.1 and 2.0. Background subtraction is not used: it needs a stationary camera.
 
 The stages can be used and tested apart: :func:`collect_video_observations` decodes the
 video, :func:`solve_video_body` does the geometry, and
-:func:`calibrate_marker_body_from_video` runs both from a session database.
+:func:`calibrate_marker_body_from_video` runs both from a video and the camera's intrinsics.
 """
 from __future__ import annotations
 
 import heapq
-import sqlite3
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -62,7 +64,7 @@ from scipy.sparse import lil_matrix
 from app.setup.extrinsics_solver import CamCalibState, _undistort_pts, marker_local_corners
 from app.setup.fiducial_markers import ArucoDetector
 from posetrak.calibration.rigid_marker_body import cluster_dot_samples, format_marker_body_yaml
-from posetrak.calibration.session_cameras import load_camera_intrinsics
+from posetrak.calibration.session_cameras import Intrinsics
 from posetrak.detection.dot_blob_detector import detect_blobs
 from posetrak.detection.dot_tracklet import MotionGatedLinker
 from posetrak.detection.frame_source import iter_frames
@@ -72,6 +74,10 @@ from posetrak.detection.frame_source import iter_frames
 _ROTATION_WEIGHT_M_PER_RAD = 0.1
 _MAX_EDGE_MEASUREMENTS = 300
 _OUTLIER_FLOOR_PX = 3.0
+_DOT_RMS_RATIO = 0.8        # by default a dot must reproject within this fraction of the markers' error ...
+_MIN_DOT_RMS_PX = 1.0       # ... but a track better than this still allows a dot this much
+_ROUGH_DISTANCE_FACTOR = 2.0   # the distance limit is looser for the first triangulation of a dot from one tracklet
+_SIZE_WARNING = 0.05      # a marker whose fitted size differs from the typical one by more than this is reported
 
 
 @dataclass
@@ -104,7 +110,7 @@ class VideoCalibrationOptions:
     dot_cluster_tolerance_m: float = 0.02
     dot_match_gate_px: float = 8.0
     dot_marker_exclude_scale: float = 1.15   # ignore candidates inside a marker's quad grown by this factor
-    dot_max_rms_px: float = 1.5              # drop a dot whose views disagree more than this
+    dot_max_rms_px: float | None = None      # drop a dot whose views disagree more than this; None: see below
 
     def validate(self) -> None:
         """Raise ValueError if the scene description or a setting is unusable."""
@@ -167,6 +173,9 @@ class VideoCalibrationResult:
     marker_stats: dict[str, MarkerStats]
     unconnected: list[str]                   # body markers no chain of shared frames links to the reference
     dots: list[DotStats] = field(default_factory=list)
+    # Fitted size relative to the given one, for every marker, relative to the typical marker; empty
+    # when fewer than three markers were fitted, since sizes can only be compared with each other.
+    size_ratios: dict[str, float] = field(default_factory=dict)
 
 
 def parse_marker_sizes(spec: str, default_size: float | None, what: str) -> dict[str, float]:
@@ -207,10 +216,8 @@ def parse_marker_sizes(spec: str, default_size: float | None, what: str) -> dict
 
 
 def calibrate_marker_body_from_video(
-    conn: sqlite3.Connection,
     video_path: str,
-    camera_label: str,
-    intrinsics_shot_id: str,
+    intrinsics: Intrinsics,
     options: VideoCalibrationOptions,
     *,
     log: Callable[[str], None] = lambda message: None,
@@ -219,15 +226,11 @@ def calibrate_marker_body_from_video(
 
     Parameters
     ----------
-    conn:
-        Connection to a session database with ``sqlite3.Row`` rows. It is only read.
     video_path:
         The video of the orbit.
-    camera_label:
-        The camera that filmed it.
-    intrinsics_shot_id:
-        A capture in which that camera, in the same mode, has calibrated intrinsics; the
-        video is not a capture of its own.
+    intrinsics:
+        The intrinsics calibration of the camera, in the mode that filmed the video. The
+        video is not a capture of its own, so there are no extrinsics to look up.
     options:
         What to calibrate and how.
     log:
@@ -241,13 +244,32 @@ def calibrate_marker_body_from_video(
     Raises
     ------
     ValueError
-        If *options* are invalid, the camera has no intrinsics, or the footage does not
-        support a solution (see :func:`solve_video_body`).
+        If *options* are invalid, the video cannot be opened or is not the image size the
+        intrinsics were calibrated for, or the footage does not support a solution (see
+        :func:`solve_video_body`).
     """
     options.validate()
-    state = load_camera_intrinsics(conn, camera_label, intrinsics_shot_id)
-    frames = collect_video_observations(video_path, state, options, log=log)
-    return solve_video_body(frames, state, options, log=log)
+    width, height = _video_size(video_path)
+    if width == 0:
+        raise ValueError(f"cannot open the video {video_path!r}")
+    if None not in (intrinsics.image_width, intrinsics.image_height) and (
+        (width, height) != (intrinsics.image_width, intrinsics.image_height)
+    ):
+        raise ValueError(
+            f"the video is {width}x{height} but intrinsics calibration {intrinsics.calibration_id[:8]} is for "
+            f"{intrinsics.image_width}x{intrinsics.image_height}; use the calibration of the camera in the "
+            "mode that filmed the video"
+        )
+    frames = collect_video_observations(video_path, intrinsics.state, options, log=log)
+    return solve_video_body(frames, intrinsics.state, options, log=log)
+
+
+def _video_size(video_path: str) -> tuple[int, int]:
+    capture = cv2.VideoCapture(video_path)
+    try:
+        return int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)), int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    finally:
+        capture.release()
 
 
 def collect_video_observations(
@@ -469,6 +491,7 @@ class _Fit:
     camera_poses: dict[int, tuple[np.ndarray, np.ndarray]]      # frame index -> (R, t): reference frame to camera
     detections: list[tuple[int, str]]                           # the (frame index, marker) pairs that were fitted
     residuals_px: np.ndarray                                    # (N, 4, 2) observed minus projected
+    size_ratios: dict[str, float] = field(default_factory=dict)  # only with free sizes: fitted size / given size
 
 
 def _bundle_adjust(
@@ -479,59 +502,80 @@ def _bundle_adjust(
     marker_poses: dict[str, tuple[np.ndarray, np.ndarray]],
     camera_poses: dict[int, tuple[np.ndarray, np.ndarray]],
     reference_id: str,
+    free_sizes: bool = False,
 ) -> _Fit:
-    """Fit marker and camera poses to the observed corners, the reference marker held fixed."""
+    """Fit marker and camera poses to the observed corners, the reference marker held fixed.
+
+    With *free_sizes* every marker's side length is fitted too, as a factor on the given one.
+    The factors are only determined up to a common scale, which a weak constraint fixes (their
+    logarithms average to zero); a caller compares them with each other.
+    """
     free_markers = sorted(m for m in {m for _, m in detections} if m != reference_id)
     frame_indices = sorted({f for f, _ in detections})
     marker_slot = {m: i for i, m in enumerate(free_markers)}
     frame_slot = {f: i for i, f in enumerate(frame_indices)}
     n_marker_params = 6 * len(free_markers)
+    n_camera_params = 6 * len(frame_indices)
+    size_markers = sorted({m for _, m in detections}) if free_sizes else []
+    size_slot = {m: i for i, m in enumerate(size_markers)}
 
     observed = np.array([frames[f].markers[m] for f, m in detections])                       # (N, 4, 2)
     local = np.array([marker_local_corners(sizes[m]) for _, m in detections])                # (N, 4, 3)
     det_frame = np.array([frame_slot[f] for f, _ in detections])
     det_marker = np.array([marker_slot.get(m, -1) for _, m in detections])                   # -1: the reference
+    det_size = np.array([size_slot.get(m, 0) for _, m in detections])
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
 
     def unpack(x: np.ndarray):
         markers = x[:n_marker_params].reshape(-1, 6)
-        cameras = x[n_marker_params:].reshape(-1, 6)
-        return markers, cameras
+        cameras = x[n_marker_params: n_marker_params + n_camera_params].reshape(-1, 6)
+        log_sizes = x[n_marker_params + n_camera_params:]
+        return markers, cameras, log_sizes
 
     def project(x: np.ndarray) -> np.ndarray:
-        markers, cameras = unpack(x)
+        markers, cameras, log_sizes = unpack(x)
         R_m = np.concatenate([np.eye(3)[None], _rotations(markers[:, :3])]) if len(markers) else np.eye(3)[None]
         t_m = np.concatenate([np.zeros((1, 3)), markers[:, 3:]]) if len(markers) else np.zeros((1, 3))
         R_c, t_c = _rotations(cameras[:, :3]), cameras[:, 3:]
         m = det_marker + 1
-        world = np.einsum("nij,nkj->nki", R_m[m], local) + t_m[m][:, None, :]
+        corners = local * np.exp(log_sizes[det_size])[:, None, None] if free_sizes else local
+        world = np.einsum("nij,nkj->nki", R_m[m], corners) + t_m[m][:, None, :]
         cam = np.einsum("nij,nkj->nki", R_c[det_frame], world) + t_c[det_frame][:, None, :]
         z = np.where(cam[..., 2] > 1e-6, cam[..., 2], 1e-6)
         return np.stack([fx * cam[..., 0] / z + cx, fy * cam[..., 1] / z + cy], axis=-1)
 
     def residuals(x: np.ndarray) -> np.ndarray:
-        return (observed - project(x)).ravel()
+        out = (observed - project(x)).ravel()
+        if free_sizes:
+            out = np.append(out, 1e3 * unpack(x)[2].mean())       # fixes the common scale of the sizes
+        return out
 
     x0 = np.concatenate(
         [np.concatenate([_rvec(marker_poses[m][0]), marker_poses[m][1]]) for m in free_markers]
         + [np.concatenate([_rvec(camera_poses[f][0]), camera_poses[f][1]]) for f in frame_indices]
+        + [np.zeros(len(size_markers))]
     )
-    sparsity = lil_matrix((8 * len(detections), len(x0)), dtype=int)
+    sparsity = lil_matrix((8 * len(detections) + (1 if free_sizes else 0), len(x0)), dtype=int)
     for i in range(len(detections)):
         rows = slice(8 * i, 8 * i + 8)
         if det_marker[i] >= 0:
             sparsity[rows, 6 * det_marker[i]: 6 * det_marker[i] + 6] = 1
         start = n_marker_params + 6 * det_frame[i]
         sparsity[rows, start: start + 6] = 1
+        if free_sizes:
+            sparsity[rows, n_marker_params + n_camera_params + det_size[i]] = 1
+    if free_sizes:
+        sparsity[8 * len(detections), n_marker_params + n_camera_params:] = 1
     solution = least_squares(residuals, x0, jac_sparsity=sparsity, loss="soft_l1", f_scale=2.0,
                              x_scale="jac", method="trf", max_nfev=60)
 
-    markers, cameras = unpack(solution.x)
+    markers, cameras, log_sizes = unpack(solution.x)
     fitted_markers = {reference_id: (np.eye(3), np.zeros(3))}
     for m, i in marker_slot.items():
         fitted_markers[m] = (_rotations(markers[i:i + 1, :3])[0], markers[i, 3:])
     fitted_cameras = {f: (_rotations(cameras[i:i + 1, :3])[0], cameras[i, 3:]) for f, i in frame_slot.items()}
-    return _Fit(fitted_markers, fitted_cameras, detections, (observed - project(solution.x)))
+    return _Fit(fitted_markers, fitted_cameras, detections, observed - project(solution.x),
+                {m: float(np.exp(log_sizes[i])) for m, i in size_slot.items()})
 
 
 # ------------------------------------------------------------------------------ solving
@@ -609,7 +653,9 @@ def solve_video_body(
     log(f"Fitted {len(fit.camera_poses)} frames and {len(fit.marker_poses)} markers, "
         f"reprojection rms {total_rms:.2f} px")
 
-    dots = _solve_dots(frames, fit, K, options, log) if options.detect_dots else []
+    size_ratios = _check_sizes(fit, frames, sizes, K, ref_id, log)
+
+    dots = _solve_dots(frames, fit, K, options, total_rms, log) if options.detect_dots else []
 
     body_ids = [ref_id] + [m for m in options.body_markers if m != ref_id and m in fit.marker_poses]
     markers = []
@@ -623,7 +669,34 @@ def solve_video_body(
         marker_stats={m: stats[m] for m in body_ids},
         unconnected=unconnected,
         dots=dots,
+        size_ratios=size_ratios,
     )
+
+
+def _check_sizes(
+    fit: _Fit, frames: list[FrameObservation], sizes: dict[str, float], K: np.ndarray, reference_id: str,
+    log: Callable[[str], None],
+) -> dict[str, float]:
+    """Fit every marker's size too, and warn about a marker whose size disagrees with the others.
+
+    A marker's size is set by hand, and easy to get wrong: the side that counts is the outer edge
+    of the black border, not the printed sheet or the pattern inside it. A wrong size makes the
+    marker look nearer or farther than the others, which no pose can explain, so the fit is
+    poor and the marker's place in the result is off by a proportional amount. Only the sizes
+    relative to each other can be judged, so each is compared with the typical marker.
+    """
+    if len(fit.marker_poses) < 3:
+        return {}
+    free = _bundle_adjust(fit.detections, frames, sizes, K, fit.marker_poses, fit.camera_poses, reference_id,
+                          free_sizes=True)
+    typical = float(np.median(list(free.size_ratios.values())))
+    ratios = {m: r / typical for m, r in free.size_ratios.items()}
+    for marker_id, ratio in sorted(ratios.items()):
+        if abs(ratio - 1.0) > _SIZE_WARNING:
+            log(f"  warning: the footage fits marker '{marker_id}' best at {ratio:.2f} times the size given "
+                f"({sizes[marker_id] * ratio:.4f} m instead of {sizes[marker_id]:.4f} m), relative to the "
+                "other markers. Measure the outer edge of its black border.")
+    return ratios
 
 
 def _drop_thin_frames(detections: list[tuple[int, str]], min_markers: int) -> list[tuple[int, str]]:
@@ -682,7 +755,7 @@ def _parallax_deg(poses: list[tuple[np.ndarray, np.ndarray]], point: np.ndarray)
 
 def _solve_dots(
     frames: list[FrameObservation], fit: _Fit, K: np.ndarray, options: VideoCalibrationOptions,
-    log: Callable[[str], None],
+    fit_rms_px: float, log: Callable[[str], None],
 ) -> list[DotStats]:
     """Triangulate the prop's dots from the camera track.
 
@@ -692,6 +765,10 @@ def _solve_dots(
     """
     used = sorted(fit.camera_poses)
     poses = [fit.camera_poses[f] for f in used]
+    max_dot_rms = (
+        options.dot_max_rms_px if options.dot_max_rms_px is not None
+        else max(_MIN_DOT_RMS_PX, _DOT_RMS_RATIO * fit_rms_px)
+    )
     usable = [[d for d in frames[f].dots if d[3] >= options.dot_marker_exclude_scale] for f in used]
     candidates = [np.array([(u, v) for u, v, _, _ in dots], dtype=np.float64).reshape(-1, 2) for dots in usable]
 
@@ -711,7 +788,9 @@ def _solve_dots(
         if solved is None:
             continue
         point, inliers, _ = solved
-        if np.linalg.norm(point) > options.dot_max_distance_m:
+        # A tracklet is short, so its depth is still uncertain: only the final position is held to the
+        # distance limit, and this first, rough position to a looser one.
+        if np.linalg.norm(point) > _ROUGH_DISTANCE_FACTOR * options.dot_max_distance_m:
             continue
         if _parallax_deg([p for p, k in zip(view_poses, inliers) if k], point) < options.dot_min_parallax_deg:
             continue
@@ -728,14 +807,14 @@ def _solve_dots(
                 continue
             solved = _triangulate([poses[p] for p, _ in views], np.array([uv for _, uv in views]), K,
                                   options.dot_max_reprojection_px, options.dot_min_views)
-            if solved is None or np.linalg.norm(solved[0]) > options.dot_max_distance_m:
+            if solved is None or np.linalg.norm(solved[0]) > _ROUGH_DISTANCE_FACTOR * options.dot_max_distance_m:
                 continue
             point, inliers, dot_rms = solved
-            if dot_rms > options.dot_max_rms_px:
-                continue
             centers.append(point)
             results.append(DotStats(point, int(inliers.sum()), dot_rms))
         centers, results = _merge_duplicates(centers, results, options.dot_cluster_tolerance_m)
+    # Only now are the positions accurate enough to be held to the limits.
+    results = [d for d in results if np.linalg.norm(d.center) <= options.dot_max_distance_m and d.rms_px <= max_dot_rms]
     results.sort(key=lambda d: tuple(np.round(d.center, 3)))
     log(f"  {len(results)} dots solved: " + ", ".join(f"{d.views} views" for d in results))
     return results

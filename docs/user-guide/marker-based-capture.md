@@ -428,7 +428,8 @@ Film the prop with one camera that you move around it, while the prop and everyt
 around it stay still. This method often needs less equipment and gives a better result.
 
 Give it the video and the **intrinsics calibration** of the camera that filmed it, in the mode
-it was filmed in. `posetrak calib list` shows the calibrations with their ids; a unique prefix
+it was filmed in. `posetrak calib list` shows the calibrations with their ids and `posetrak calib show <id>`
+all their parameters; a unique prefix
 of an id is enough. The video is not a capture, so it has no calibration of its own, and it
 must have the image size the calibration was made for: the command refuses a video of another
 size.

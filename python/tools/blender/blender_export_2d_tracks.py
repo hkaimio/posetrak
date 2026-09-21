@@ -78,7 +78,7 @@ from pathlib import Path
 
 # Edit these two for interactive (Scripting-tab) use. Ignored if
 # --output-dir is given on the command line (headless use).
-OUTPUT_DIR = r"C:\Users\HarriKaimio\Desktop\blender_tracks"
+OUTPUT_DIR = str(Path.home() / "blender_tracks")
 CLIP_NAME = None  # None = export every loaded clip; or a specific clip's name
 
 

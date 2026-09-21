@@ -16,7 +16,7 @@ they name session databases and run IDs that exist only on the machine that
 holds the captures. See ``scripts/validate_marker_mocap.example.json`` for the
 format. Point the script at it with ``--cases`` or the environment variable
 ``POSETRAK_VALIDATION_CASES``. When neither is set, or the file or a session
-database is missing, the script says so and exits 0.
+database used by a selected case is missing, the script says so and exits 0.
 
 Session databases are never modified. Each one is copied (with SQLite's backup
 API, so a live WAL is included) into a work directory and migrated to the
@@ -511,7 +511,10 @@ def main() -> int:
         return 0
     cases_path = Path(args.cases)
     spec = json.loads(cases_path.read_text(encoding="utf-8"))
-    missing = [f"{n}: {p}" for n, p in spec["sessions"].items() if not Path(p).is_file()]
+    cases = [c for c in spec["cases"] if not args.only or c["name"] in args.only]
+    used_sessions = sorted({c["session"] for c in cases})
+    missing = [f"{n}: {spec['sessions'][n]}" for n in used_sessions
+               if not Path(spec["sessions"][n]).is_file()]
     if missing:
         print("SKIP: session database(s) not available:\n  " + "\n  ".join(missing))
         return 0
@@ -521,9 +524,6 @@ def main() -> int:
               f"      build it with: meson compile -C optbuild posetrak-tracker")
         return 1
     work = Path(args.work_dir) if args.work_dir else cases_path.parent / "validation-work"
-    cases = [c for c in spec["cases"] if not args.only or c["name"] in args.only]
-
-    used_sessions = sorted({c["session"] for c in cases})
     copies: dict[str, Path] = {}
     for name in used_sessions:
         dest = work / f"{name}.db"

@@ -26,7 +26,7 @@ position under the prediction covariance. Two things then change that cost:
 | Mechanism | Where | Effect |
 |---|---|---|
 | Tracklet continuity | `resolve_dot_assignment()`, opt-in via `dot_tracklet_gate_multiplier > 1` | cost ÷ multiplier when the candidate's tracklet id equals the one resolved into this (subject, camera, marker) slot on the previous step |
-| Candidate ownership | same loop, `subject_mask` | cost set to `kNotOwnedCost` when the candidate is not in the subject's own sequence |
+| Candidate ownership | same loop, `subject_mask` | pair excluded (a fixed cost far above the gate) when the candidate is not in the subject's own sequence |
 
 Two other things the design doc lists as cost mechanisms are *not* in the
 matrix. Backface culling happens earlier, in the prediction

@@ -9,10 +9,27 @@ script-driven workflows into CLI and GUI features, per the productization plan.
 """
 categories = ["tracker-core", "detection-pipeline"]
 target_release = "TBD"
-last_updated = 2026-09-19
+last_updated = 2026-09-21
 ```
 
 # Marker-based mocap — status
+
+- **2026-09-21** (productization plan: branch hygiene and CLI workflows
+  delivered) — The foundation is merged into `main` and the CLI-complete
+  workflows are in place: person + prop tracking with shared dot candidates,
+  `detect run --type aruco|dots`, `capture object`, `sequence finalise-object` and
+  `add-dots`, `detect import-2d`, catalog modules with the topology check,
+  `marker-body calibrate` (fixed cameras) and `calibrate-video` (one moving
+  camera), `calib show`, and a
+  [user guide](../../../user-guide/marker-based-capture.md). Checked on
+  the merged code: the C++ and Python suites pass, and the validation driver's pen,
+  pad, single-ball, leg-module and person + ball cases reproduce the recorded
+  values in [validation-baseline.md](validation-baseline.md) exactly. The sword case
+  was not re-run (its capture is on a drive that was not mounted). Still deferred, each
+  waiting for the trigger in the plan's §10.2: `sequence compose` with per-source
+  noise, `track export-2d`, the multi-view seed provider, labeled `import-2d`, and the
+  `marker-set` CLI with `marker_attachment_sets`. Next: assignment robustness
+  (plan §5 WS2), ahead of processing the torso+arm capture.
 
 - **2026-09-19** (productization plan, review round 1) — Harri's inline
   review folded into

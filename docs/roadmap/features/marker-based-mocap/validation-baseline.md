@@ -35,8 +35,10 @@ python scripts/validate_marker_mocap.py --cases cases.json --reuse-copies --reus
   `meson compile -C optbuild posetrak-tracker`. The driver deliberately does
   not use `default_binary_path()`, which prefers an installed copy under
   `~/.posetrak` that can be older than the source.
-- The script skips, with exit code 0, when the cases file or a database is
-  absent, so it is safe to leave in a workflow that runs elsewhere.
+- The script skips, with exit code 0, when the cases file or a database used by
+  a selected case is absent, so it is safe to leave in a workflow that runs
+  elsewhere, and a capture on a drive that is not mounted does not block the
+  cases on the other drives.
 
 ## Cases and baseline values
 

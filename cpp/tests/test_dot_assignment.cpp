@@ -67,6 +67,14 @@ MarkerPrediction make_prediction(double px, double py, double std = 2.0) {
 
 constexpr double kGate = 9.21;  // chi-squared 99% for 2-DOF, matches the real config default
 
+DotAssignmentContext make_context(int frame_idx = 0, double timestamp = 0.0) {
+    DotAssignmentContext context;
+    context.gate_mahalanobis = kGate;
+    context.frame_idx = frame_idx;
+    context.timestamp = timestamp;
+    return context;
+}
+
 }  // namespace
 
 TEST_CASE("resolve_dot_assignment: single subject, single candidate, clean match",
@@ -78,7 +86,7 @@ TEST_CASE("resolve_dot_assignment: single subject, single candidate, clean match
     std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
     candidates[0] = {make_candidate(0, 100.5, 200.5)};
 
-    auto result = resolve_dot_assignment({subject}, candidates, kGate, /*frame_idx=*/3, 1.5);
+    auto result = resolve_dot_assignment({subject}, candidates, make_context(/*frame_idx=*/3, 1.5));
 
     REQUIRE(result.count(0) == 1);
     REQUIRE(result.at(0).resolved.size() == 1);
@@ -100,7 +108,7 @@ TEST_CASE("resolve_dot_assignment: candidate beyond the gate resolves to nothing
     std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
     candidates[0] = {make_candidate(0, 500.0, 500.0)};  // far outside 1px std
 
-    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0);
+    auto result = resolve_dot_assignment({subject}, candidates, make_context());
 
     REQUIRE(result.count(0) == 0);
 }
@@ -128,8 +136,10 @@ TEST_CASE(
     PrevDotTrackletIds prev_tracklet_ids;
     prev_tracklet_ids[0][0][7] = 42;  // same tracklet resolved into this slot last frame
 
-    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0, 5.0, {}, {}, nullptr,
-                                         /*dot_tracklet_gate_multiplier=*/2.0, prev_tracklet_ids);
+    auto context = make_context();
+    context.dot_tracklet_gate_multiplier = 2.0;
+    context.prev_tracklet_ids = prev_tracklet_ids;
+    auto result = resolve_dot_assignment({subject}, candidates, context);
 
     REQUIRE(result.count(0) == 1);
     REQUIRE(result.at(0).resolved.size() == 1);
@@ -152,8 +162,10 @@ TEST_CASE(
     PrevDotTrackletIds prev_tracklet_ids;
     prev_tracklet_ids[0][0][7] = 42;
 
-    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0, 5.0, {}, {}, nullptr,
-                                         /*dot_tracklet_gate_multiplier=*/2.0, prev_tracklet_ids);
+    auto context = make_context();
+    context.dot_tracklet_gate_multiplier = 2.0;
+    context.prev_tracklet_ids = prev_tracklet_ids;
+    auto result = resolve_dot_assignment({subject}, candidates, context);
 
     REQUIRE(result.count(0) == 0);
 }
@@ -174,7 +186,7 @@ TEST_CASE(
     prev_tracklet_ids[0][0][7] = 42;  // a real match, but the multiplier default (1.0) should
                                       // still leave this pairing beyond the gate
 
-    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0);
+    auto result = resolve_dot_assignment({subject}, candidates, make_context());
 
     REQUIRE(result.count(0) == 0);
 }
@@ -190,7 +202,7 @@ TEST_CASE("resolve_dot_assignment: a resolved Observation carries its candidate'
     std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
     candidates[0] = {cand};
 
-    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0);
+    auto result = resolve_dot_assignment({subject}, candidates, make_context());
 
     REQUIRE(result.at(0).resolved[0].tracklet_id == 7);
 }
@@ -211,7 +223,7 @@ TEST_CASE("resolve_dot_assignment: a clearly-closer subject wins, the other gets
     std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
     candidates[0] = {make_candidate(0, 100.2, 100.1)};
 
-    auto result = resolve_dot_assignment({a, b}, candidates, kGate, 0, 0.0);
+    auto result = resolve_dot_assignment({a, b}, candidates, make_context());
 
     REQUIRE(result.count(0) == 1);
     REQUIRE(result.at(0).resolved.size() == 1);
@@ -237,7 +249,7 @@ TEST_CASE(
     std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
     candidates[0] = {make_candidate(0, 101.5, 100.0)};  // roughly equidistant from both
 
-    auto result = resolve_dot_assignment({a, b}, candidates, kGate, 0, 0.0);
+    auto result = resolve_dot_assignment({a, b}, candidates, make_context());
 
     int total_resolved = 0;
     for (auto const& [subject_id, assignment] : result) {
@@ -265,7 +277,7 @@ TEST_CASE(
     std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
     candidates[0] = {make_candidate(0, 100.0, 100.0)};  // exactly midway
 
-    auto result = resolve_dot_assignment({a, b}, candidates, kGate, 0, 0.0);
+    auto result = resolve_dot_assignment({a, b}, candidates, make_context());
 
     bool a_won = result.count(0) == 1 && !result.at(0).resolved.empty();
     bool b_won = result.count(1) == 1 && !result.at(1).resolved.empty();
@@ -282,7 +294,7 @@ TEST_CASE("resolve_dot_assignment: two markers, one candidate each, no cross-ass
     std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
     candidates[0] = {make_candidate(0, 50.5, 49.5), make_candidate(0, 400.2, 399.8)};
 
-    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0);
+    auto result = resolve_dot_assignment({subject}, candidates, make_context());
 
     REQUIRE(result.at(0).resolved.size() == 2);
     std::vector<int> marker_ids;
@@ -305,7 +317,7 @@ TEST_CASE("resolve_dot_assignment: cameras resolve independently", "[dot_assignm
     candidates[0] = {make_candidate(0, 10.1, 9.9)};
     candidates[1] = {make_candidate(1, 900.2, 899.9)};
 
-    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0);
+    auto result = resolve_dot_assignment({subject}, candidates, make_context());
 
     REQUIRE(result.at(0).resolved.size() == 2);
     for (auto const& obs : result.at(0).resolved) {
@@ -325,7 +337,7 @@ TEST_CASE("resolve_dot_assignment: no candidates for a camera resolves to nothin
     std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
     candidates[0] = {};  // present but empty -- e.g. a processed frame that saw nothing
 
-    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0);
+    auto result = resolve_dot_assignment({subject}, candidates, make_context());
     REQUIRE(result.empty());
 }
 
@@ -333,7 +345,7 @@ TEST_CASE("resolve_dot_assignment: no subjects resolves to an empty map", "[dot_
     std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
     candidates[0] = {make_candidate(0, 10.0, 10.0)};
 
-    auto result = resolve_dot_assignment({}, candidates, kGate, 0, 0.0);
+    auto result = resolve_dot_assignment({}, candidates, make_context());
     REQUIRE(result.empty());
 }
 
@@ -356,7 +368,7 @@ TEST_CASE(
 
     // Default StreakVelocityConfig{} (enabled=false) and empty prev_positions --
     // exactly what an existing caller/test not passing these arguments gets.
-    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0);
+    auto result = resolve_dot_assignment({subject}, candidates, make_context());
 
     REQUIRE(result.at(0).resolved.size() == 1);
     REQUIRE(result.at(0).resolved[0].mode == MeasurementMode::POSITION);
@@ -378,8 +390,10 @@ TEST_CASE(
     streak_cfg.k_min_samples = 1;
     PrevDotPositions prev_positions;  // empty -- this exact slot was never resolved before
 
-    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0, 5.0, streak_cfg,
-                                         prev_positions);
+    auto context = make_context();
+    context.streak_config = streak_cfg;
+    context.prev_positions = prev_positions;
+    auto result = resolve_dot_assignment({subject}, candidates, context);
 
     REQUIRE(result.at(0).resolved.size() == 1);
 }
@@ -401,8 +415,10 @@ TEST_CASE(
     PrevDotPositions prev_positions;
     prev_positions[0][0][7] = Eigen::Vector2d(100.0, 100.0);  // real, well-above-gate movement
 
-    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0, 5.0, streak_cfg,
-                                         prev_positions);
+    auto context = make_context();
+    context.streak_config = streak_cfg;
+    context.prev_positions = prev_positions;
+    auto result = resolve_dot_assignment({subject}, candidates, context);
 
     REQUIRE(result.at(0).resolved.size() == 1);
 }
@@ -424,8 +440,11 @@ TEST_CASE("resolve_dot_assignment: streak velocity respects the movement gate",
     prev_positions[0][0][7] = Eigen::Vector2d(100.0, 100.0);  // 0.2px -- below the 3.0px gate
 
     std::unordered_map<int, StreakKAccumulator> streak_k;
-    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0, 5.0, streak_cfg,
-                                         prev_positions, &streak_k);
+    auto context = make_context();
+    context.streak_config = streak_cfg;
+    context.prev_positions = prev_positions;
+    context.streak_k_state = &streak_k;
+    auto result = resolve_dot_assignment({subject}, candidates, context);
 
     REQUIRE(result.at(0).resolved.size() == 1);  // no VELOCITY observation
     REQUIRE(streak_k[0].sample_count() == 0);    // and the sample was never admitted either
@@ -449,8 +468,11 @@ TEST_CASE(
     prev_positions[0][0][7] = Eigen::Vector2d(100.0, 100.0);
 
     std::unordered_map<int, StreakKAccumulator> streak_k;
-    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0, 5.0, streak_cfg,
-                                         prev_positions, &streak_k);
+    auto context = make_context();
+    context.streak_config = streak_cfg;
+    context.prev_positions = prev_positions;
+    context.streak_k_state = &streak_k;
+    auto result = resolve_dot_assignment({subject}, candidates, context);
 
     REQUIRE(result.at(0).resolved.size() == 1);  // not trusted yet -- no VELOCITY observation
     REQUIRE(streak_k[0].sample_count() == 1);    // but the sample was admitted
@@ -477,8 +499,11 @@ TEST_CASE(
     std::unordered_map<int, StreakKAccumulator> streak_k;
     streak_k[0].add(/*streak_px=*/3.0, /*disp_px=*/10.0, /*window=*/200);  // pre-existing sample
 
-    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0, 5.0, streak_cfg,
-                                         prev_positions, &streak_k);
+    auto context = make_context();
+    context.streak_config = streak_cfg;
+    context.prev_positions = prev_positions;
+    context.streak_k_state = &streak_k;
+    auto result = resolve_dot_assignment({subject}, candidates, context);
 
     REQUIRE(result.at(0).resolved.size() == 2);
     Observation const* vel = nullptr;
@@ -521,8 +546,11 @@ TEST_CASE(
     prev_positions[0][0][7] = Eigen::Vector2d(100.0, 100.0);  // disp = (+10, 0)
 
     std::unordered_map<int, StreakKAccumulator> streak_k;
-    auto result = resolve_dot_assignment({subject}, candidates, kGate, 0, 0.0, 5.0, streak_cfg,
-                                         prev_positions, &streak_k);
+    auto context = make_context();
+    context.streak_config = streak_cfg;
+    context.prev_positions = prev_positions;
+    context.streak_k_state = &streak_k;
+    auto result = resolve_dot_assignment({subject}, candidates, context);
 
     Observation const* vel = nullptr;
     for (auto const& obs : result.at(0).resolved) {
@@ -864,4 +892,70 @@ TEST_CASE("resolve_shared_dot_assignment: a subject cannot claim a candidate it 
     REQUIRE(claimed(kSubject0) == 1);              // owned by subject 0
     REQUIRE(claimed(kSubject0 | kSubject1) == 1);  // shared: either may claim it
     REQUIRE(claimed(kSubject1) == 0);              // owned by another subject only
+}
+
+// ---------------------------------------------------------------------------
+// The cost modifiers on their own, and the chain default_cost_modifiers() builds.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("TrackletContinuityModifier: supports a candidate continuing the slot's tracklet",
+          "[dot_assignment]") {
+    MarkerPrediction const prediction = make_prediction(100.0, 200.0);
+    DotSlotRef const slot{/*subject_id=*/0, /*camera_id=*/0, /*marker_id=*/7, &prediction};
+    DotAssignmentContext context = make_context();
+    context.dot_tracklet_gate_multiplier = 2.5;
+    context.prev_tracklet_ids[0][0][7] = 42;
+
+    UnlabeledCandidate candidate = make_candidate(0, 100.0, 200.0);
+    candidate.tracklet_id = 42;
+    TrackletContinuityModifier const modifier;
+
+    CostSupport const same = modifier.apply(slot, candidate, context);
+    REQUIRE(same.factor == 2.5);
+    REQUIRE_FALSE(same.exclude);
+
+    candidate.tracklet_id = 43;  // another tracklet
+    REQUIRE(modifier.apply(slot, candidate, context).factor == 1.0);
+
+    candidate.tracklet_id = -1;  // no tracklet at all
+    REQUIRE(modifier.apply(slot, candidate, context).factor == 1.0);
+
+    candidate.tracklet_id = 42;
+    DotSlotRef const other_marker{0, 0, 8, &prediction};  // the slot has no previous tracklet
+    REQUIRE(modifier.apply(other_marker, candidate, context).factor == 1.0);
+    DotSlotRef const other_camera{0, 1, 7, &prediction};
+    REQUIRE(modifier.apply(other_camera, candidate, context).factor == 1.0);
+    DotSlotRef const other_subject{1, 0, 7, &prediction};
+    REQUIRE(modifier.apply(other_subject, candidate, context).factor == 1.0);
+}
+
+TEST_CASE("CandidateOwnershipModifier: excludes a candidate the subject does not own",
+          "[dot_assignment]") {
+    MarkerPrediction const prediction = make_prediction(100.0, 200.0);
+    DotAssignmentContext const context = make_context();
+    UnlabeledCandidate candidate = make_candidate(0, 100.0, 200.0);
+    candidate.subject_mask = 0b10;  // owned by subject 1 only
+    CandidateOwnershipModifier const modifier;
+
+    REQUIRE(modifier.apply({0, 0, 7, &prediction}, candidate, context).exclude);
+    REQUIRE_FALSE(modifier.apply({1, 0, 7, &prediction}, candidate, context).exclude);
+    // A subject id beyond the mask's 64 bits cannot be denied a candidate.
+    REQUIRE_FALSE(modifier.apply({64, 0, 7, &prediction}, candidate, context).exclude);
+}
+
+TEST_CASE("default_cost_modifiers: ownership always, tracklet continuity only when configured",
+          "[dot_assignment]") {
+    DotAssignmentContext context = make_context();
+    auto modifiers = default_cost_modifiers(context);
+    REQUIRE(modifiers.size() == 1);
+    REQUIRE(dynamic_cast<CandidateOwnershipModifier*>(modifiers[0].get()) != nullptr);
+
+    context.dot_tracklet_gate_multiplier = 2.0;  // no previous tracklet ids yet
+    REQUIRE(default_cost_modifiers(context).size() == 1);
+
+    context.prev_tracklet_ids[0][0][7] = 1;
+    modifiers = default_cost_modifiers(context);
+    REQUIRE(modifiers.size() == 2);
+    REQUIRE(dynamic_cast<TrackletContinuityModifier*>(modifiers[0].get()) != nullptr);
+    REQUIRE(dynamic_cast<CandidateOwnershipModifier*>(modifiers[1].get()) != nullptr);
 }

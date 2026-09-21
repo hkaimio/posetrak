@@ -38,6 +38,7 @@
 #include "posetrak/tracking/streak_k_accumulator.hpp"
 #include "posetrak/tracking/tracker.hpp"
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -99,6 +100,118 @@ struct SubjectDotPredictions {
     std::unordered_map<int, std::unordered_map<int, MarkerPrediction>> predictions_by_camera;
 };
 
+/// @brief Everything a call of resolve_dot_assignment() reads besides the
+/// subjects' predictions and the candidates.
+///
+/// Holds the frame being resolved, the gate, and the state of the previous
+/// frame that the cost modifiers and the streak-velocity extension look up. The
+/// defaults leave every optional mechanism off, so a default-constructed value
+/// resolves by squared Mahalanobis distance alone.
+struct DotAssignmentContext {
+    /// Squared-Mahalanobis gate (TrackerConfig::dot_assignment_gate_mahalanobis,
+    /// chi-squared 99% for 2 DOF). A pairing above it is dropped, not forced
+    /// ("ambiguity policy: drop, don't guess", marker-detection-analysis.md).
+    double gate_mahalanobis = 9.21;
+    int frame_idx = 0;       ///< Stamped onto every resolved Observation.
+    double timestamp = 0.0;  ///< Stamped onto every resolved Observation.
+    /// Base calibration noise (TrackerConfig::calib_noise_std) a resolved
+    /// Observation's noise_std_override is inflated from when its candidate is a
+    /// motion-blur streak (major_axis notably exceeds minor_axis -- see
+    /// dot_blob_detector.py's elongated-blob acceptance path). A round dot keeps
+    /// the normal noise formula.
+    double calib_noise_std = 5.0;
+    /// Streak-derived velocity extension (streak-velocity-design.md §4).
+    /// Default-constructed (enabled=false) skips it. When enabled, a resolved
+    /// streaked candidate also gets a VELOCITY-mode Observation for the same slot,
+    /// but only once prev_positions holds a real previous-frame position for that
+    /// (subject, camera, marker): that admits the sample into the camera's k
+    /// estimate and resolves the streak axis's 180-degree sign ambiguity against a
+    /// measured direction. A dot reacquired after being lost entirely gets no
+    /// streak-velocity boost on the frame it reappears (design doc §4).
+    StreakVelocityConfig streak_config;
+    /// Previous-frame resolved positions; empty is correct when streak_config is
+    /// disabled.
+    PrevDotPositions prev_positions;
+    /// Per-camera k accumulator, updated in place as samples are admitted.
+    /// nullptr uses a call-local one that is discarded.
+    std::unordered_map<int, StreakKAccumulator>* streak_k_state = nullptr;
+    /// Tracklet gate relaxation (TrackerConfig::dot_tracklet_gate_multiplier), see
+    /// TrackletContinuityModifier. 1.0 turns it off.
+    double dot_tracklet_gate_multiplier = 1.0;
+    /// Previous-frame resolved tracklet ids; empty disables the relaxation.
+    PrevDotTrackletIds prev_tracklet_ids;
+};
+
+/// @brief One (subject, camera, marker) slot as a cost modifier sees it.
+struct DotSlotRef {
+    int subject_id;
+    int camera_id;
+    int marker_id;
+    MarkerPrediction const* prediction;  ///< This step's prediction for the slot.
+};
+
+/// @brief What a CostModifier says about one candidate-slot pair.
+struct CostSupport {
+    /// The pair's squared Mahalanobis cost is divided by this: 1 leaves it, above
+    /// 1 makes the pair cheaper, below 1 dearer. It divides rather than multiplies
+    /// so that a factor equal to a config value reproduces that value's own
+    /// division exactly.
+    double factor = 1.0;
+    /// The pair must not be chosen; its cost only has to lose to the solver's
+    /// padding cost, which is just above the gate.
+    bool exclude = false;
+};
+
+/// @brief One piece of evidence that changes the cost of pairing a candidate with
+/// a slot.
+///
+/// A modifier is a pure function of the slot, the candidate and the context, so it
+/// is testable on its own. resolve_dot_assignment() applies the modifiers in
+/// order; an exclusion stops the chain for that pair.
+class CostModifier {
+   public:
+    virtual ~CostModifier() = default;
+
+    /// @param slot The slot being costed.
+    /// @param candidate The candidate it might be paired with.
+    /// @param context The frame's context.
+    /// @return The modifier's support for the pair.
+    virtual CostSupport apply(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
+                              DotAssignmentContext const& context) const = 0;
+};
+
+/// @brief Makes a pair cheaper when the candidate continues the tracklet that
+/// resolved into the slot on the previous frame.
+///
+/// The factor is DotAssignmentContext::dot_tracklet_gate_multiplier. The gate
+/// itself stays one scalar; only a pairing with independent identity evidence
+/// behind it gets cheaper, rather than the gate loosening for everything (real
+/// data showed only about 4-6% of raw candidates during a fast swing survive the
+/// plain gate, with none rejected at the later UKF outlier check, so the
+/// attrition is entirely there). Applies to candidates with a tracklet id.
+class TrackletContinuityModifier final : public CostModifier {
+   public:
+    CostSupport apply(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
+                      DotAssignmentContext const& context) const override;
+};
+
+/// @brief Excludes a pair when the candidate is not in the subject's own sequence
+/// (UnlabeledCandidate::subject_mask has no bit for the subject).
+class CandidateOwnershipModifier final : public CostModifier {
+   public:
+    CostSupport apply(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
+                      DotAssignmentContext const& context) const override;
+};
+
+/// @brief The modifiers a context asks for, in the order they apply: tracklet
+/// continuity (only when its multiplier is above 1 and there are previous
+/// tracklet ids), then candidate ownership.
+///
+/// @param context The frame's context.
+/// @return Owning pointers to the modifiers.
+std::vector<std::unique_ptr<CostModifier>>
+default_cost_modifiers(DotAssignmentContext const& context);
+
 /// @brief Pure core of the shared dot-assignment phase (design doc §5.2/§7.1):
 /// one combined Hungarian solve per camera, columns = the union of every
 /// participating subject's dot-slot predictions for that camera, rows = that
@@ -107,89 +220,28 @@ struct SubjectDotPredictions {
 /// once rather than order-dependent (design doc §5.3's joint-vs-sequential
 /// decision).
 ///
-/// Cost is squared Mahalanobis distance,
-/// `(candidate - predicted)^T * Cov_pixel^-1 * (candidate - predicted)`,
-/// gated against *gate_mahalanobis* via solve_assignment() (assignment.hpp) --
-/// a pairing above the gate is dropped, not forced ("ambiguity policy: drop,
-/// don't guess", marker-detection-analysis.md). A slot or candidate absent
-/// from every returned Observation was left unmatched by the gate, not a bug.
+/// The cost of a pair is the squared Mahalanobis distance,
+/// `(candidate - predicted)^T * Cov_pixel^-1 * (candidate - predicted)`, changed by
+/// the CostModifiers of default_cost_modifiers(), and gated against
+/// DotAssignmentContext::gate_mahalanobis via solve_assignment() (assignment.hpp).
+/// A slot or candidate absent from every returned Observation was left unmatched
+/// by the gate, not a bug.
 ///
 /// @param subjects Every dot-bearing subject's predictions for this frame,
-///        gathered by the caller (see resolve_shared_dot_assignment() for
-///        the Tracker-calling version of that gathering step).
-/// @param candidates_by_camera This frame's anonymous dot candidates, keyed
-///        by camera_id (design doc §5.4: assumed already a single
-///        de-duplicated pool per camera -- the scene-wide-detection/de-dup
-///        bridge a second real dot-bearing subject would need is explicitly
-///        out of scope here, see that section).
-/// @param gate_mahalanobis Squared-Mahalanobis-distance gate
-///        (TrackerConfig::dot_assignment_gate_mahalanobis).
-/// @param frame_idx Frame index to stamp onto every resolved Observation.
-/// @param timestamp Timestamp to stamp onto every resolved Observation.
-/// @param calib_noise_std Base calibration noise (TrackerConfig::calib_noise_std)
-///        a resolved Observation's noise_std_override is inflated from when its
-///        candidate is a motion-blur streak (major_axis notably exceeds
-///        minor_axis -- see dot_blob_detector.py's elongated-blob acceptance
-///        path) rather than a round dot. Defaulted so existing callers/tests
-///        constructing candidates with major_axis == minor_axis (a round dot)
-///        are unaffected either way.
-/// @param streak_config Streak-derived velocity extension (streak-velocity-design.md
-///        §4) -- default-constructed (enabled=false) skips it entirely, so an
-///        existing caller/test passing nothing for the remaining parameters is
-///        unaffected. When enabled, a resolved streaked candidate ALSO (not
-///        instead of the usual POSITION Observation above) gets a second,
-///        VELOCITY-mode Observation for the same (camera, marker) slot, built
-///        from the streak's own length and canonicalized axis rescaled by the
-///        camera's running k = exposure_time/frame_time estimate -- but only
-///        once *prev_positions* has a real previous-frame position for this
-///        exact (subject, camera, marker) slot: that's both what admits this
-///        sample into the k estimate (§3: k is speed-independent only when
-///        both streak_length and frame_displacement are real) and what
-///        resolves the streak axis's inherent 180-degree sign ambiguity
-///        against a real measured direction. A dot reacquired after being lost
-///        entirely therefore can't get a streak-velocity boost on the exact
-///        frame it reappears -- a known, documented scope limit (design doc
-///        §4), not an oversight: the harder "never-tracked-before" case would
-///        need a different reference direction (e.g. the model's own
-///        predicted displacement) that isn't wired up here.
-/// @param prev_positions This frame's previous-frame resolved dot positions,
-///        gathered by the caller (see resolve_shared_dot_assignment()). Empty
-///        (the default) is correct whenever streak_config.enabled is false.
-/// @param streak_k_state Mutable per-camera k accumulator, updated in place as
-///        real samples are admitted. Optional (nullptr uses a throwaway,
-///        call-local accumulator instead) purely so a caller that only wants
-///        this call's own streak-velocity Observations, without persisting k
-///        across calls, doesn't have to keep one around -- resolve_shared_dot_
-///        assignment() always passes a Tracker-owned one so it actually
-///        accumulates across frames the way the design intends.
-/// @param dot_tracklet_gate_multiplier Cost-matrix gate relaxation
-///        (TrackerConfig::dot_tracklet_gate_multiplier): when a
-///        candidate's own tracklet_id matches *prev_tracklet_ids*'s entry for
-///        the (subject, camera, marker) slot being costed, that pair's squared
-///        Mahalanobis cost is divided by this before the gate check -- the
-///        gate itself (gate_mahalanobis) stays a single, unmodified scalar
-///        passed into solve_assignment(); this instead makes one specific
-///        pairing's own cost cheaper, which is functionally the same as
-///        loosening the gate but only for a pairing with independent identity
-///        evidence behind it, not universally (real data showed only ~4-6% of raw candidates during
-///        a fast swing survive the plain gate, with zero rejected at the later UKF outlier check --
-///        the attrition is entirely here). 1.0 (default) is a no-op divide, so every existing
-///        caller/test is unaffected.
-/// @param prev_tracklet_ids This frame's previous-frame resolved tracklet ids,
-///        gathered by the caller (see resolve_shared_dot_assignment()). Empty
-///        (the default) is correct whenever dot_tracklet_gate_multiplier is
-///        1.0 (relaxation can never trigger with no map to look up against).
+///        gathered by the caller (see resolve_shared_dot_assignment() for the
+///        Tracker-calling version of that gathering step).
+/// @param candidates_by_camera This frame's anonymous dot candidates, keyed by
+///        camera_id: one pool per camera, with the owners of each candidate in its
+///        subject_mask (see append_unique_candidates()).
+/// @param context The gate, frame stamp and previous-frame state.
 /// @return subject_id -> SubjectDotAssignment, for every subject that had at
-///         least one resolved Observation. A subject with nothing resolved
-///         this frame (no predictions, or every candidate gated out) is
-///         simply absent from the map, not present with an empty vector.
+///         least one resolved Observation. A subject with nothing resolved this
+///         frame (no predictions, or every candidate gated out) is absent from
+///         the map, not present with an empty vector.
 std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
     std::vector<SubjectDotPredictions> const& subjects,
     std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
-    double gate_mahalanobis, int frame_idx, double timestamp, double calib_noise_std = 5.0,
-    StreakVelocityConfig const& streak_config = {}, PrevDotPositions const& prev_positions = {},
-    std::unordered_map<int, StreakKAccumulator>* streak_k_state = nullptr,
-    double dot_tracklet_gate_multiplier = 1.0, PrevDotTrackletIds const& prev_tracklet_ids = {});
+    DotAssignmentContext const& context);
 
 /// @brief One dot-bearing subject as resolve_shared_dot_assignment() needs
 /// it: an id to key the result map by, plus the Tracker to query

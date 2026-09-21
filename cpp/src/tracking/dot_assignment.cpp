@@ -6,29 +6,69 @@
 
 #include "posetrak/tracking/assignment.hpp"
 #include <cmath>
+#include <utility>
 
 namespace posetrak {
 
 namespace {
-// Cost of pairing a candidate with a subject that does not own it: far above any gate.
-constexpr double kNotOwnedCost = 1e9;
+// Cost of an excluded pair: far above any gate.
+constexpr double kExcludedCost = 1e9;
 }  // namespace
+
+CostSupport TrackletContinuityModifier::apply(DotSlotRef const& slot,
+                                              UnlabeledCandidate const& candidate,
+                                              DotAssignmentContext const& context) const {
+    if (candidate.tracklet_id < 0)
+        return {};
+    auto const subject_it = context.prev_tracklet_ids.find(slot.subject_id);
+    if (subject_it == context.prev_tracklet_ids.end())
+        return {};
+    auto const camera_it = subject_it->second.find(slot.camera_id);
+    if (camera_it == subject_it->second.end())
+        return {};
+    auto const marker_it = camera_it->second.find(slot.marker_id);
+    if (marker_it == camera_it->second.end() || marker_it->second != candidate.tracklet_id)
+        return {};
+    return {context.dot_tracklet_gate_multiplier, false};
+}
+
+CostSupport CandidateOwnershipModifier::apply(DotSlotRef const& slot,
+                                              UnlabeledCandidate const& candidate,
+                                              DotAssignmentContext const&) const {
+    // subject_mask has 64 bits; a subject id beyond them owns nothing it can be denied.
+    bool const owned = slot.subject_id >= 64 || ((candidate.subject_mask >> slot.subject_id) & 1U);
+    return {1.0, !owned};
+}
+
+std::vector<std::unique_ptr<CostModifier>>
+default_cost_modifiers(DotAssignmentContext const& context) {
+    std::vector<std::unique_ptr<CostModifier>> modifiers;
+    if (context.dot_tracklet_gate_multiplier > 1.0 && !context.prev_tracklet_ids.empty())
+        modifiers.push_back(std::make_unique<TrackletContinuityModifier>());
+    modifiers.push_back(std::make_unique<CandidateOwnershipModifier>());
+    return modifiers;
+}
 
 std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
     std::vector<SubjectDotPredictions> const& subjects,
     std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
-    double gate_mahalanobis, int frame_idx, double timestamp, double calib_noise_std,
-    StreakVelocityConfig const& streak_config, PrevDotPositions const& prev_positions,
-    std::unordered_map<int, StreakKAccumulator>* streak_k_state,
-    double dot_tracklet_gate_multiplier, PrevDotTrackletIds const& prev_tracklet_ids) {
+    DotAssignmentContext const& context) {
     std::unordered_map<int, SubjectDotAssignment> result;
 
-    // Only touched when streak_config.enabled -- see the streak_k parameter doc
-    // comment (dot_assignment.hpp) for why a throwaway local is fine when the
+    double const gate_mahalanobis = context.gate_mahalanobis;
+    int const frame_idx = context.frame_idx;
+    double const timestamp = context.timestamp;
+    double const calib_noise_std = context.calib_noise_std;
+    StreakVelocityConfig const& streak_config = context.streak_config;
+    PrevDotPositions const& prev_positions = context.prev_positions;
+
+    // Only touched when streak_config.enabled -- a throwaway local is fine when the
     // caller doesn't want k to persist across calls.
     std::unordered_map<int, StreakKAccumulator> local_streak_k_state;
     std::unordered_map<int, StreakKAccumulator>& streak_k =
-        streak_k_state ? *streak_k_state : local_streak_k_state;
+        context.streak_k_state ? *context.streak_k_state : local_streak_k_state;
+
+    auto const modifiers = default_cost_modifiers(context);
 
     // One column per (subject, marker) slot with a prediction for this camera.
     struct Column {
@@ -65,30 +105,15 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
                 Eigen::Vector2d const diff = cand_pos - pred.position;
                 double mahal_sq = diff.transpose() * pred.covariance.inverse() * diff;
 
-                // Tracklet gate relaxation (see dot_assignment.hpp's own doc
-                // comment on this parameter): a candidate continuing the same tracklet that
-                // resolved into this exact (subject, camera, marker) slot last frame gets
-                // this one pairing's own cost divided down, rather than touching the shared
-                // gate_mahalanobis threshold every other pairing is still judged against.
-                if (dot_tracklet_gate_multiplier > 1.0 && row_cand.tracklet_id >= 0) {
-                    auto subj_it = prev_tracklet_ids.find(col.subject_id);
-                    if (subj_it != prev_tracklet_ids.end()) {
-                        auto cam_it2 = subj_it->second.find(camera_id);
-                        if (cam_it2 != subj_it->second.end()) {
-                            auto marker_it = cam_it2->second.find(col.marker_id);
-                            if (marker_it != cam_it2->second.end() &&
-                                marker_it->second == row_cand.tracklet_id) {
-                                mahal_sq /= dot_tracklet_gate_multiplier;
-                            }
-                        }
+                DotSlotRef const slot{col.subject_id, camera_id, col.marker_id, &pred};
+                for (auto const& modifier : modifiers) {
+                    CostSupport const support = modifier->apply(slot, row_cand, context);
+                    if (support.exclude) {
+                        mahal_sq = kExcludedCost;
+                        break;
                     }
-                }
-
-                // A candidate a subject's own sequence does not hold is out of
-                // reach for that subject. The cost only needs to lose to the
-                // solver's padding cost, which is just above the gate.
-                if (col.subject_id < 64 && !((row_cand.subject_mask >> col.subject_id) & 1U)) {
-                    mahal_sq = kNotOwnedCost;
+                    if (support.factor != 1.0)
+                        mahal_sq /= support.factor;
                 }
 
                 cost[static_cast<size_t>(r) * static_cast<size_t>(n_cols) +
@@ -293,10 +318,17 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     std::unordered_map<int, StreakKAccumulator>* streak_k_state =
         subjects.empty() ? nullptr : &subjects.front().tracker->streak_k_accumulators();
 
-    return resolve_dot_assignment(
-        predictions, candidates_by_camera, config.dot_assignment_gate_mahalanobis, frame_idx,
-        timestamp, config.calib_noise_std, streak_config, prev_positions, streak_k_state,
-        config.dot_tracklet_gate_multiplier, prev_tracklet_ids);
+    DotAssignmentContext context;
+    context.gate_mahalanobis = config.dot_assignment_gate_mahalanobis;
+    context.frame_idx = frame_idx;
+    context.timestamp = timestamp;
+    context.calib_noise_std = config.calib_noise_std;
+    context.streak_config = streak_config;
+    context.prev_positions = std::move(prev_positions);
+    context.streak_k_state = streak_k_state;
+    context.dot_tracklet_gate_multiplier = config.dot_tracklet_gate_multiplier;
+    context.prev_tracklet_ids = std::move(prev_tracklet_ids);
+    return resolve_dot_assignment(predictions, candidates_by_camera, context);
 }
 
 }  // namespace posetrak

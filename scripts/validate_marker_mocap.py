@@ -61,6 +61,11 @@ Case fields (all but ``name``, ``session`` and ``baseline_run`` are optional):
                          camera whose raw candidate feed holds clutter. The
                          copy is tagged ``validation:<case name>`` and reused
                          with ``--reuse-detection``
+    config_overrides     {column: value}: track with a copy of the baseline's tracker
+                         config in which these ``tracker_configs`` columns are set,
+                         for example ``dot_tracklet_gate_multiplier`` to exercise a
+                         setting the recorded runs leave at its default. The copy
+                         is named ``validation:<case name>`` and reused
     subjects             instead of baseline_run: a list of {"name", "baseline_run",
                          optional "seed_from_baseline"} tracked together. Each
                          subject is also tracked alone over the same
@@ -529,6 +534,29 @@ def redetect(db: Path, detection_run: str, case_name: str) -> tuple[str, float]:
         conn.close()
 
 
+def config_with_overrides(db: Path, config_id: str, overrides: dict, case_name: str) -> str:
+    """A copy of tracker config *config_id* with *overrides* applied, reused if one exists for the case."""
+    import uuid
+
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    try:
+        name = f"validation:{case_name}"
+        existing = conn.execute("SELECT id FROM tracker_configs WHERE name = ?", (name,)).fetchone()
+        if existing:
+            conn.execute("DELETE FROM tracker_configs WHERE id = ?", (existing["id"],))
+        row = conn.execute("SELECT * FROM tracker_configs WHERE id = ?", (config_id,)).fetchone()
+        values = {k: row[k] for k in row.keys()}
+        values.update(overrides)
+        values["id"], values["name"] = str(uuid.uuid4()), name
+        conn.execute(f"INSERT INTO tracker_configs ({','.join(values)}) VALUES ({','.join('?' * len(values))})",
+                     list(values.values()))
+        conn.commit()
+        return values["id"]
+    finally:
+        conn.close()
+
+
 def find_validation_sequence(db: Path, case_name: str) -> str | None:
     conn = open_readonly(db)
     try:
@@ -684,6 +712,8 @@ def main() -> int:
                 recipe["sequence"], detect_seconds = redetect(db, case["redetect"]["detection_run"], name)
                 print(f"detection done in {detect_seconds:.0f}s -> new sequence {recipe['sequence'][:8]}")
 
+        if case.get("config_overrides"):
+            recipe["config"] = config_with_overrides(db, recipe["config"], case["config_overrides"], name)
         if case.get("donor_dots"):
             donor = case["donor_dots"]
             existing = find_validation_sequence(db, name) if args.reuse_detection else None

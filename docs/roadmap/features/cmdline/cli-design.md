@@ -86,6 +86,8 @@ posetrak camera show ID
 posetrak calib import PATH --camera-mode ID   # TOML (Pose2Sim format)
 posetrak calib import-h5 PATH --camera-mode ID  # HDF5 (legacy)
 posetrak calib list [--camera ID]
+posetrak calib show ID   # every OpenCV parameter: camera_matrix + dist_coeffs (raw image), new_camera_matrix
+                         # (undistorted image; the fx/fy `calib list` shows); the global --json gives one JSON object
 ```
 
 ### Skeleton management

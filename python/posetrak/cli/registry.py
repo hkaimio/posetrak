@@ -30,6 +30,7 @@ from posetrak.db.db import (
 from posetrak.db.import_calib_toml import import_calib_toml
 from posetrak.db.import_calib_h5 import import_calib_h5
 
+from posetrak.calibration.session_cameras import _resolve_intrinsics
 from posetrak.cli._output import abbrev_id, print_record, print_table
 
 
@@ -736,6 +737,104 @@ def calib_list(obj: dict) -> None:
             json_mode=False,
         )
 
+
+
+_RADTAN_NAMES = ("k1", "k2", "p1", "p2", "k3", "k4", "k5", "k6")
+_FISHEYE_NAMES = ("k1", "k2", "k3", "k4")
+
+
+@calib_group.command("show")
+@click.argument("calibration_id", metavar="ID_OR_PREFIX")
+@click.pass_obj
+def calib_show(obj: dict, calibration_id: str) -> None:
+    """Show every parameter of an intrinsics calibration, in OpenCV terms.
+
+    ID is an intrinsics id as `calib list` shows it (a unique prefix is enough), read from the
+    session if --session is given, else from the registry. With the global --json the output is
+    one JSON object, for use in other programs.
+
+    Two camera matrices are stored, and they are not the same. `camera_matrix` and `dist_coeffs`
+    are what OpenCV needs to undistort the raw image (`cv2.undistort(img, camera_matrix,
+    dist_coeffs)`). `new_camera_matrix` is the matrix of the undistorted image, which is what
+    Posetrak's geometry uses and what `calib list` prints as fx, fy.
+    """
+    session_path = obj.get("session")
+    if session_path:
+        from posetrak.db.db import open_session
+        try:
+            conn = open_session(Path(session_path))
+        except (FileNotFoundError, ValueError) as exc:
+            raise click.ClickException(str(exc)) from exc
+    else:
+        conn = _open_registry(obj["registry"])
+    try:
+        rows = conn.execute(
+            "SELECT ic.id, ic.camera_mode_id, ic.calibrated_at, ic.calibration_tool, ic.rms_error, ic.notes,"
+            " ic.distortion_model, ic.fx, ic.fy, ic.cx, ic.cy, ic.dist_coeffs, ic.matrix_original,"
+            " ic.image_width, ic.image_height, cm.nominal_fps, m.manufacturer, m.model_name"
+            " FROM intrinsics_calibrations ic"
+            " LEFT JOIN camera_modes cm ON cm.id = ic.camera_mode_id"
+            " LEFT JOIN camera_models m ON m.id = cm.camera_model_id"
+            " WHERE ic.id LIKE ? || '%'",
+            (calibration_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        raise click.ClickException(f"No intrinsics calibration {calibration_id!r} (`calib list` shows the ids).")
+    if len(rows) > 1:
+        raise click.ClickException(f"Prefix {calibration_id!r} matches {len(rows)} calibrations; give more of the id.")
+
+    row = rows[0]
+    decoded = _resolve_intrinsics(row)
+    coefficients = [float(v) for v in decoded["dist"].ravel()]
+    names = (_FISHEYE_NAMES if decoded["fisheye"] else _RADTAN_NAMES)[: len(coefficients)]
+    record = {
+        "id": row["id"],
+        "camera": " ".join(filter(None, (row["manufacturer"], row["model_name"]))) or None,
+        "camera_mode_id": row["camera_mode_id"],
+        "frame_rate": row["nominal_fps"],
+        "calibrated_at": row["calibrated_at"],
+        "calibration_tool": row["calibration_tool"],
+        "rms_error_px": row["rms_error"],
+        "notes": row["notes"],
+        "distortion_model": row["distortion_model"],
+        "image_width": row["image_width"],
+        "image_height": row["image_height"],
+        "camera_matrix": decoded["K_orig"].tolist(),
+        "dist_coeffs": coefficients,
+        "dist_coeff_names": list(names),
+        "new_camera_matrix": decoded["K"].tolist(),
+        "has_original_matrix": row["matrix_original"] is not None,
+    }
+    if obj["json_mode"]:
+        print_record(record, json_mode=True)
+        return
+
+    def matrix(name: str, K: list[list[float]]) -> None:
+        click.echo(f"{name}:")
+        for line in K:
+            click.echo("  [" + ", ".join(f"{v:14.6f}" for v in line) + " ]")
+        click.echo(f"  fx {K[0][0]:.6f}  fy {K[1][1]:.6f}  cx {K[0][2]:.6f}  cy {K[1][2]:.6f}")
+
+    click.echo(f"id:               {record['id']}")
+    if record["camera"]:
+        click.echo(f"camera:           {record['camera']}")
+    click.echo(f"calibrated:       {record['calibrated_at']} by {record['calibration_tool'] or '?'}"
+               + (f", rms {record['rms_error_px']:.3f} px" if record["rms_error_px"] is not None else ""))
+    if record["notes"]:
+        click.echo(f"notes:            {record['notes']}")
+    click.echo(f"image size:       {record['image_width']} x {record['image_height']}")
+    click.echo(f"distortion model: {record['distortion_model']} (OpenCV {'fisheye' if decoded['fisheye'] else 'standard'})")
+    click.echo()
+    matrix("camera_matrix (of the raw image: use with dist_coeffs)", record["camera_matrix"])
+    click.echo("dist_coeffs (" + ", ".join(names) + "):")
+    click.echo("  [" + ", ".join(f"{v:.9f}" for v in coefficients) + "]")
+    click.echo()
+    matrix("new_camera_matrix (of the undistorted image: what Posetrak's geometry and `calib list` use)",
+           record["new_camera_matrix"])
+    if not record["has_original_matrix"]:
+        click.echo("\n(no separate original matrix is stored: camera_matrix is the same as new_camera_matrix)")
 
 # ---------------------------------------------------------------------------
 # Wire camera-* sub-groups into the registry group so they appear as

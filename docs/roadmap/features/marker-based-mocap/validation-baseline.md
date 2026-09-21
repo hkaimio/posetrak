@@ -2,7 +2,7 @@
 
 Marker-based tracking was developed by iterating on real captures, so many of
 its results exist only as numbers recorded along the way. This page fixes them
-as a reproducible baseline: six real cases that can be re-run from the
+as a reproducible baseline: eight real cases that can be re-run from the
 committed code, with the values a correct build produces. Run them before and
 after any change to marker detection, dot assignment, initialisation or the
 UKF, and read any difference as either a regression or a change to be
@@ -35,6 +35,20 @@ python scripts/validate_marker_mocap.py --cases cases.json --reuse-copies --reus
   `meson compile -C optbuild posetrak-tracker`. The driver deliberately does
   not use `default_binary_path()`, which prefers an installed copy under
   `~/.posetrak` that can be older than the source.
+- **Comparing with another build.** `--reference-binary PATH` runs every case a
+  second time with that binary and requires byte-identical results: the same
+  stored tracking results and per-observation results. It is the check that a
+  refactoring changes no behaviour. Keep a copy of the optimized tracker, and its
+  DLLs, from before the change; a binary run from another directory needs the
+  DLLs beside it.
+- **Dot jumps.** Every run prints a count of resolved dot observations that leave
+  their slot's own motion: for each camera and slot, an observation up to six
+  steps after two consecutive ones is compared with the constant-velocity
+  extrapolation of those two. It counts departures above 50 px after a gap
+  and above 100 px at any gap. It is information for comparing two runs of one
+  case, not a check: the raw candidates of a real capture jitter a great deal on
+  their own (about 130 departures in 9900 observations on the leg window), and the
+  count is only decisive where the failure is gross, as in the ball with clutter.
 - The script skips, with exit code 0, when the cases file or a database used by
   a selected case is absent, so it is safe to leave in a workflow that runs
   elsewhere, and a capture on a drive that is not mounted does not block the
@@ -56,7 +70,25 @@ data reproduces every number below.
 | Single reflective ball, one throw (0.75 s) | 89 / 90 (98.9 %) | 0 | – | 0.150 | 18.9, 71.3, 20.4 px (3 cameras) |
 | Sword with ArUco tags and dots, 66 s | 6108 / 6626 (92.2 %) | 518 | 4.6 mm | 2.786 | 7.5 – 9.4 px (6 cameras) |
 
-The sixth case tracks two subjects together, the person with the leg module and
+Two windowed cases of the leg module and the ball isolate the failure that
+dot assignment robustness work targets, a resolved candidate that is the wrong
+physical point. They are recorded on the current behaviour, which is the
+reference the later changes are measured against, not a target:
+
+| Case | Tracked steps | Mean NIS/dof | Reprojection medians | Dot jumps (after a gap > 50 px / any > 100 px) |
+|---|---|---|---|---|
+| Leg module, 4 s (40 – 44 s) around a short marker dropout | 480 / 480 | 1.996 | 18.5 – 29.3 px (6 cameras) | 132 / 200 |
+| Ball, one throw, with the raw `gopro13_02` candidates added | 89 / 90 | 11.826 | 133.0, 175.6, 93.4 px (3 cameras) | 1 / 10 |
+
+The ball case is the ball case above with one more camera's unfiltered dot
+candidates added (the leg module's dots on that camera over the same span, which
+include near-static clutter). Without them the medians are 18.9, 71.3 and 20.4 px,
+so the added camera pulls the fused position far off course: its wrong candidates
+pass the outlier gate although they are the wrong physical point. The leg window
+sits around a two-step dropout of the ankle markers; the reacquisition jumps of
+several hundred pixels in it are the same failure after a gap.
+
+The seventh case tracks two subjects together, the person with the leg module and
 the ball, over the ball's first throw (0.75 s), and compares each with the same
 subject tracked alone over the same window:
 
@@ -79,6 +111,11 @@ of detection plus 15 seconds of tracking, and the two-subject case about a minut
 (two solo runs and two joint runs of 17 seconds).
 
 ## What each case exercises
+
+- **Leg module window and ball with clutter.** Robustness of the assignment to a
+  confidently wrong candidate: after a gap, and when a camera's raw feed holds
+  near-static clutter. Nothing in the current tracker addresses either, so these
+  are the cases on which an assignment change has to show an effect.
 
 - **Pen and pad.** Rigid-body initialisation by Kabsch fit over coded markers,
   free-flyer tracking and RTS smoothing, with factory-default tracker settings.

@@ -54,6 +54,13 @@ Case fields (all but ``name``, ``session`` and ``baseline_run`` are optional):
                          sequence is tagged ``validation:<case name>`` so a
                          later run with ``--reuse-detection`` can skip the
                          detection and track it again
+    donor_dots           {"baseline_run": "<prefix>", "cameras": [labels]}: track a
+                         copy of the baseline's sequence with the dot candidates
+                         of another run's sequence added on those cameras,
+                         within start_time..end_time (needs both). Reproduces a
+                         camera whose raw candidate feed holds clutter. The
+                         copy is tagged ``validation:<case name>`` and reused
+                         with ``--reuse-detection``
     subjects             instead of baseline_run: a list of {"name", "baseline_run",
                          optional "seed_from_baseline"} tracked together. Each
                          subject is also tracked alone over the same
@@ -78,10 +85,20 @@ Case fields (all but ``name``, ``session`` and ``baseline_run`` are optional):
                              median reprojection error
     tolerance            overrides for the checks: tracked_pct (points),
                          init_rms_mm, nis_rel, reproj_px, reproj_rel
+
+Every run also reports ``dot jumps``: how often a resolved dot observation
+leaves its slot's own motion (see ``dot_jump_counts``). It is a count to compare
+between two runs of one case, not a pass/fail check, because the raw candidates
+of a real capture jitter a great deal on their own.
+
+With ``--reference-binary`` each case is run a second time with that binary and
+the two runs must be byte-identical (tracking results and per-observation
+results). Use it to show that a refactoring changes no behaviour.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -176,6 +193,74 @@ def run_metrics(conn: sqlite3.Connection, run_id: str) -> dict:
         "nis_mean": float(np.mean(nis)) if nis else None,
         "reproj_median_px": medians,
     }
+
+
+DOT_JUMP_AFTER_GAP_PX = 50   # reacquisition after a gap of 2..DOT_JUMP_MAX_GAP steps
+DOT_JUMP_ANY_PX = 100        # any resolved observation
+DOT_JUMP_MAX_GAP = 6
+
+
+def dot_jump_counts(conn: sqlite3.Connection, run_id: str) -> dict | None:
+    """How often a resolved dot observation leaves the motion of its own slot.
+
+    Only slots without a pose-model label (names not starting ``MRK-``) are
+    looked at, since their observations come from the shared dot assignment.
+    For each camera and slot, two observations on consecutive steps give a
+    per-step velocity; the next observation, ``g`` steps later, is compared with
+    the constant-velocity extrapolation. ``reacquired`` counts departures above
+    ``DOT_JUMP_AFTER_GAP_PX`` after a gap (g >= 2) and ``any`` those above
+    ``DOT_JUMP_ANY_PX`` at any g up to ``DOT_JUMP_MAX_GAP``.
+
+    Returns None when the run has no marker names.
+    """
+    run = conn.execute("SELECT active_camera_ids, marker_names FROM tracking_runs WHERE id = ?", (run_id,)).fetchone()
+    if run is None or not run["marker_names"]:
+        return None
+    n_cam = len(json.loads(run["active_camera_ids"]))
+    slots = [i for i, name in enumerate(json.loads(run["marker_names"])) if not name.startswith("MRK-")]
+    last: dict[tuple[int, int], list[tuple[int, float, float]]] = {}
+    counts = {"observations": 0, "reacquired": 0, "any": 0}
+    for row in conn.execute(
+        "SELECT tracker_step, obs_blob FROM tracking_obs_results WHERE run_id = ? ORDER BY tracker_step", (run_id,)
+    ):
+        arr = np.frombuffer(bytes(row["obs_blob"]), dtype=np.float32)
+        if len(arr) % (n_cam * 8):
+            continue
+        arr = arr.reshape(n_cam, -1, 8)
+        step = row["tracker_step"]
+        for cam in range(n_cam):
+            for slot in slots:
+                x, y, mode = float(arr[cam, slot, 0]), float(arr[cam, slot, 1]), arr[cam, slot, 7]
+                if not np.isfinite(x) or mode != 0:
+                    continue
+                counts["observations"] += 1
+                hist = last.setdefault((cam, slot), [])
+                if len(hist) == 2 and hist[1][0] - hist[0][0] == 1 and 1 <= step - hist[1][0] <= DOT_JUMP_MAX_GAP:
+                    gap = step - hist[1][0]
+                    vx, vy = hist[1][1] - hist[0][1], hist[1][2] - hist[0][2]
+                    departure = float(np.hypot(x - hist[1][1] - vx * gap, y - hist[1][2] - vy * gap))
+                    counts["reacquired"] += gap >= 2 and departure > DOT_JUMP_AFTER_GAP_PX
+                    counts["any"] += departure > DOT_JUMP_ANY_PX
+                hist.append((step, x, y))
+                del hist[:-2]
+    return counts
+
+
+def run_signature(conn: sqlite3.Connection, run_id: str) -> str:
+    """Digest of everything a tracking run stored about its results, for byte comparison of two runs."""
+    digest = hashlib.sha256()
+    for row in conn.execute(
+        "SELECT person_id, tracker_step, is_smoothed, timestamp_s, tracking_lost, n_inlier_observations,"
+        " cov_condition_number, nis_value, nis_dof, state, cov_diag FROM tracking_results"
+        " WHERE run_id = ? ORDER BY person_id, tracker_step, is_smoothed", (run_id,)
+    ):
+        digest.update(repr(tuple(row)).encode())
+    for row in conn.execute(
+        "SELECT person_id, tracker_step, obs_blob FROM tracking_obs_results"
+        " WHERE run_id = ? ORDER BY person_id, tracker_step", (run_id,)
+    ):
+        digest.update(repr(tuple(row)).encode())
+    return digest.hexdigest()
 
 
 def first_root_position(conn: sqlite3.Connection, run_id: str) -> list[float]:
@@ -321,7 +406,8 @@ def clone_sequence_with_donor_dots(db: Path, target_sequence: str, donor_sequenc
         conn.close()
 
 
-def run_joint_case(case: dict, db: Path, binary: Path, work: Path) -> tuple[list[tuple[str, bool, str]], dict]:
+def run_joint_case(case: dict, db: Path, binary: Path, work: Path,
+                   reference: Path | None = None) -> tuple[list[tuple[str, bool, str]], dict]:
     """Solo runs, the joint run, and the shared-pool checks of a multi-subject case."""
     name = case["name"]
     window = (case["start_time"], case["end_time"])
@@ -356,6 +442,17 @@ def run_joint_case(case: dict, db: Path, binary: Path, work: Path) -> tuple[list
         claims = double_claims(conn, run_ids)
         checks.append((f"{label}: candidates used by two subjects", claims == 0, str(claims)))
         conn.close()
+        if reference is not None:
+            ref_code, ref_ids, _ = run_joint_tracker(reference, db, joint_recipes, window,
+                                                     work / "out" / f"{name}-{label}-reference",
+                                                     work / f"{name}-{label}-reference.log")
+            if ref_code == 0 and len(ref_ids) == len(run_ids):
+                conn = open_readonly(db)
+                same = all(run_signature(conn, a) == run_signature(conn, b) for a, b in zip(run_ids, ref_ids))
+                conn.close()
+                checks.append((f"{label}: identical to reference binary", same, "byte-identical" if same else "DIFFERS"))
+            else:
+                checks.append((f"{label}: reference binary run", False, f"exit {ref_code}"))
         return run_ids
 
     joint_ids = joint_and_checks("joint", recipes)
@@ -503,6 +600,8 @@ def main() -> int:
                     help="for cases with 'redetect': track the sequence an earlier run made in the "
                          "reused copy instead of detecting again")
     ap.add_argument("--binary", help="tracker binary (default: this repository's optbuild build)")
+    ap.add_argument("--reference-binary",
+                    help="also run every case with this binary and require byte-identical results")
     ap.add_argument("--report", help="write a JSON report here")
     args = ap.parse_args()
 
@@ -522,6 +621,10 @@ def main() -> int:
     if not binary.is_file():
         print(f"FAIL: tracker binary not found: {binary}\n"
               f"      build it with: meson compile -C optbuild posetrak-tracker")
+        return 1
+    reference = Path(args.reference_binary) if args.reference_binary else None
+    if reference is not None and not reference.is_file():
+        print(f"FAIL: reference binary not found: {reference}")
         return 1
     work = Path(args.work_dir) if args.work_dir else cases_path.parent / "validation-work"
     copies: dict[str, Path] = {}
@@ -543,7 +646,7 @@ def main() -> int:
         db = copies[case["session"]]
         print(f"\n=== {name} " + "=" * max(0, 60 - len(name)))
         if "subjects" in case:
-            checks, extra = run_joint_case(case, db, binary, work)
+            checks, extra = run_joint_case(case, db, binary, work, reference)
             for label, ok, detail in checks:
                 print(f"  {'PASS' if ok else 'FAIL'}  {label}: {detail}")
             failed |= not all(ok for _, ok, _ in checks)
@@ -581,6 +684,22 @@ def main() -> int:
                 recipe["sequence"], detect_seconds = redetect(db, case["redetect"]["detection_run"], name)
                 print(f"detection done in {detect_seconds:.0f}s -> new sequence {recipe['sequence'][:8]}")
 
+        if case.get("donor_dots"):
+            donor = case["donor_dots"]
+            existing = find_validation_sequence(db, name) if args.reuse_detection else None
+            if existing:
+                recipe["sequence"] = existing
+                print(f"reusing donor-dot sequence {existing[:8]}")
+            else:
+                conn = open_readonly(db)
+                donor_sequence = conn.execute("SELECT observation_sequence_id FROM tracking_runs WHERE id LIKE ?",
+                                              (donor["baseline_run"] + "%",)).fetchone()[0]
+                conn.close()
+                recipe["sequence"] = clone_sequence_with_donor_dots(
+                    db, recipe["sequence"], donor_sequence, donor["cameras"],
+                    (case["start_time"], case["end_time"]), f"validation:{name}")
+                print(f"added {donor['cameras']} dots of run {donor['baseline_run']} -> sequence {recipe['sequence'][:8]}")
+
         out_dir = work / "out" / name
         code, parsed, elapsed = run_tracker(binary, db, recipe, out_dir, work / f"{name}.log")
         print(f"tracker exit {code} in {elapsed:.0f}s: " + ", ".join(f"{k}={v}" for k, v in parsed.items()))
@@ -589,12 +708,27 @@ def main() -> int:
         if code == 0 and parsed.get("run_id"):
             conn = open_readonly(db)
             new = run_metrics(conn, parsed["run_id"])
+            new["dot_jumps"] = dot_jump_counts(conn, new["run_id"])
             conn.close()
             checks += evaluate(case, parsed, new, baseline, other)
+            if reference is not None:
+                ref_code, ref_parsed, _ = run_tracker(reference, db, recipe, work / "out" / f"{name}-reference",
+                                                      work / f"{name}-reference.log")
+                if ref_code == 0 and ref_parsed.get("run_id"):
+                    conn = open_readonly(db)
+                    same = run_signature(conn, new["run_id"]) == run_signature(conn, ref_parsed["run_id"])
+                    conn.close()
+                    checks.append(("identical to reference binary", same, "byte-identical" if same else "DIFFERS"))
+                else:
+                    checks.append(("reference binary run", False, f"exit {ref_code}"))
         else:
             checks.append(("tracker produced a run", False, "no tracking_run_id"))
         for label, ok, detail in checks:
             print(f"  {'PASS' if ok else 'FAIL'}  {label}: {detail}")
+        if new is not None and new.get("dot_jumps"):
+            j = new["dot_jumps"]
+            print(f"  INFO  dot jumps: {j['reacquired']} after a gap > {DOT_JUMP_AFTER_GAP_PX}px, "
+                  f"{j['any']} any > {DOT_JUMP_ANY_PX}px, of {j['observations']} observations")
         failed |= not all(ok for _, ok, _ in checks)
         report.append({"case": name, "seconds": round(elapsed, 1), "parsed": parsed, "new": new, "baseline": baseline,
                        "checks": [{"check": l, "pass": ok, "detail": d} for l, ok, d in checks]})

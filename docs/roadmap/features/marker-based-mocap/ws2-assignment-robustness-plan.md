@@ -231,6 +231,40 @@ and lands on the seam. WS2.5's tests do not depend on the C++ work and can run
 in parallel with it. A modifier that fails its validation is dropped, not tuned
 until it passes.
 
+### Status of the work packages
+
+**0 and 1 are done.**
+
+- **Baselines.** The two windowed cases and the dot-jump count are in the
+  validation driver, and their values are in
+  [validation-baseline.md](validation-baseline.md). The clutter case reproduces
+  strongly: adding the raw `gopro13_02` candidates raises the ball's mean NIS/dof
+  from 0.156 to 11.8 and the reprojection medians from about 19 – 71 px to 93 –
+  176 px. The leg window reproduces many reacquisition jumps of several hundred
+  pixels (63 above 100 px), among them a knee marker at about 740 px. The
+  single ankle jump of about 300 px that motivated the case does not occur in
+  the current baseline run, whose skeleton has since been corrected; near the
+  original dropout the run shows smaller one-step departures of about 30 px.
+- **The dot-jump count is weak on the leg module.** Its raw candidates jitter
+  enough that the count is about 2 % of observations on the full case, so it
+  cannot by itself show a small improvement there. It is decisive on the ball
+  with clutter (0 to 10 departures above 100 px). Acceptance for the
+  reacquisition gate therefore reads the count together with NIS/dof and the
+  reprojection medians, as §3 says, and not on the count alone.
+- **Refactor.** `resolve_dot_assignment()` takes a `DotAssignmentContext`; the
+  tracklet continuity and candidate ownership rules are `CostModifier`s. Tracker
+  output was byte-identical to the build from before the change on the full leg
+  case, the windowed cases with and without the tracklet multiplier and streak
+  velocity, the ball, pen, pad and person-with-ball cases. The runs with those
+  two settings on are what exercise the tracklet and streak paths, which the
+  recorded runs leave off. The **sword** case was not run because its capture
+  drive was not mounted; it is the one case that runs the whole detection
+  pipeline, so run it before the assignment changes of the later packages are
+  merged.
+- **Runtime.** The full leg case took 1667 s against 1608 s on the earlier run,
+  measured while the Python test suite was running, so the difference is within
+  the noise of that measurement. `frame_step_profile` was not run.
+
 ## 4. Validation
 
 - **Reference binary.** Copy `optbuild/cpp/cli/posetrak-tracker.exe`, built from

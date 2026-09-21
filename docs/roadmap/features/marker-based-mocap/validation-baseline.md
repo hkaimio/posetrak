@@ -2,7 +2,7 @@
 
 Marker-based tracking was developed by iterating on real captures, so many of
 its results exist only as numbers recorded along the way. This page fixes them
-as a reproducible baseline: eight real cases that can be re-run from the
+as a reproducible baseline: ten real cases that can be re-run from the
 committed code, with the values a correct build produces. Run them before and
 after any change to marker detection, dot assignment, initialisation or the
 UKF, and read any difference as either a regression or a change to be
@@ -35,6 +35,9 @@ python scripts/validate_marker_mocap.py --cases cases.json --reuse-copies --reus
   `meson compile -C optbuild posetrak-tracker`. The driver deliberately does
   not use `default_binary_path()`, which prefers an installed copy under
   `~/.posetrak` that can be older than the source.
+- **Overriding a setting.** A case may carry `config_overrides`, a map of
+  `tracker_configs` columns that are set on a copy of the baseline's tracker
+  config, to exercise a setting the recorded runs leave at its default.
 - **Comparing with another build.** `--reference-binary PATH` runs every case a
   second time with that binary and requires byte-identical results: the same
   stored tracking results and per-observation results. It is the check that a
@@ -47,7 +50,7 @@ python scripts/validate_marker_mocap.py --cases cases.json --reuse-copies --reus
   extrapolation of those two. It counts departures above 50 px after a gap
   and above 100 px at any gap. It is information for comparing two runs of one
   case, not a check: the raw candidates of a real capture jitter a great deal on
-  their own (about 130 departures in 9900 observations on the leg window), and the
+  their own (3646 and 7761 departures in 197623 observations on the full leg case), and the
   count is only decisive where the failure is gross, as in the ball with clutter.
 - The script skips, with exit code 0, when the cases file or a database used by
   a selected case is absent, so it is safe to leave in a workflow that runs
@@ -79,6 +82,20 @@ reference the later changes are measured against, not a target:
 |---|---|---|---|---|
 | Leg module, 4 s (40 – 44 s) around a short marker dropout | 480 / 480 | 1.996 | 18.5 – 29.3 px (6 cameras) | 132 / 200 |
 | Ball, one throw, with the raw `gopro13_02` candidates added | 89 / 90 | 11.826 | 133.0, 175.6, 93.4 px (3 cameras) | 1 / 10 |
+
+The same two windows are also recorded with the tracklet gate multiplier at 2 and
+streak velocity switched on (`config_overrides`), which the recorded runs leave
+off, so that both paths are covered when two builds are compared:
+
+| Case | Mean NIS/dof | Reprojection medians | Dot jumps (after a gap / any) |
+|---|---|---|---|
+| Leg module window, tracklet multiplier 2 and streak velocity | 2.018 | 18.6 – 29.3 px (6 cameras) | 114 / 159 |
+| Ball with clutter, tracklet multiplier 2 and streak velocity | 12.807 | 153.6, 175.6, 93.2, 94.6 px (4 cameras) | 1 / 3 |
+
+The tracklet relaxation does not help the clutter case: the medians are slightly
+worse than without it. That fits a candidate that keeps one tracklet being
+favoured by the relaxation on the step after it was chosen, but the difference is
+small and is not established as the cause.
 
 The ball case is the ball case above with one more camera's unfiltered dot
 candidates added (the leg module's dots on that camera over the same span, which

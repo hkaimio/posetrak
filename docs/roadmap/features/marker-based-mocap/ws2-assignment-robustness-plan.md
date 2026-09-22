@@ -233,7 +233,8 @@ until it passes.
 
 ### Status of the work packages
 
-**0 and 1 are done.**
+**0, 1 and 2 are done.** Package 2's own result is not the hoped-for
+improvement -- see below.
 
 - **Baselines.** The two windowed cases and the dot-jump count are in the
   validation driver, and their values are in
@@ -264,6 +265,52 @@ until it passes.
 - **Runtime.** The full leg case took 1667 s against 1608 s on the earlier run,
   measured while the Python test suite was running, so the difference is within
   the noise of that measurement. `frame_step_profile` was not run.
+- **Reacquisition gate, built as designed in §2.2/§2.3: `dot_reacquire_gap_frames`,
+  `dot_reacquire_max_px`, `ReacquisitionGateModifier`, and the cross-camera
+  near-prediction pre-pass.** Off by default (`dot_reacquire_gap_frames = 0`);
+  every case above is unaffected and stays byte-identical to the reference
+  binary with the gate at its default.
+  - **No effect on the clutter case, exactly as §1 predicted.** The
+    `gopro13_02` clutter candidate is resolved on every step, so its slot never
+    accumulates a gap for the gate to act on; `ball_throw1_clutter` with the
+    gate on (`gap_frames=2, max_px=80`) reproduces the no-gate numbers exactly
+    (NIS/dof 11.826, dot jumps 1/10). This is the failure the plan always said
+    the gate does not address -- corroboration or the offline ROI/hue tests
+    (§2.3, §2.5) are the candidates for it.
+  - **On the leg window, the result depends on `dot_reacquire_max_px`, and is
+    worse than no gate at the values tried first.** With `gap_frames=2` fixed,
+    a small sweep of the radius against the no-gate baseline (132 dot jumps
+    after a gap, 200 at any gap, of 9896 observations):
+
+    | `dot_reacquire_max_px` | Jumps after a gap | Jumps at any gap |
+    |---|---|---|
+    | 30 (the shipped default) | 162 | 246 |
+    | 50 | 152 | 232 |
+    | 80 | 125 | 196 |
+    | *(no gate)* | *132* | *200* |
+
+    Only 80 px beats the baseline, and by a small margin. The likely
+    mechanism: a genuine reacquisition with no tracklet continuity usually has
+    *some* corroborating candidate in a second camera, but the true candidates
+    across cameras are often more than 30-50 px apart in their own
+    per-camera predictions (real per-camera geometry, not detector noise), so
+    a tight radius fails to find it. The slot then keeps coasting past the gap
+    threshold, its covariance grows, and the jump once it is finally admitted
+    -- by the plain gate, once the streak of unresolved steps ends on its own
+    -- is larger than if the gate had let it resolve on the first candidate
+    after the gap, as before. A wider radius finds the corroboration sooner
+    and avoids the extra drift.
+  - **Conclusion: built and validated as off, not validated as worth turning
+    on.** The shipped default (30 px, `dot_assignment_gate_mahalanobis`-style
+    round number chosen before any data existed) is now known to be worse than
+    no gate on the one window tested; `config.hpp`'s field doc comment says so.
+    Before recommending `dot_reacquire_gap_frames` on for any real run: tune
+    `dot_reacquire_max_px` properly (a proper sweep, not three points) against
+    the leg window and at least one other capture, and check whether the
+    corroboration pre-pass should instead search a per-camera radius derived
+    from the calibration (near cameras need a tighter pixel radius than far
+    ones for the same real-world tolerance) rather than one constant for every
+    camera pair.
 
 ## 4. Validation
 

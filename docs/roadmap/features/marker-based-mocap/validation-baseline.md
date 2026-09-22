@@ -97,6 +97,23 @@ worse than without it. That fits a candidate that keeps one tracklet being
 favoured by the relaxation on the step after it was chosen, but the difference is
 small and is not established as the cause.
 
+The same two windows, with the reacquisition gate on instead
+(`dot_reacquire_gap_frames=2, dot_reacquire_max_px=80`; see the WS2 plan's own
+status section for the radius sweep this value comes from):
+
+| Case | Mean NIS/dof | Reprojection medians | Dot jumps (after a gap / any) |
+|---|---|---|---|
+| Leg module window, reacquisition gate | 1.998 | 18.5 – 29.6 px (6 cameras) | 125 / 196 |
+| Ball with clutter, reacquisition gate | 11.826 | 133.0, 175.6, 93.4 px (3 cameras) | 1 / 10 |
+
+The gate has no effect on the clutter case (identical to the no-gate numbers): its
+candidate resolves every step, so its slot never gaps. On the leg window it
+lowers the jump count from the no-gate baseline's 132/200, but only at this
+radius -- 30 and 50 px both make it worse (162/246 and 152/232), because a
+tight radius rarely finds the cross-camera corroboration a genuine
+reacquisition actually has, so the slot coasts and drifts before it is finally
+admitted by the plain gate instead.
+
 The ball case is the ball case above with one more camera's unfiltered dot
 candidates added (the leg module's dots on that camera over the same span, which
 include near-static clutter). Without them the medians are 18.9, 71.3 and 20.4 px,

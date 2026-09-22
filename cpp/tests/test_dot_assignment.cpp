@@ -958,4 +958,117 @@ TEST_CASE("default_cost_modifiers: ownership always, tracklet continuity only wh
     REQUIRE(modifiers.size() == 2);
     REQUIRE(dynamic_cast<TrackletContinuityModifier*>(modifiers[0].get()) != nullptr);
     REQUIRE(dynamic_cast<CandidateOwnershipModifier*>(modifiers[1].get()) != nullptr);
+
+    context.dot_reacquire_gap_frames = 5;
+    modifiers = default_cost_modifiers(context);
+    REQUIRE(modifiers.size() == 3);
+    REQUIRE(dynamic_cast<ReacquisitionGateModifier*>(modifiers[2].get()) != nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// ReacquisitionGateModifier and the near-prediction-cameras pre-pass it reads
+// through resolve_dot_assignment() (§2.2/§2.3 of the WS2 assignment
+// robustness plan).
+// ---------------------------------------------------------------------------
+
+TEST_CASE(
+    "ReacquisitionGateModifier: no-op for a slot that has never resolved or is not yet gapped",
+    "[dot_assignment]") {
+    MarkerPrediction const prediction = make_prediction(100.0, 200.0);
+    DotSlotRef const slot{0, 0, 7, &prediction};
+    UnlabeledCandidate const candidate =
+        make_candidate(0, 500.0, 500.0);  // far from the prediction
+    ReacquisitionGateModifier const modifier;
+
+    DotAssignmentContext context = make_context(/*frame_idx=*/10);
+    context.dot_reacquire_gap_frames = 3;
+    REQUIRE_FALSE(modifier.apply(slot, candidate, context).exclude);  // never resolved
+
+    context.prev_resolved_frame[0][0][7] = 8;  // gap of 2, below the threshold of 3
+    REQUIRE_FALSE(modifier.apply(slot, candidate, context).exclude);
+}
+
+TEST_CASE("ReacquisitionGateModifier: excludes a gapped slot with no independent evidence",
+          "[dot_assignment]") {
+    MarkerPrediction const prediction = make_prediction(100.0, 200.0);
+    DotSlotRef const slot{0, 0, 7, &prediction};
+    UnlabeledCandidate const candidate = make_candidate(0, 500.0, 500.0);
+    ReacquisitionGateModifier const modifier;
+
+    DotAssignmentContext context = make_context(/*frame_idx=*/10);
+    context.dot_reacquire_gap_frames = 3;
+    context.prev_resolved_frame[0][0][7] = 5;  // gap of 5, at/above the threshold
+
+    REQUIRE(modifier.apply(slot, candidate, context).exclude);
+}
+
+TEST_CASE("ReacquisitionGateModifier: tracklet continuity admits a gapped slot",
+          "[dot_assignment]") {
+    MarkerPrediction const prediction = make_prediction(100.0, 200.0);
+    DotSlotRef const slot{0, 0, 7, &prediction};
+    UnlabeledCandidate candidate = make_candidate(0, 500.0, 500.0);
+    candidate.tracklet_id = 42;
+    ReacquisitionGateModifier const modifier;
+
+    DotAssignmentContext context = make_context(/*frame_idx=*/10);
+    context.dot_reacquire_gap_frames = 3;
+    context.prev_resolved_frame[0][0][7] = 5;
+    context.prev_tracklet_ids[0][0][7] = 42;
+
+    REQUIRE_FALSE(modifier.apply(slot, candidate, context).exclude);
+}
+
+TEST_CASE("ReacquisitionGateModifier: two corroborating cameras admit a gapped slot, one does not",
+          "[dot_assignment]") {
+    MarkerPrediction const prediction = make_prediction(100.0, 200.0);
+    DotSlotRef const slot{0, 0, 7, &prediction};
+    UnlabeledCandidate const candidate = make_candidate(0, 500.0, 500.0);
+    ReacquisitionGateModifier const modifier;
+
+    DotAssignmentContext context = make_context(/*frame_idx=*/10);
+    context.dot_reacquire_gap_frames = 3;
+    context.prev_resolved_frame[0][0][7] = 5;
+
+    context.near_prediction_cameras[0][7] = {0};  // only this camera -- not enough on its own
+    REQUIRE(modifier.apply(slot, candidate, context).exclude);
+
+    context.near_prediction_cameras[0][7] = {0, 1};  // corroborated by a second camera
+    REQUIRE_FALSE(modifier.apply(slot, candidate, context).exclude);
+}
+
+TEST_CASE(
+    "resolve_dot_assignment: a gapped slot skips an unsupported candidate and resolves a "
+    "corroborated one",
+    "[dot_assignment]") {
+    // Two subjects share no data here -- one slot, three cameras, the middle one gapped.
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0);
+    subject.predictions_by_camera[1][7] = make_prediction(300.0, 400.0);
+    subject.predictions_by_camera[2][7] = make_prediction(500.0, 600.0);
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    // Camera 0: near its own prediction -- corroborating evidence for the gate.
+    candidates[0] = {make_candidate(0, 100.5, 200.5)};
+    // Camera 1: the gapped slot's own candidate, also near its prediction -- with camera 0's
+    // corroboration this is 2 cameras, so the gate should admit it.
+    candidates[1] = {make_candidate(1, 300.5, 400.5)};
+    // Camera 2: not gapped, so the reacquisition gate never applies to it -- its
+    // candidate is far from the prediction and is rejected by the ordinary
+    // assignment gate instead, same as any ungated slot.
+    candidates[2] = {make_candidate(2, 999.0, 999.0)};
+
+    DotAssignmentContext context = make_context(/*frame_idx=*/10);
+    context.dot_reacquire_gap_frames = 3;
+    context.dot_reacquire_max_px = 5.0;
+    context.prev_resolved_frame[0][1][7] = 5;  // camera 1's copy of the slot is gapped
+
+    auto result = resolve_dot_assignment({subject}, candidates, context);
+
+    REQUIRE(result.count(0) == 1);
+    std::vector<int> resolved_cameras;
+    for (auto const& obs : result.at(0).resolved)
+        resolved_cameras.push_back(obs.camera_id);
+    std::sort(resolved_cameras.begin(), resolved_cameras.end());
+    REQUIRE(resolved_cameras == std::vector<int>{0, 1});  // camera 2's candidate is too far to gate
 }

@@ -77,6 +77,8 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
             tracking["dot_assignment_gate_mahalanobis"].value_or(9.21);
         result.dot_tracklet_gate_multiplier =
             tracking["dot_tracklet_gate_multiplier"].value_or(1.0);
+        result.dot_reacquire_gap_frames = tracking["dot_reacquire_gap_frames"].value_or(0);
+        result.dot_reacquire_max_px = tracking["dot_reacquire_max_px"].value_or(30.0);
         if (auto vel_cams = tracking["velocity_mode_camera_ids"].as_array()) {
             for (auto&& elem : *vel_cams) {
                 if (auto v = elem.value<int64_t>())
@@ -304,6 +306,16 @@ void TrackerAppConfig::validate() const {
                         "this divides a cost, so anything below 1.0 would tighten the "
                         "gate for a tracklet match instead of relaxing it)",
                         dot_tracklet_gate_multiplier));
+    }
+
+    if (dot_reacquire_gap_frames < 0) {
+        throw std::runtime_error(fmt::format("Invalid dot_reacquire_gap_frames: {} (must be >= 0)",
+                                             dot_reacquire_gap_frames));
+    }
+
+    if (dot_reacquire_max_px <= 0.0) {
+        throw std::runtime_error(
+            fmt::format("Invalid dot_reacquire_max_px: {} (must be > 0)", dot_reacquire_max_px));
     }
 
     if (ik_max_iterations <= 0) {

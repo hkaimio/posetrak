@@ -75,6 +75,35 @@ struct TrackerConfig {
     /// existing config is unaffected until this is deliberately raised.
     double dot_tracklet_gate_multiplier = 1.0;
 
+    /// @brief Consecutive steps a (subject, camera, marker) slot may go
+    /// unresolved before ReacquisitionGateModifier (dot_assignment.hpp)
+    /// requires independent evidence -- tracklet continuity, or a
+    /// near-prediction candidate in at least two cameras -- to resolve it
+    /// again; short of that, the slot stays unresolved and the filter coasts
+    /// on the process model instead. Targets the "confidently wrong candidate
+    /// after a gap" failure the plain Mahalanobis gate cannot distinguish from
+    /// a genuine reacquisition on geometry alone (2026-09-14 leg-marker ankle
+    /// finding, marker-based-mocap status.md). 0 (default) disables the gate:
+    /// every existing config is unaffected until this is deliberately raised.
+    int dot_reacquire_gap_frames = 0;
+
+    /// @brief Radius, in pixels, for ReacquisitionGateModifier's cross-camera
+    /// evidence: a candidate counts as corroborating a slot's prediction in a
+    /// camera when it falls within this distance of that camera's own
+    /// prediction for the slot. A plain pixel radius, not
+    /// dot_assignment_gate_mahalanobis's Mahalanobis metric -- this is
+    /// corroboration evidence, not a substitute for the assignment gate.
+    /// Unused while dot_reacquire_gap_frames is 0. This default is an
+    /// unvalidated starting guess, not a tuned value -- a small sweep on the
+    /// leg module's ankle-dropout window found the gate makes discontinuous
+    /// reacquisitions *more* frequent at 30-50 px (corroboration too rarely
+    /// found, so a genuine reacquisition coasts and drifts before it is
+    /// finally admitted) and only improves on the no-gate baseline at 80 px
+    /// (see ws2-assignment-robustness-plan.md §"Status of the work
+    /// packages"). Tune against that case, or a similar one, before turning
+    /// dot_reacquire_gap_frames on for real use.
+    double dot_reacquire_max_px = 30.0;
+
     // === Streak-derived dot velocity ===
     // See docs/roadmap/features/marker-based-mocap/streak-velocity-design.md §3/§4.
     // A motion-blur streak's own length/axis is a real, otherwise-unused frame-internal
@@ -307,6 +336,8 @@ struct TrackerAppConfig {
     double outlier_threshold = 4.0;
     double dot_assignment_gate_mahalanobis = 9.21;  ///< See TrackerConfig's own field doc comment.
     double dot_tracklet_gate_multiplier = 1.0;      ///< See TrackerConfig's own field doc comment.
+    int dot_reacquire_gap_frames = 0;               ///< See TrackerConfig's own field doc comment.
+    double dot_reacquire_max_px = 30.0;             ///< See TrackerConfig's own field doc comment.
 
     // === Streak-derived dot velocity === (see TrackerConfig's own field doc comments)
     bool dot_streak_velocity_enabled = false;
@@ -457,6 +488,8 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.outlier_threshold = outlier_threshold;
     tc.dot_assignment_gate_mahalanobis = dot_assignment_gate_mahalanobis;
     tc.dot_tracklet_gate_multiplier = dot_tracklet_gate_multiplier;
+    tc.dot_reacquire_gap_frames = dot_reacquire_gap_frames;
+    tc.dot_reacquire_max_px = dot_reacquire_max_px;
     tc.dot_streak_velocity_enabled = dot_streak_velocity_enabled;
     tc.dot_streak_k_window = dot_streak_k_window;
     tc.dot_streak_k_min_samples = dot_streak_k_min_samples;

@@ -82,6 +82,24 @@ using PrevDotPositions =
 using PrevDotTrackletIds =
     std::unordered_map<int, std::unordered_map<int, std::unordered_map<int, int>>>;
 
+/// @brief The frame_idx each (subject, camera, marker) slot was last resolved
+/// on, same shape and stale-until-overwritten lifetime as PrevDotTrackletIds
+/// above (gathered from one subject's own Tracker::prev_dot_resolved_frame()
+/// per subject_id). Feeds ReacquisitionGateModifier: absent from the map means
+/// the slot has never resolved, so there is no established track a bad
+/// reacquisition could discontinue, and the gate does not apply.
+using PrevDotResolvedFrame =
+    std::unordered_map<int, std::unordered_map<int, std::unordered_map<int, int>>>;
+
+/// @brief Per (subject_id, marker_id) slot, the cameras holding a candidate
+/// within DotAssignmentContext::dot_reacquire_max_px of that camera's own
+/// prediction for the slot this step -- the cross-camera half of
+/// ReacquisitionGateModifier's evidence. Computed once per step by
+/// resolve_dot_assignment() itself (it needs every camera's candidates, not
+/// just the one being costed), so a caller leaves this at its default; it is
+/// not meant to be filled in by hand.
+using NearPredictionCameras = std::unordered_map<int, std::unordered_map<int, std::vector<int>>>;
+
 /// @brief One subject's resolved dot observations for this frame -- the
 /// per-subject share of resolve_dot_assignment()'s / resolve_shared_dot_assignment()'s
 /// combined result.
@@ -140,6 +158,19 @@ struct DotAssignmentContext {
     double dot_tracklet_gate_multiplier = 1.0;
     /// Previous-frame resolved tracklet ids; empty disables the relaxation.
     PrevDotTrackletIds prev_tracklet_ids;
+    /// Reacquisition gate (TrackerConfig::dot_reacquire_gap_frames), see
+    /// ReacquisitionGateModifier. 0 turns it off.
+    int dot_reacquire_gap_frames = 0;
+    /// Radius (TrackerConfig::dot_reacquire_max_px) for the gate's cross-camera
+    /// "near the prediction" evidence.
+    double dot_reacquire_max_px = 0.0;
+    /// The frame_idx each slot was last resolved on; empty means the gate never
+    /// applies (nothing has resolved yet to protect).
+    PrevDotResolvedFrame prev_resolved_frame;
+    /// Which cameras hold a near-prediction candidate for each slot this step.
+    /// Computed internally by resolve_dot_assignment(); left at its default by
+    /// every caller.
+    NearPredictionCameras near_prediction_cameras;
 };
 
 /// @brief One (subject, camera, marker) slot as a cost modifier sees it.
@@ -203,9 +234,31 @@ class CandidateOwnershipModifier final : public CostModifier {
                       DotAssignmentContext const& context) const override;
 };
 
+/// @brief Excludes a pair when the slot has gone DotAssignmentContext::
+/// dot_reacquire_gap_frames-or-more steps unresolved and the candidate has
+/// neither of the two admitted kinds of independent evidence: it continues the
+/// slot's last resolved tracklet (the same test TrackletContinuityModifier
+/// uses, applied here regardless of the tracklet multiplier), or the slot has a
+/// near-prediction candidate in at least two cameras
+/// (DotAssignmentContext::near_prediction_cameras). Otherwise a no-op --
+/// including for a slot that has never resolved, which has no established
+/// track to protect.
+///
+/// This is the "never reseed from a bad guess after a gap, verify consistency
+/// before trusting a resumed detection" rule (2026-09-14 leg-marker ankle
+/// finding, marker-based-mocap status.md), applied at assignment time instead
+/// of after the fact: a slot left unresolved coasts on the process model
+/// rather than risk locking onto a confidently wrong candidate.
+class ReacquisitionGateModifier final : public CostModifier {
+   public:
+    CostSupport apply(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
+                      DotAssignmentContext const& context) const override;
+};
+
 /// @brief The modifiers a context asks for, in the order they apply: tracklet
 /// continuity (only when its multiplier is above 1 and there are previous
-/// tracklet ids), then candidate ownership.
+/// tracklet ids), then candidate ownership, then the reacquisition gate (only
+/// when dot_reacquire_gap_frames is above 0).
 ///
 /// @param context The frame's context.
 /// @return Owning pointers to the modifiers.

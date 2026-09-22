@@ -316,6 +316,16 @@ class Tracker {
     }
 
     /**
+     * @brief The frame_idx each (camera, marker) slot was last resolved on,
+     * same lifetime/bookkeeping as prev_observations() above -- see
+     * dot_assignment.hpp's PrevDotResolvedFrame doc comment for the
+     * reacquisition-gate mechanism this feeds.
+     */
+    std::unordered_map<int, std::unordered_map<int, int>> const& prev_dot_resolved_frame() const {
+        return prev_dot_resolved_frame_;
+    }
+
+    /**
      * @brief Mutable per-camera k=exposure_time/frame_time running estimate
      * (streak-velocity-design.md §3/§4) -- owned here, alongside
      * prev_observations_, so it persists across frames the same way. Updated and
@@ -598,6 +608,11 @@ class Tracker {
     // same population point/lifetime as prev_observations_ just above, see
     // prev_dot_tracklet_ids()'s own doc comment for what consumes this.
     std::unordered_map<int, std::unordered_map<int, int>> prev_dot_tracklet_ids_;
+
+    // frame_idx each (camera, marker) slot was last resolved on -- same
+    // population point/lifetime as prev_observations_ above, see
+    // prev_dot_resolved_frame()'s own doc comment for what consumes this.
+    std::unordered_map<int, std::unordered_map<int, int>> prev_dot_resolved_frame_;
 
     // Per-camera running k=exposure_time/frame_time estimate for the streak-derived
     // dot velocity mechanism (streak-velocity-design.md §3/§4) -- see

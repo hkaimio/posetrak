@@ -203,7 +203,9 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
         "       COALESCE(dot_assignment_gate_mahalanobis, 9.21) AS dot_assignment_gate_mahalanobis,"
         "       COALESCE(dot_tracklet_gate_multiplier, 1.0) AS dot_tracklet_gate_multiplier,"
         "       confidence_threshold_marker_names,"
-        "       COALESCE(confidence_threshold_override, 0.0) AS confidence_threshold_override"
+        "       COALESCE(confidence_threshold_override, 0.0) AS confidence_threshold_override,"
+        "       COALESCE(dot_reacquire_gap_frames, 0) AS dot_reacquire_gap_frames,"
+        "       COALESCE(dot_reacquire_max_px, 30.0) AS dot_reacquire_max_px"
         " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -237,7 +239,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //         51=dot_streak_min_elongation_px, 52=dot_streak_velocity_noise_std,
     //         53=process_noise_vel_max_multiplier, 54=dot_assignment_gate_mahalanobis,
     //         55=dot_tracklet_gate_multiplier, 56=confidence_threshold_marker_names,
-    //         57=confidence_threshold_override
+    //         57=confidence_threshold_override, 58=dot_reacquire_gap_frames,
+    //         59=dot_reacquire_max_px
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -446,6 +449,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
         }
     }
     apply_real(57, out.tracker.confidence_threshold_override);
+    apply_int(58, out.tracker.dot_reacquire_gap_frames);
+    apply_real(59, out.tracker.dot_reacquire_max_px);
 
     return out;
 }

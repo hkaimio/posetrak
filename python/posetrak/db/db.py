@@ -24,8 +24,8 @@ from typing import Final
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 12
-SESSION_SCHEMA_VERSION: Final[int] = 53
+REGISTRY_SCHEMA_VERSION: Final[int] = 13
+SESSION_SCHEMA_VERSION: Final[int] = 54
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -319,6 +319,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 11
     if actual == 11:
         _migrate_registry_v11_to_v12(conn)
+        actual = 12
+    if actual == 12:
+        _migrate_registry_v12_to_v13(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -708,6 +711,22 @@ def _migrate_registry_v11_to_v12(conn: sqlite3.Connection) -> None:
     if "confidence_threshold_override" not in existing:
         conn.execute("ALTER TABLE tracker_configs ADD COLUMN confidence_threshold_override REAL")
     _set_schema_version(conn, 12)
+    conn.commit()
+
+
+def _migrate_registry_v12_to_v13(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 12 to 13.
+
+    v13 adds the reacquisition gate for the shared dot-assignment phase to
+    tracker_configs, mirroring the session schema v53->v54 change -- see
+    _migrate_session_v53_to_v54's docstring.
+    """
+    existing = _tracker_config_columns(conn)
+    if "dot_reacquire_gap_frames" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_reacquire_gap_frames INTEGER")
+    if "dot_reacquire_max_px" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_reacquire_max_px REAL")
+    _set_schema_version(conn, 13)
     conn.commit()
 
 
@@ -1795,6 +1814,27 @@ def _migrate_session_v52_to_v53(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v53_to_v54(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 53 to 54.
+
+    v54 adds a reacquisition gate to the shared dot-assignment phase:
+    dot_reacquire_gap_frames (consecutive unresolved steps before a slot
+    needs independent evidence to resolve again) and dot_reacquire_max_px
+    (the cross-camera "near the prediction" radius that evidence is judged
+    against). See ReacquisitionGateModifier (dot_assignment.hpp). Motivated by
+    the twice-observed "confidently wrong candidate" failure (ball tracking,
+    leg-marker ankle reacquisition) that a per-frame Mahalanobis gate alone
+    cannot distinguish from a genuine reacquisition.
+    """
+    existing = _tracker_config_columns(conn)
+    if "dot_reacquire_gap_frames" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_reacquire_gap_frames INTEGER")
+    if "dot_reacquire_max_px" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_reacquire_max_px REAL")
+    _set_schema_version(conn, 54)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -1974,6 +2014,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 52
     if actual == 52:
         _migrate_session_v52_to_v53(conn)
+        actual = 53
+    if actual == 53:
+        _migrate_session_v53_to_v54(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

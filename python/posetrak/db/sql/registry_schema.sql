@@ -209,7 +209,14 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     -- NULL/empty = disabled (every
     -- marker uses the existing global min_confidence path, unchanged).
     confidence_threshold_marker_names TEXT,    -- JSON string array, e.g. ["MRK-nose","MRK-ear.L"]
-    confidence_threshold_override     REAL     -- Confidence floor applied to the markers named above
+    confidence_threshold_override     REAL,    -- Confidence floor applied to the markers named above
+    -- Added in schema migration v54 (session)/v13 (registry): reacquisition
+    -- gate for the shared dot-assignment phase -- see ReacquisitionGateModifier
+    -- (dot_assignment.hpp). Requires independent evidence (tracklet continuity,
+    -- or a near-prediction candidate in at least two cameras) before a slot
+    -- left unresolved for a run of steps may resolve again.
+    dot_reacquire_gap_frames INTEGER,  -- Steps unresolved before the gate applies; NULL/0 = disabled
+    dot_reacquire_max_px     REAL      -- Cross-camera "near the prediction" radius, px; NULL/30.0 = default
 );
 
 -- Added in schema migration v37: hierarchical body/hand solver -- per-stage

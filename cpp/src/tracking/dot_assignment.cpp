@@ -13,21 +13,30 @@ namespace posetrak {
 namespace {
 // Cost of an excluded pair: far above any gate.
 constexpr double kExcludedCost = 1e9;
+
+// Shared by TrackletContinuityModifier (which turns this into a cost discount)
+// and ReacquisitionGateModifier (which treats it as independent identity
+// evidence regardless of the tracklet multiplier): does *candidate* continue
+// the tracklet that resolved into *slot* on the previous frame?
+bool tracklet_continues(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
+                        PrevDotTrackletIds const& prev_tracklet_ids) {
+    if (candidate.tracklet_id < 0)
+        return false;
+    auto const subject_it = prev_tracklet_ids.find(slot.subject_id);
+    if (subject_it == prev_tracklet_ids.end())
+        return false;
+    auto const camera_it = subject_it->second.find(slot.camera_id);
+    if (camera_it == subject_it->second.end())
+        return false;
+    auto const marker_it = camera_it->second.find(slot.marker_id);
+    return marker_it != camera_it->second.end() && marker_it->second == candidate.tracklet_id;
+}
 }  // namespace
 
 CostSupport TrackletContinuityModifier::apply(DotSlotRef const& slot,
                                               UnlabeledCandidate const& candidate,
                                               DotAssignmentContext const& context) const {
-    if (candidate.tracklet_id < 0)
-        return {};
-    auto const subject_it = context.prev_tracklet_ids.find(slot.subject_id);
-    if (subject_it == context.prev_tracklet_ids.end())
-        return {};
-    auto const camera_it = subject_it->second.find(slot.camera_id);
-    if (camera_it == subject_it->second.end())
-        return {};
-    auto const marker_it = camera_it->second.find(slot.marker_id);
-    if (marker_it == camera_it->second.end() || marker_it->second != candidate.tracklet_id)
+    if (!tracklet_continues(slot, candidate, context.prev_tracklet_ids))
         return {};
     return {context.dot_tracklet_gate_multiplier, false};
 }
@@ -40,14 +49,81 @@ CostSupport CandidateOwnershipModifier::apply(DotSlotRef const& slot,
     return {1.0, !owned};
 }
 
+CostSupport ReacquisitionGateModifier::apply(DotSlotRef const& slot,
+                                             UnlabeledCandidate const& candidate,
+                                             DotAssignmentContext const& context) const {
+    auto const subject_it = context.prev_resolved_frame.find(slot.subject_id);
+    if (subject_it == context.prev_resolved_frame.end())
+        return {};  // never resolved -- nothing established to protect
+    auto const camera_it = subject_it->second.find(slot.camera_id);
+    if (camera_it == subject_it->second.end())
+        return {};
+    auto const marker_it = camera_it->second.find(slot.marker_id);
+    if (marker_it == camera_it->second.end())
+        return {};
+    int const gap = context.frame_idx - marker_it->second;
+    if (gap < context.dot_reacquire_gap_frames)
+        return {};  // still within the coasting window, not a reacquisition
+
+    if (tracklet_continues(slot, candidate, context.prev_tracklet_ids))
+        return {};
+    auto const evidence_subject = context.near_prediction_cameras.find(slot.subject_id);
+    if (evidence_subject != context.near_prediction_cameras.end()) {
+        auto const evidence_marker = evidence_subject->second.find(slot.marker_id);
+        if (evidence_marker != evidence_subject->second.end() &&
+            evidence_marker->second.size() >= 2)
+            return {};
+    }
+    return {1.0, true};
+}
+
 std::vector<std::unique_ptr<CostModifier>>
 default_cost_modifiers(DotAssignmentContext const& context) {
     std::vector<std::unique_ptr<CostModifier>> modifiers;
     if (context.dot_tracklet_gate_multiplier > 1.0 && !context.prev_tracklet_ids.empty())
         modifiers.push_back(std::make_unique<TrackletContinuityModifier>());
     modifiers.push_back(std::make_unique<CandidateOwnershipModifier>());
+    if (context.dot_reacquire_gap_frames > 0)
+        modifiers.push_back(std::make_unique<ReacquisitionGateModifier>());
     return modifiers;
 }
+
+namespace {
+// Cross-camera half of ReacquisitionGateModifier's evidence (design doc §2.3's
+// "two cameras near the prediction" test): for every (subject, marker) slot,
+// which cameras hold a candidate within *max_px* of that camera's own
+// prediction for the slot. A plain pixel radius, not the assignment gate's
+// Mahalanobis metric -- this is corroboration evidence, not a substitute for
+// the gate. Only built when the reacquisition gate is on (dot_reacquire_gap_
+// frames > 0), since it costs an extra pass over every (camera, slot,
+// candidate) triple that the rest of resolve_dot_assignment() does not
+// otherwise need.
+NearPredictionCameras build_near_prediction_cameras(
+    std::vector<SubjectDotPredictions> const& subjects,
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
+    double max_px) {
+    NearPredictionCameras near;
+    for (auto const& [camera_id, candidates] : candidates_by_camera) {
+        for (auto const& subject : subjects) {
+            auto const cam_it = subject.predictions_by_camera.find(camera_id);
+            if (cam_it == subject.predictions_by_camera.end())
+                continue;
+            for (auto const& [marker_id, prediction] : cam_it->second) {
+                bool found = false;
+                for (auto const& candidate : candidates) {
+                    if ((candidate.position - prediction.position).norm() <= max_px) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (found)
+                    near[subject.subject_id][marker_id].push_back(camera_id);
+            }
+        }
+    }
+    return near;
+}
+}  // namespace
 
 std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
     std::vector<SubjectDotPredictions> const& subjects,
@@ -69,6 +145,16 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
         context.streak_k_state ? *context.streak_k_state : local_streak_k_state;
 
     auto const modifiers = default_cost_modifiers(context);
+
+    // The reacquisition gate's cross-camera evidence needs every camera's
+    // candidates already gathered, so it is computed once here rather than by
+    // the caller, and folded into a local copy of the context the modifiers
+    // below read instead of *context* itself.
+    DotAssignmentContext effective_context = context;
+    if (context.dot_reacquire_gap_frames > 0) {
+        effective_context.near_prediction_cameras = build_near_prediction_cameras(
+            subjects, candidates_by_camera, context.dot_reacquire_max_px);
+    }
 
     // One column per (subject, marker) slot with a prediction for this camera.
     struct Column {
@@ -107,7 +193,7 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
 
                 DotSlotRef const slot{col.subject_id, camera_id, col.marker_id, &pred};
                 for (auto const& modifier : modifiers) {
-                    CostSupport const support = modifier->apply(slot, row_cand, context);
+                    CostSupport const support = modifier->apply(slot, row_cand, effective_context);
                     if (support.exclude) {
                         mahal_sq = kExcludedCost;
                         break;
@@ -267,6 +353,8 @@ std::string find_dot_config_disagreement(std::vector<TrackerConfig const*> const
         POSETRAK_CHECK_DOT_FIELD(dot_streak_min_displacement_px)
         POSETRAK_CHECK_DOT_FIELD(dot_streak_min_elongation_px)
         POSETRAK_CHECK_DOT_FIELD(dot_streak_velocity_noise_std)
+        POSETRAK_CHECK_DOT_FIELD(dot_reacquire_gap_frames)
+        POSETRAK_CHECK_DOT_FIELD(dot_reacquire_max_px)
 #undef POSETRAK_CHECK_DOT_FIELD
     }
     return {};
@@ -280,6 +368,7 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     predictions.reserve(subjects.size());
     PrevDotPositions prev_positions;
     PrevDotTrackletIds prev_tracklet_ids;
+    PrevDotResolvedFrame prev_resolved_frame;
     // Cameras with at least one candidate this step -- computed once, shared
     // by every subject, rather than re-filtered inside each subject's own
     // loop.
@@ -303,6 +392,7 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
         predictions.push_back(std::move(sp));
         prev_positions[subject.subject_id] = subject.tracker->prev_observations();
         prev_tracklet_ids[subject.subject_id] = subject.tracker->prev_dot_tracklet_ids();
+        prev_resolved_frame[subject.subject_id] = subject.tracker->prev_dot_resolved_frame();
     }
 
     StreakVelocityConfig streak_config;
@@ -328,6 +418,9 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     context.streak_k_state = streak_k_state;
     context.dot_tracklet_gate_multiplier = config.dot_tracklet_gate_multiplier;
     context.prev_tracklet_ids = std::move(prev_tracklet_ids);
+    context.dot_reacquire_gap_frames = config.dot_reacquire_gap_frames;
+    context.dot_reacquire_max_px = config.dot_reacquire_max_px;
+    context.prev_resolved_frame = std::move(prev_resolved_frame);
     return resolve_dot_assignment(predictions, candidates_by_camera, context);
 }
 

@@ -19,6 +19,9 @@
     {"name": "person-with-dot-module-reacquire", "session": "props", "baseline_run": "<tracking run id prefix>",
      "config_overrides": {"dot_reacquire_gap_frames": 2, "dot_reacquire_max_px": 80.0},
      "expect": {"tracked_pct": 100.0, "lost_max": 0}},
+    {"name": "person-with-dot-module-trust", "session": "props", "baseline_run": "<tracking run id prefix>",
+     "config_overrides": {"dot_camera_noise_scale": "{\"0\": 1.2, \"3\": 0.7}"},
+     "expect": {"tracked_pct": 100.0, "lost_max": 0}},
     {"name": "sword", "session": "sword", "baseline_run": "<tracking run id prefix>",
      "expect": {"tracked_pct": 91.4},
      "tolerance": {"tracked_pct": 1.0}}

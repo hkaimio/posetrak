@@ -76,13 +76,14 @@ import sys
 import traceback
 from pathlib import Path
 
-# Edit these two for interactive (Scripting-tab) use. Ignored if
-# --output-dir is given on the command line (headless use).
-OUTPUT_DIR = str(Path.home() / "blender_tracks")
+# Edit for interactive (Scripting-tab) use: OUTPUT_DIR has no default, so an
+# unedited run says so and stops rather than writing somewhere unexpected.
+# Ignored if --output-dir is given on the command line (headless use).
+OUTPUT_DIR = None  # e.g. "D:/mocap/2026-09-06-kare-tests/blender_tracks"
 CLIP_NAME = None  # None = export every loaded clip; or a specific clip's name
 
 
-def _resolve_output_dir() -> str:
+def _resolve_output_dir() -> str | None:
     # Blender puts its own args before "--"; only args after "--" are ours,
     # and there may be none at all (interactive Scripting-tab run).
     if "--" in sys.argv:
@@ -95,7 +96,12 @@ def _resolve_output_dir() -> str:
 def _run() -> None:
     import bpy  # noqa: PLC0415 -- only importable inside Blender's own interpreter
 
-    out_dir = Path(_resolve_output_dir())
+    resolved = _resolve_output_dir()
+    if not resolved:
+        print("No output directory: set OUTPUT_DIR above (interactive) or pass "
+              "--output-dir (headless).")
+        return
+    out_dir = Path(resolved)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     clips = [c for c in bpy.data.movieclips if CLIP_NAME in (None, c.name)]

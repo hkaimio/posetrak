@@ -257,10 +257,10 @@ until it passes.
   case, the windowed cases with and without the tracklet multiplier and streak
   velocity, the ball, pen, pad and person-with-ball cases. The runs with those
   two settings on are what exercise the tracklet and streak paths, which the
-  recorded runs leave off. The **sword** case was not run because its capture
-  drive was not mounted; it is the one case that runs the whole detection
-  pipeline, so run it before the assignment changes of the later packages are
-  merged.
+  recorded runs leave off. The **sword** case, run once its capture drive was
+  mounted, is also byte-identical to the reference binary (54 dot jumps after a
+  gap out of 47502 observations); it is the one case that runs the whole
+  detection pipeline, so every case now covers the refactor.
 - **Runtime.** The full leg case took 1667 s against 1608 s on the earlier run,
   measured while the Python test suite was running, so the difference is within
   the noise of that measurement. `frame_step_profile` was not run.

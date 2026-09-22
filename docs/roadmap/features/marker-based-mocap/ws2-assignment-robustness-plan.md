@@ -446,15 +446,33 @@ improvement -- see below.
   plausibly from frame-sync error scaling with motion speed rather than
   calibration; a single `dot_cross_view_corroboration_px` cannot be tight
   enough for the clutter case and loose enough for that pair at once.
-- **Slot-exclusive evidence for `SlotEvidence`/`CrossViewCorroborationModifier`.**
-  The evidence-gathering radius is per-marker but not marker-exclusive, so a
-  real candidate for one marker can be mistaken for corroborating evidence of
-  a different, nearby marker (measured regression on the leg module's ankle
-  and knee clusters, §3). A fix needs each marker's evidence to exclude
-  candidates that are at least as close to a different marker's own
-  prediction, or some other way to keep evidence marker-specific, before
-  corroboration is safe to turn on for an articulated body with closely
-  spaced dot slots.
+- **Backface culling via `Marker::normal` for the articulated prediction path.**
+  Root-caused as the real prerequisite for `SlotEvidence`/
+  `CrossViewCorroborationModifier` on an articulated body (Harri, reviewing
+  package 3's leg-module regression): the evidence-gathering radius is
+  per-marker but not marker-exclusive, so a real candidate for one marker can
+  be mistaken for corroborating evidence of a different, nearby marker
+  (measured regression on the leg module's ankle and knee clusters, §3) --
+  and no distance or epipolar threshold can fix that in general, because
+  marker spacing varies per capture and per limb pose. A pixel radius has no
+  notion of *which side of the limb* a marker faces; two markers a few cm
+  apart facing opposite directions (`ankle_med`/`ankle_lat`) are visible from
+  disjoint camera sets at any given limb orientation, which is exactly what
+  backface culling resolves at the source, before either marker's prediction
+  produces a column a camera that cannot see that side would need to be
+  excluded from after the fact. This already exists for rigid props
+  (`predict_rigid_marker()`, productization-architecture-and-plan.md §3.6.2
+  item 2, `Marker::normal`) but not for the articulated/sigma-point path the
+  leg module uses -- see person-marker-assignment-design.md §2 for the
+  original design (`normal` per attachment-set entry, `dot(normal_world,
+  unit(camera_pos - marker_pos_world)) < cos(max_angle)` gates out the pair
+  before it reaches the cost matrix). Extending it there fixes the
+  cross-marker contamination for `SlotEvidence` as a side effect, not just for
+  the plain assignment gate it was designed for -- a slot with no column in a
+  camera cannot contaminate that camera's evidence for a neighbour either.
+  Prerequisite for corroboration (and, less critically, for the reacquisition
+  gate's positional check) being safe to turn on for an articulated body with
+  closely spaced dot slots.
 - **Deriving `dot_camera_noise_scale` automatically** from a run's own
   per-camera reprojection medians, instead of by hand from a prior baseline
   run as done for this validation.

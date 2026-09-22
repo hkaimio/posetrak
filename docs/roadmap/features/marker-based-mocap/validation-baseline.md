@@ -114,6 +114,46 @@ tight radius rarely finds the cross-camera corroboration a genuine
 reacquisition actually has, so the slot coasts and drifts before it is finally
 admitted by the plain gate instead.
 
+Cross-view corroboration
+(`dot_cross_view_corroboration_px=20, dot_corroboration_gate_multiplier=5`),
+against the same no-mechanism baselines (ball with clutter: 11.826 NIS/dof,
+133.0/175.6/93.4 px; clean 3-camera ball: 0.156 NIS/dof, 18.9/71.3/20.4 px;
+leg window: 132/200 dot jumps):
+
+| Case | Mean NIS/dof | Reprojection medians | Dot jumps (after a gap / any) |
+|---|---|---|---|
+| Ball with clutter, corroboration | 9.937 | 52.9, 85.0, 32.1 px (3 cameras) | 1 / 9 |
+| Leg module window, corroboration | -- | -- | 331 / 725 |
+| Leg module window, corroboration, radius tightened to 8 px | -- | -- | 185 / 306 |
+
+Corroboration meaningfully helps the clutter case (roughly halves the damage,
+though it does not reach the clean baseline) -- the one mechanism in this
+round that has any effect on it, since the reacquisition gate does not touch
+a slot that never gaps. On the leg window it clearly regresses: markers a few
+centimetres apart (the ankle and knee clusters) can each fall inside the
+other's own evidence-gathering radius, so a marker's "corroborating evidence"
+can actually be a neighbouring marker's real candidate -- geometrically valid,
+but for the wrong slot. Tightening the shared radius helps but does not
+recover the baseline; see the WS2 plan's own status section for the diagnosis
+and what a fix would need.
+
+Per-camera trust (`dot_camera_noise_scale`, derived from the leg module's own
+per-camera reprojection medians -- see the WS2 plan §2.4 for the values), on
+the window and on the full case:
+
+| Case | Mean NIS/dof | Reprojection medians | Dot jumps (after a gap / any) |
+|---|---|---|---|
+| Leg module window, per-camera trust | 1.975 | 18.5 – 29.2 px (6 cameras) | 130 / 194 |
+| Leg module, full case, per-camera trust | 1.902 | 16.2 – 32.3 px (6 cameras) | 3641 / 7922 |
+
+No-mechanism baselines: window 1.996 NIS/dof, 132/200 jumps; full case 1.920
+NIS/dof, 3646/7761 jumps, medians per the main table above. Trust is a small,
+real improvement on NIS/dof and the after-a-gap jump count in both, with every
+per-camera reprojection median within the baseline's own tolerance; the
+any-gap jump count is essentially flat (7761 → 7922 on the full case). No
+regression on the acceptance criterion the plan set (§2.4: "NIS/dof and
+per-camera medians no worse").
+
 The ball case is the ball case above with one more camera's unfiltered dot
 candidates added (the leg module's dots on that camera over the same span, which
 include near-static clutter). Without them the medians are 18.9, 71.3 and 20.4 px,

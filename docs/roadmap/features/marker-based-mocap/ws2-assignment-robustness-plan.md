@@ -312,6 +312,87 @@ improvement -- see below.
     ones for the same real-world tolerance) rather than one constant for every
     camera pair.
 
+**3 and 4 are built and off by default; 3's own result is mixed, not a clean win.**
+
+- **Feasibility measurement (§2.3, done before any C++).** Epipolar residual of
+  known-good correspondences (the ball, resolved across its three hand-tracked
+  cameras) per camera pair, against the offset of the `gopro13_02` clutter
+  candidates, using the calibrated cameras (`load_camera_states()`,
+  `posetrak/calibration/session_cameras.py`) and a plain DLT fundamental-matrix
+  computation:
+
+  | Camera pair (or test) | Residual |
+  |---|---|
+  | `insta_ace2_pro` ↔ `gopro13_01`, full throw | p50 7.7 px, p95 17.8 px |
+  | `insta_ace2_pro` ↔ `gopro-11_mini_01`, full throw | p50 38.2 px, p95 44.1 px |
+  | `gopro-11_mini_01` ↔ `gopro13_01`, full throw | p50 38.8 px, p95 57.8 px |
+  | Candidates within 15 px of the true (triangulated) position in `gopro13_02` | n=18, p50 7.7 px, p95 11.6 px |
+  | Candidates far from the true position (clutter) | n=335, p5 10.3 px, p50 278.8 px, worst >500 px |
+
+  Read together: most clutter is separated from the true correspondence by two
+  orders of magnitude (278 px vs 12–18 px), so the test is feasible in the
+  sense the plan's gate asks for. But the good-pair residual is not one number
+  -- it is 3–4x looser for any pair involving `gopro-11_mini_01` during the
+  ball's fast motion (plausibly frame-sync error accumulating with velocity,
+  not a calibration problem), and the clutter set's own 5th percentile (10.3 px)
+  sits inside even the tightest good pair's range. A single global
+  `dot_cross_view_corroboration_px` cannot be tight enough to reject that tail
+  and loose enough to admit the noisiest good pair at the same time; §6 below
+  keeps a per-camera-pair tolerance as an open item rather than picking one
+  number now.
+- **Built:** `CrossViewCorroborationModifier` (cost discount via
+  `dot_corroboration_gate_multiplier` for a candidate with an epipolar-consistent
+  near-prediction candidate in another camera), `build_camera_fundamentals()`
+  (pure geometry, computed once per call from `Tracker::cameras()`, new
+  accessor), and `ReacquisitionGateModifier` extended to accept corroboration
+  as a third admission path alongside tracklet continuity and the positional
+  "two cameras near the prediction" check. `NearPredictionCameras` generalized
+  to `SlotEvidence` (now holding candidate positions, not just camera ids) so
+  both mechanisms share the one pre-pass the plan asked for. Off by default
+  (`dot_cross_view_corroboration_px = 0`); every case, including the full
+  leg-module and sword captures, stays byte-identical to the reference binary
+  with the defaults.
+- **Ball with clutter: a real, partial improvement.** At
+  `dot_cross_view_corroboration_px=20, dot_corroboration_gate_multiplier=5`:
+  mean NIS/dof 11.826 → 9.937 (clean baseline 0.156); reprojection medians
+  133.0/175.6/93.4 px → 52.9/85.0/32.1 px (clean baseline 18.9/71.3/20.4 px).
+  Roughly halves the damage without fixing it -- this is the first mechanism in
+  WS2 that helps this case at all, since the reacquisition gate (package 2)
+  measurably does not (the clutter candidate is resolved every step, so it
+  never gaps).
+- **Leg module: a real regression from cross-marker evidence contamination,
+  not yet fixed.** The same settings on the ankle window raised dot jumps from
+  the no-mechanism baseline's 132/200 to 331/725. Diagnosis: `SlotEvidence`'s
+  evidence-gathering radius (`dot_reacquire_max_px`, shared with package 2) is
+  per-marker but not marker-*exclusive* -- two markers a few centimetres apart
+  (the ankle cluster: `ankle_med`/`ankle_lat`, `knee_med`/`knee_lat`/
+  `knee_front`) can each have the *other's* real candidate fall within the
+  radius of their own prediction, so a marker's "corroborating evidence" can
+  actually be a neighbouring marker's real point, epipolar-consistent with a
+  wrong candidate for the first marker purely because both markers are real,
+  nearby, and geometrically valid. Tightening the shared radius to 8 px
+  (`dot_reacquire_max_px=8`) partially mitigates it (185/306) but does not
+  reach the no-mechanism baseline. Not pursued further this round -- see §6.
+- **Per-camera trust (§2.4), built as designed.** `dot_camera_noise_scale`
+  applied to `Observation::noise_std_override` after any streak inflation, in
+  `resolve_dot_assignment()`'s Observation-building step, not as a cost
+  modifier. Values are derived, not computed automatically: scale = camera's
+  own median reprojection error on a baseline run, divided by the mean across
+  cameras (`> 1` = trust less, `< 1` = trust more). On the leg module (medians
+  30.0/32.5/18.1/16.4/26.7/25.9 px → scales 1.20/1.30/0.73/0.66/1.07/1.04 for
+  `gopro-11_mini_01`/`gopro13_01`/`gopro13_02`/`insta_ace2_pro`/
+  `oneplus9pro-01`/`pixel9`): the ankle window's dot jumps improved slightly
+  (132/200 → 130/194) and mean NIS/dof moved from 1.996 to 1.975, both within
+  the case's own tolerance. **Confirmed on the full leg case** (the plan's own
+  acceptance test, not just the window): mean NIS/dof 1.920 → 1.902, every
+  per-camera reprojection median within tolerance (16.2 – 32.3 px vs the
+  baseline's 16.4 – 32.5 px), dot jumps after a gap 3646 → 3641, jumps at any
+  gap essentially flat (7761 → 7922). A small, real improvement with no
+  regression, meeting the acceptance criterion the plan set (§2.4: "NIS/dof
+  and per-camera medians no worse") -- the one mechanism in WS2 so far that
+  can be recommended on the evidence gathered, though the derivation is still
+  manual, not automatic (see §6).
+
 ## 4. Validation
 
 - **Reference binary.** Copy `optbuild/cpp/cli/posetrak-tracker.exe`, built from
@@ -359,3 +440,21 @@ improvement -- see below.
   with the candidate count; both are measured before the torso and arm
   capture is processed, and neither is changed here.
 - Automatic labelling of tracklets at calibration time.
+- **A per-camera-pair (rather than global) corroboration tolerance.** The
+  feasibility measurement (§3, package 3) found the good-correspondence
+  residual is 3–4x looser for at least one real camera pair than the others,
+  plausibly from frame-sync error scaling with motion speed rather than
+  calibration; a single `dot_cross_view_corroboration_px` cannot be tight
+  enough for the clutter case and loose enough for that pair at once.
+- **Slot-exclusive evidence for `SlotEvidence`/`CrossViewCorroborationModifier`.**
+  The evidence-gathering radius is per-marker but not marker-exclusive, so a
+  real candidate for one marker can be mistaken for corroborating evidence of
+  a different, nearby marker (measured regression on the leg module's ankle
+  and knee clusters, §3). A fix needs each marker's evidence to exclude
+  candidates that are at least as close to a different marker's own
+  prediction, or some other way to keep evidence marker-specific, before
+  corroboration is safe to turn on for an articulated body with closely
+  spaced dot slots.
+- **Deriving `dot_camera_noise_scale` automatically** from a run's own
+  per-camera reprojection medians, instead of by hand from a prior baseline
+  run as done for this validation.

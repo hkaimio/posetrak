@@ -987,9 +987,8 @@ TEST_CASE("default_cost_modifiers: ownership always, tracklet continuity only wh
 }
 
 // ---------------------------------------------------------------------------
-// ReacquisitionGateModifier and the near-prediction-cameras pre-pass it reads
-// through resolve_dot_assignment() (§2.2/§2.3 of the WS2 assignment
-// robustness plan).
+// ReacquisitionGateModifier and the shared evidence pre-pass it reads through
+// resolve_dot_assignment() -- see the class's own doc comment.
 // ---------------------------------------------------------------------------
 
 TEST_CASE(
@@ -1095,10 +1094,10 @@ TEST_CASE(
 }
 
 // ---------------------------------------------------------------------------
-// build_camera_fundamentals() and CrossViewCorroborationModifier (§2.3 of the
-// WS2 assignment robustness plan). make_canonical_camera() gives a rectified
-// stereo rig whose epipolar constraint is exactly "same y" -- see that
-// helper's own doc comment for the worked-out fundamental matrix.
+// build_camera_fundamentals() and CrossViewCorroborationModifier.
+// make_canonical_camera() gives a rectified stereo rig whose epipolar
+// constraint is exactly "same y" -- see that helper's own doc comment for the
+// worked-out fundamental matrix.
 // ---------------------------------------------------------------------------
 
 TEST_CASE("build_camera_fundamentals: a rectified stereo pair's epipolar line is 'same y'",
@@ -1228,8 +1227,8 @@ TEST_CASE(
 }
 
 // ---------------------------------------------------------------------------
-// Per-camera trust (dot_camera_noise_scale, §2.4 of the WS2 plan): applied to
-// a resolved observation's noise, never to the assignment cost.
+// Per-camera trust (dot_camera_noise_scale): applied to a resolved
+// observation's noise, never to the assignment cost.
 // ---------------------------------------------------------------------------
 
 TEST_CASE("resolve_dot_assignment: per-camera noise scale multiplies the resolved noise",

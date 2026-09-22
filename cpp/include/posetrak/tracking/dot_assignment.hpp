@@ -286,11 +286,10 @@ class CandidateOwnershipModifier final : public CostModifier {
 /// for a slot that has never resolved, which has no established track to
 /// protect.
 ///
-/// This is the "never reseed from a bad guess after a gap, verify consistency
-/// before trusting a resumed detection" rule (2026-09-14 leg-marker ankle
-/// finding, marker-based-mocap status.md), applied at assignment time instead
-/// of after the fact: a slot left unresolved coasts on the process model
-/// rather than risk locking onto a confidently wrong candidate.
+/// This is a "never reseed from a bad guess after a gap, verify consistency
+/// before trusting a resumed detection" rule, applied at assignment time
+/// instead of after the fact: a slot left unresolved coasts on the process
+/// model rather than risk locking onto a confidently wrong candidate.
 class ReacquisitionGateModifier final : public CostModifier {
    public:
     CostSupport apply(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
@@ -312,13 +311,24 @@ class ReacquisitionGateModifier final : public CostModifier {
 /// separates a confidently wrong candidate from a real one when
 /// dot_cross_view_corroboration_px is tighter than the wrong candidate's own
 /// offset, and that tolerance cannot be tighter than the camera pair's own
-/// calibration/sync accuracy. Measured on the ball-with-clutter case (WS2 plan
-/// §"Status of the work packages"): real correspondences between well-behaved
-/// camera pairs residual under about 20 px, a fast-moving one (sync-sensitive)
-/// up to about 60 px, while the clutter candidates were typically hundreds of
-/// pixels off epipolar -- separable in practice, with a small unavoidable tail
-/// where a wrong candidate happens to sit near the true one's epipolar ray
-/// (the geometry any single other camera's epipolar line cannot resolve).
+/// calibration/sync accuracy. Measured against a real, confidently-wrong
+/// candidate on one capture: real correspondences between well-behaved camera
+/// pairs residual under about 20 px, a fast-moving one (sync-sensitive) up to
+/// about 60 px, while the wrong candidates were typically hundreds of pixels
+/// off epipolar -- separable in practice, with a small unavoidable tail where
+/// a wrong candidate happens to sit near the true one's epipolar ray (the
+/// geometry any single other camera's epipolar line cannot resolve).
+///
+/// Not yet safe for a body with closely spaced dot slots: the same evidence
+/// (DotAssignmentContext::slot_evidence) that finds a corroborating candidate
+/// in another camera is gathered per marker but not marker-exclusive, so a
+/// real candidate for one marker can be found as if it corroborated a
+/// different, nearby marker. Backface culling on the marker's own outward
+/// normal, extended from the rigid-body prediction path to the articulated
+/// one, is the fix: two markers close together but facing opposite directions
+/// are visible from disjoint camera sets, so the wrong marker would never earn
+/// a prediction (and so never contaminate the evidence) in a camera that
+/// cannot see its side to begin with.
 class CrossViewCorroborationModifier final : public CostModifier {
    public:
     CostSupport apply(DotSlotRef const& slot, UnlabeledCandidate const& candidate,

@@ -81,11 +81,13 @@ struct TrackerConfig {
     /// requires independent evidence -- tracklet continuity, or a
     /// near-prediction candidate in at least two cameras -- to resolve it
     /// again; short of that, the slot stays unresolved and the filter coasts
-    /// on the process model instead. Targets the "confidently wrong candidate
-    /// after a gap" failure the plain Mahalanobis gate cannot distinguish from
-    /// a genuine reacquisition on geometry alone (2026-09-14 leg-marker ankle
-    /// finding, marker-based-mocap status.md). 0 (default) disables the gate:
-    /// every existing config is unaffected until this is deliberately raised.
+    /// on the process model instead. A plain Mahalanobis gate judges each
+    /// candidate from one frame's geometry alone, so it cannot distinguish a
+    /// genuine reacquisition from a candidate that is sharp and well inside
+    /// the gate but is simply the wrong physical point; this targets that
+    /// failure shape specifically, once a slot has gone quiet for a run of
+    /// frames. 0 (default) disables the gate: every existing config is
+    /// unaffected until this is deliberately raised.
     int dot_reacquire_gap_frames = 0;
 
     /// @brief Radius, in pixels, for ReacquisitionGateModifier's cross-camera
@@ -95,16 +97,15 @@ struct TrackerConfig {
     /// dot_assignment_gate_mahalanobis's Mahalanobis metric -- this is
     /// corroboration evidence, not a substitute for the assignment gate.
     /// Unused while dot_reacquire_gap_frames is 0. This default is an
-    /// unvalidated starting guess, not a tuned value -- a small sweep on the
-    /// leg module's ankle-dropout window found the gate makes discontinuous
-    /// reacquisitions *more* frequent at 30-50 px (corroboration too rarely
-    /// found, so a genuine reacquisition coasts and drifts before it is
-    /// finally admitted) and only improves on the no-gate baseline at 80 px
-    /// (see ws2-assignment-robustness-plan.md §"Status of the work
-    /// packages"). Tune against that case, or a similar one, before turning
-    /// dot_reacquire_gap_frames on for real use. Also the evidence-gathering
-    /// radius for dot_cross_view_corroboration_px below -- the plan calls for
-    /// one shared pre-pass, not a second radius to tune.
+    /// unvalidated starting guess, not a tuned value: on one real capture
+    /// with a genuine marker reacquisition after occlusion, a radius of
+    /// 30-50 px made the reacquisition *more* discontinuous than no gate at
+    /// all (corroboration too rarely found, so a genuine reacquisition
+    /// coasts and drifts before it is finally admitted), and only 80 px
+    /// improved on the no-gate baseline. Tune against a real reacquisition
+    /// case before turning dot_reacquire_gap_frames on. Also the
+    /// evidence-gathering radius for dot_cross_view_corroboration_px below,
+    /// which reads the same candidates rather than gathering its own.
     double dot_reacquire_max_px = 30.0;
 
     /// @brief Epipolar tolerance, in pixels, for CrossViewCorroborationModifier
@@ -135,9 +136,10 @@ struct TrackerConfig {
     /// should lose the assignment to begin with). Keyed by the tracker's own
     /// integer camera_id (same convention as velocity_mode_camera_ids), not by
     /// camera label. Empty (default) leaves every camera's noise as computed.
-    /// Values are not derived automatically -- see ws2-assignment-robustness-
-    /// plan.md §2.4 for how to derive them from a baseline run's per-camera
-    /// reprojection medians.
+    /// Values are not derived automatically: a reasonable starting point is a
+    /// camera's own median reprojection error on a baseline run, divided by
+    /// the mean of every camera's median (so a camera worse than the mean is
+    /// trusted less, better trusted more).
     std::unordered_map<int, double> dot_camera_noise_scale;
 
     // === Streak-derived dot velocity ===

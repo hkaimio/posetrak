@@ -79,6 +79,18 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
             tracking["dot_tracklet_gate_multiplier"].value_or(1.0);
         result.dot_reacquire_gap_frames = tracking["dot_reacquire_gap_frames"].value_or(0);
         result.dot_reacquire_max_px = tracking["dot_reacquire_max_px"].value_or(30.0);
+        result.dot_cross_view_corroboration_px =
+            tracking["dot_cross_view_corroboration_px"].value_or(0.0);
+        result.dot_corroboration_gate_multiplier =
+            tracking["dot_corroboration_gate_multiplier"].value_or(1.0);
+        // dot_camera_noise_scale = { "2" = 1.3, "3" = 0.7, ... }: TOML keys are always
+        // strings, so the camera_id is parsed back out of the key text.
+        if (auto scale_table = tracking["dot_camera_noise_scale"].as_table()) {
+            for (auto&& [key, value] : *scale_table) {
+                if (auto v = value.value<double>())
+                    result.dot_camera_noise_scale[std::stoi(std::string(key.str()))] = *v;
+            }
+        }
         if (auto vel_cams = tracking["velocity_mode_camera_ids"].as_array()) {
             for (auto&& elem : *vel_cams) {
                 if (auto v = elem.value<int64_t>())
@@ -316,6 +328,29 @@ void TrackerAppConfig::validate() const {
     if (dot_reacquire_max_px <= 0.0) {
         throw std::runtime_error(
             fmt::format("Invalid dot_reacquire_max_px: {} (must be > 0)", dot_reacquire_max_px));
+    }
+
+    if (dot_cross_view_corroboration_px < 0.0) {
+        throw std::runtime_error(
+            fmt::format("Invalid dot_cross_view_corroboration_px: {} (must be >= 0)",
+                        dot_cross_view_corroboration_px));
+    }
+
+    if (dot_corroboration_gate_multiplier < 1.0) {
+        throw std::runtime_error(
+            fmt::format("Invalid dot_corroboration_gate_multiplier: {} (must be >= 1.0 -- "
+                        "this divides a cost, so anything below 1.0 would tighten the gate "
+                        "for a corroborated candidate instead of relaxing it)",
+                        dot_corroboration_gate_multiplier));
+    }
+
+    for (auto const& [camera_id, scale] : dot_camera_noise_scale) {
+        if (scale <= 0.0) {
+            throw std::runtime_error(
+                fmt::format("Invalid dot_camera_noise_scale for camera {}: {} (must be > 0 -- "
+                            "it scales a measurement noise std)",
+                            camera_id, scale));
+        }
     }
 
     if (ik_max_iterations <= 0) {

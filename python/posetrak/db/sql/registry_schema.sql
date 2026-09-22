@@ -216,7 +216,14 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     -- or a near-prediction candidate in at least two cameras) before a slot
     -- left unresolved for a run of steps may resolve again.
     dot_reacquire_gap_frames INTEGER,  -- Steps unresolved before the gate applies; NULL/0 = disabled
-    dot_reacquire_max_px     REAL      -- Cross-camera "near the prediction" radius, px; NULL/30.0 = default
+    dot_reacquire_max_px     REAL,     -- Cross-camera "near the prediction" radius, px; NULL/30.0 = default
+    -- Added in schema migration v55 (session)/v14 (registry): cross-view
+    -- corroboration and per-camera trust for the shared dot-assignment phase --
+    -- see CrossViewCorroborationModifier and dot_camera_noise_scale's own doc
+    -- comment (dot_assignment.hpp / config.hpp).
+    dot_cross_view_corroboration_px  REAL,  -- Epipolar tolerance, px; NULL/0.0 = disabled
+    dot_corroboration_gate_multiplier REAL, -- Divides cost for a corroborated pairing; NULL/1.0 = disabled
+    dot_camera_noise_scale           TEXT   -- JSON object {camera_id: scale, ...}; NULL/empty = no change
 );
 
 -- Added in schema migration v37: hierarchical body/hand solver -- per-stage

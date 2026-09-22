@@ -24,8 +24,8 @@ from typing import Final
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 13
-SESSION_SCHEMA_VERSION: Final[int] = 54
+REGISTRY_SCHEMA_VERSION: Final[int] = 14
+SESSION_SCHEMA_VERSION: Final[int] = 55
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -322,6 +322,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 12
     if actual == 12:
         _migrate_registry_v12_to_v13(conn)
+        actual = 13
+    if actual == 13:
+        _migrate_registry_v13_to_v14(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -727,6 +730,24 @@ def _migrate_registry_v12_to_v13(conn: sqlite3.Connection) -> None:
     if "dot_reacquire_max_px" not in existing:
         conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_reacquire_max_px REAL")
     _set_schema_version(conn, 13)
+    conn.commit()
+
+
+def _migrate_registry_v13_to_v14(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 13 to 14.
+
+    v14 adds cross-view corroboration and per-camera trust for the shared
+    dot-assignment phase to tracker_configs, mirroring the session schema
+    v54->v55 change -- see _migrate_session_v54_to_v55's docstring.
+    """
+    existing = _tracker_config_columns(conn)
+    if "dot_cross_view_corroboration_px" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_cross_view_corroboration_px REAL")
+    if "dot_corroboration_gate_multiplier" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_corroboration_gate_multiplier REAL")
+    if "dot_camera_noise_scale" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_camera_noise_scale TEXT")
+    _set_schema_version(conn, 14)
     conn.commit()
 
 
@@ -1835,6 +1856,28 @@ def _migrate_session_v53_to_v54(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v54_to_v55(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 54 to 55.
+
+    v55 adds cross-view corroboration and per-camera trust to the shared
+    dot-assignment phase: dot_cross_view_corroboration_px (epipolar tolerance
+    for CrossViewCorroborationModifier), dot_corroboration_gate_multiplier
+    (its cost discount), and dot_camera_noise_scale (a per-camera factor on
+    resolved dot observations' measurement noise, keyed by the tracker's own
+    integer camera_id). See dot_assignment.hpp and TrackerConfig's own field
+    doc comments (config.hpp).
+    """
+    existing = _tracker_config_columns(conn)
+    if "dot_cross_view_corroboration_px" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_cross_view_corroboration_px REAL")
+    if "dot_corroboration_gate_multiplier" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_corroboration_gate_multiplier REAL")
+    if "dot_camera_noise_scale" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_camera_noise_scale TEXT")
+    _set_schema_version(conn, 55)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -2017,6 +2060,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 53
     if actual == 53:
         _migrate_session_v53_to_v54(conn)
+        actual = 54
+    if actual == 54:
+        _migrate_session_v54_to_v55(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

@@ -594,6 +594,27 @@ Camera make_test_camera(int id, double cx_offset) {
     return Camera(id, "cam" + std::to_string(id), intr, extr);
 }
 
+/// A camera at *position*, identity intrinsics (fx=fy=1, cx=cy=0) and identity
+/// orientation, for hand-computable epipolar geometry: two of these, at
+/// different positions, form a canonical (rectified) stereo rig, whose
+/// fundamental matrix is `[t]_x` for a baseline along a single axis -- see the
+/// build_camera_fundamentals() test below for the worked-out numbers.
+Camera make_canonical_camera(int id, Eigen::Vector3d const& position) {
+    Intrinsics intr;
+    intr.fx = 1.0;
+    intr.fy = 1.0;
+    intr.cx = 0.0;
+    intr.cy = 0.0;
+    intr.width = 4000;
+    intr.height = 4000;
+    intr.model = Intrinsics::DistortionModel::BrownConrady;
+    intr.distortion_coeffs = {0, 0, 0, 0, 0};
+    Extrinsics extr;
+    extr.position = position;
+    extr.orientation = Eigen::Quaterniond::Identity();
+    return Camera(id, "cam" + std::to_string(id), intr, extr);
+}
+
 }  // namespace
 
 TEST_CASE("resolve_shared_dot_assignment: wires Tracker predictions into the pure core",
@@ -1029,11 +1050,11 @@ TEST_CASE("ReacquisitionGateModifier: two corroborating cameras admit a gapped s
     context.dot_reacquire_gap_frames = 3;
     context.prev_resolved_frame[0][0][7] = 5;
 
-    context.near_prediction_cameras[0][7] = {0};  // only this camera -- not enough on its own
-    REQUIRE(modifier.apply(slot, candidate, context).exclude);
+    context.slot_evidence[0][7][0] = {Eigen::Vector2d(100.0, 200.0)};  // only this camera
+    REQUIRE(modifier.apply(slot, candidate, context).exclude);         // not enough on its own
 
-    context.near_prediction_cameras[0][7] = {0, 1};  // corroborated by a second camera
-    REQUIRE_FALSE(modifier.apply(slot, candidate, context).exclude);
+    context.slot_evidence[0][7][1] = {Eigen::Vector2d(300.0, 400.0)};  // a second camera
+    REQUIRE_FALSE(modifier.apply(slot, candidate, context).exclude);   // corroborated
 }
 
 TEST_CASE(
@@ -1071,4 +1092,189 @@ TEST_CASE(
         resolved_cameras.push_back(obs.camera_id);
     std::sort(resolved_cameras.begin(), resolved_cameras.end());
     REQUIRE(resolved_cameras == std::vector<int>{0, 1});  // camera 2's candidate is too far to gate
+}
+
+// ---------------------------------------------------------------------------
+// build_camera_fundamentals() and CrossViewCorroborationModifier (§2.3 of the
+// WS2 assignment robustness plan). make_canonical_camera() gives a rectified
+// stereo rig whose epipolar constraint is exactly "same y" -- see that
+// helper's own doc comment for the worked-out fundamental matrix.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("build_camera_fundamentals: a rectified stereo pair's epipolar line is 'same y'",
+          "[dot_assignment]") {
+    std::unordered_map<int, Camera> cameras = {
+        {0, make_canonical_camera(0, Eigen::Vector3d(0.0, 0.0, 0.0))},
+        {1, make_canonical_camera(1, Eigen::Vector3d(1.0, 0.0, 0.0))},
+    };
+    auto fundamentals = build_camera_fundamentals(cameras);
+    REQUIRE(fundamentals.size() == 2);  // both directions
+
+    auto const key01 = (std::int64_t{0} << 32) | std::uint32_t{1};
+    Eigen::Matrix3d const& F01 = fundamentals.at(key01);
+    Eigen::Vector3d const line = F01 * Eigen::Vector3d(2.0, 3.0, 1.0);
+    // l . (x, y, 1) = 0 with l = (0, 1, -3) means the line is exactly y = 3.
+    REQUIRE(line.x() == Catch::Approx(0.0).margin(1e-9));
+    REQUIRE(line.y() == Catch::Approx(1.0));
+    REQUIRE(line.z() == Catch::Approx(-3.0));
+}
+
+TEST_CASE(
+    "CrossViewCorroborationModifier: supports a candidate near another camera's "
+    "epipolar-consistent one",
+    "[dot_assignment]") {
+    std::unordered_map<int, Camera> cameras = {
+        {0, make_canonical_camera(0, Eigen::Vector3d(0.0, 0.0, 0.0))},
+        {1, make_canonical_camera(1, Eigen::Vector3d(1.0, 0.0, 0.0))},
+    };
+    MarkerPrediction const prediction = make_prediction(2.0, 3.0);
+    DotSlotRef const slot{/*subject_id=*/0, /*camera_id=*/0, /*marker_id=*/7, &prediction};
+    CrossViewCorroborationModifier const modifier;
+
+    DotAssignmentContext context = make_context();
+    context.dot_cross_view_corroboration_px = 0.5;
+    context.dot_corroboration_gate_multiplier = 3.0;
+    context.camera_fundamentals = build_camera_fundamentals(cameras);
+    // Camera 1's own near-prediction candidate at y=3.0 -- consistent with the
+    // rig's "same y" epipolar constraint.
+    context.slot_evidence[0][7][1] = {Eigen::Vector2d(50.0, 3.0)};
+
+    UnlabeledCandidate const consistent = make_candidate(0, 2.0, 3.0);
+    CostSupport const support = modifier.apply(slot, consistent, context);
+    REQUIRE(support.factor == 3.0);
+    REQUIRE_FALSE(support.exclude);
+
+    UnlabeledCandidate const inconsistent = make_candidate(0, 2.0, 30.0);  // y is far off
+    REQUIRE(modifier.apply(slot, inconsistent, context).factor == 1.0);
+
+    // The only evidence is from camera 0 itself -- corroboration needs an *other* camera.
+    DotSlotRef const self_slot{0, 1, 7, &prediction};
+    UnlabeledCandidate const self_cand = make_candidate(1, 50.0, 3.0);
+    DotAssignmentContext self_context = context;
+    self_context.slot_evidence.clear();
+    self_context.slot_evidence[0][7][1] = {Eigen::Vector2d(50.0, 3.0)};
+    REQUIRE(modifier.apply(self_slot, self_cand, self_context).factor == 1.0);
+}
+
+TEST_CASE("CrossViewCorroborationModifier: a no-op with no fundamentals or the threshold off",
+          "[dot_assignment]") {
+    MarkerPrediction const prediction = make_prediction(2.0, 3.0);
+    DotSlotRef const slot{0, 0, 7, &prediction};
+    UnlabeledCandidate const candidate = make_candidate(0, 2.0, 3.0);
+    CrossViewCorroborationModifier const modifier;
+
+    DotAssignmentContext context = make_context();
+    context.slot_evidence[0][7][1] = {Eigen::Vector2d(50.0, 3.0)};
+    // No camera_fundamentals at all.
+    context.dot_cross_view_corroboration_px = 0.5;
+    REQUIRE(modifier.apply(slot, candidate, context).factor == 1.0);
+
+    // Fundamentals present but the threshold left at 0 (off).
+    std::unordered_map<int, Camera> cameras = {
+        {0, make_canonical_camera(0, Eigen::Vector3d(0.0, 0.0, 0.0))},
+        {1, make_canonical_camera(1, Eigen::Vector3d(1.0, 0.0, 0.0))},
+    };
+    context.camera_fundamentals = build_camera_fundamentals(cameras);
+    context.dot_cross_view_corroboration_px = 0.0;
+    REQUIRE(modifier.apply(slot, candidate, context).factor == 1.0);
+}
+
+TEST_CASE("ReacquisitionGateModifier: corroboration admits a gapped slot with no other evidence",
+          "[dot_assignment]") {
+    std::unordered_map<int, Camera> cameras = {
+        {0, make_canonical_camera(0, Eigen::Vector3d(0.0, 0.0, 0.0))},
+        {1, make_canonical_camera(1, Eigen::Vector3d(1.0, 0.0, 0.0))},
+    };
+    MarkerPrediction const prediction = make_prediction(2.0, 3.0);
+    DotSlotRef const slot{0, 0, 7, &prediction};
+    ReacquisitionGateModifier const modifier;
+
+    DotAssignmentContext context = make_context(/*frame_idx=*/10);
+    context.dot_reacquire_gap_frames = 3;
+    context.prev_resolved_frame[0][0][7] = 5;  // gapped
+    context.dot_cross_view_corroboration_px = 0.5;
+    context.camera_fundamentals = build_camera_fundamentals(cameras);
+    // Only one camera's evidence (itself insufficient for the positional "two
+    // cameras" test), but epipolar-consistent with the candidate.
+    context.slot_evidence[0][7][1] = {Eigen::Vector2d(50.0, 3.0)};
+
+    UnlabeledCandidate const candidate = make_candidate(0, 2.0, 3.0);
+    REQUIRE_FALSE(modifier.apply(slot, candidate, context).exclude);
+
+    UnlabeledCandidate const uncorroborated = make_candidate(0, 2.0, 30.0);
+    REQUIRE(modifier.apply(slot, uncorroborated, context).exclude);
+}
+
+TEST_CASE(
+    "default_cost_modifiers: cross-view corroboration needs the threshold, the multiplier and "
+    "real fundamentals",
+    "[dot_assignment]") {
+    std::unordered_map<int, Camera> cameras = {
+        {0, make_canonical_camera(0, Eigen::Vector3d(0.0, 0.0, 0.0))},
+        {1, make_canonical_camera(1, Eigen::Vector3d(1.0, 0.0, 0.0))},
+    };
+    DotAssignmentContext context = make_context();
+    context.dot_cross_view_corroboration_px = 10.0;
+    context.dot_corroboration_gate_multiplier = 2.0;
+    REQUIRE(default_cost_modifiers(context).size() == 1);  // no fundamentals yet
+
+    context.camera_fundamentals = build_camera_fundamentals(cameras);
+    auto modifiers = default_cost_modifiers(context);
+    REQUIRE(modifiers.size() == 2);
+    REQUIRE(dynamic_cast<CrossViewCorroborationModifier*>(modifiers[1].get()) != nullptr);
+
+    context.dot_corroboration_gate_multiplier = 1.0;  // no-op multiplier -- no reason to add it
+    REQUIRE(default_cost_modifiers(context).size() == 1);
+}
+
+// ---------------------------------------------------------------------------
+// Per-camera trust (dot_camera_noise_scale, §2.4 of the WS2 plan): applied to
+// a resolved observation's noise, never to the assignment cost.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("resolve_dot_assignment: per-camera noise scale multiplies the resolved noise",
+          "[dot_assignment]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0);
+    subject.predictions_by_camera[1][7] = make_prediction(100.0, 200.0);
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {make_candidate(0, 100.5, 200.5)};
+    candidates[1] = {make_candidate(1, 100.5, 200.5)};
+
+    DotAssignmentContext context = make_context();
+    context.calib_noise_std = 5.0;
+    context.dot_camera_noise_scale[0] = 2.0;  // camera 1 has no entry -- stays a no-op
+
+    auto result = resolve_dot_assignment({subject}, candidates, context);
+
+    REQUIRE(result.at(0).resolved.size() == 2);
+    for (auto const& obs : result.at(0).resolved) {
+        if (obs.camera_id == 0) {
+            REQUIRE(obs.noise_std_override == Catch::Approx(10.0));  // 5.0 * 2.0
+        } else {
+            REQUIRE(obs.noise_std_override == 0.0);  // untouched, default formula applies
+        }
+    }
+}
+
+TEST_CASE("resolve_dot_assignment: per-camera noise scale composes with the streak inflation",
+          "[dot_assignment]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0);
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {make_streak_candidate(0, 100.5, 200.5, /*elongation=*/2.0, 1.0, 0.0)};
+
+    DotAssignmentContext context = make_context();
+    context.calib_noise_std = 5.0;
+    context.dot_camera_noise_scale[0] = 2.0;
+
+    auto result = resolve_dot_assignment({subject}, candidates, context);
+
+    REQUIRE(result.at(0).resolved.size() == 1);
+    double const streak_noise = 5.0 + 2.0 / std::sqrt(12.0);
+    REQUIRE(result.at(0).resolved[0].noise_std_override == Catch::Approx(streak_noise * 2.0));
 }

@@ -205,7 +205,11 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
         "       confidence_threshold_marker_names,"
         "       COALESCE(confidence_threshold_override, 0.0) AS confidence_threshold_override,"
         "       COALESCE(dot_reacquire_gap_frames, 0) AS dot_reacquire_gap_frames,"
-        "       COALESCE(dot_reacquire_max_px, 30.0) AS dot_reacquire_max_px"
+        "       COALESCE(dot_reacquire_max_px, 30.0) AS dot_reacquire_max_px,"
+        "       COALESCE(dot_cross_view_corroboration_px, 0.0) AS dot_cross_view_corroboration_px,"
+        "       COALESCE(dot_corroboration_gate_multiplier, 1.0) AS "
+        "dot_corroboration_gate_multiplier,"
+        "       dot_camera_noise_scale"
         " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -240,7 +244,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //         53=process_noise_vel_max_multiplier, 54=dot_assignment_gate_mahalanobis,
     //         55=dot_tracklet_gate_multiplier, 56=confidence_threshold_marker_names,
     //         57=confidence_threshold_override, 58=dot_reacquire_gap_frames,
-    //         59=dot_reacquire_max_px
+    //         59=dot_reacquire_max_px, 60=dot_cross_view_corroboration_px,
+    //         61=dot_corroboration_gate_multiplier, 62=dot_camera_noise_scale
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -451,6 +456,23 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     apply_real(57, out.tracker.confidence_threshold_override);
     apply_int(58, out.tracker.dot_reacquire_gap_frames);
     apply_real(59, out.tracker.dot_reacquire_max_px);
+    apply_real(60, out.tracker.dot_cross_view_corroboration_px);
+    apply_real(61, out.tracker.dot_corroboration_gate_multiplier);
+
+    // dot_camera_noise_scale: stored as a JSON object of camera_id (as a string
+    // key, e.g. "2") -> scale, e.g. {"2": 1.3, "3": 0.7}.
+    if (sqlite3_column_type(stmt.ptr, 62) != SQLITE_NULL) {
+        char const* json_str = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 62));
+        if (json_str) {
+            auto obj = nlohmann::json::parse(json_str, nullptr, /*allow_exceptions=*/false);
+            if (obj.is_object()) {
+                for (auto const& [key, value] : obj.items()) {
+                    if (value.is_number())
+                        out.tracker.dot_camera_noise_scale[std::stoi(key)] = value.get<double>();
+                }
+            }
+        }
+    }
 
     return out;
 }

@@ -91,14 +91,28 @@ using PrevDotTrackletIds =
 using PrevDotResolvedFrame =
     std::unordered_map<int, std::unordered_map<int, std::unordered_map<int, int>>>;
 
-/// @brief Per (subject_id, marker_id) slot, the cameras holding a candidate
+/// @brief Per (subject_id, marker_id) slot, the candidate positions found
 /// within DotAssignmentContext::dot_reacquire_max_px of that camera's own
-/// prediction for the slot this step -- the cross-camera half of
-/// ReacquisitionGateModifier's evidence. Computed once per step by
-/// resolve_dot_assignment() itself (it needs every camera's candidates, not
-/// just the one being costed), so a caller leaves this at its default; it is
-/// not meant to be filled in by hand.
-using NearPredictionCameras = std::unordered_map<int, std::unordered_map<int, std::vector<int>>>;
+/// prediction for the slot this step, keyed by camera_id -- the shared
+/// cross-camera evidence ReacquisitionGateModifier and
+/// CrossViewCorroborationModifier both read (design plan §2.2/§2.3 call for
+/// one pre-pass, not one per mechanism). ReacquisitionGateModifier only needs
+/// which cameras are present (the map's key count); CrossViewCorroborationModifier
+/// needs the actual positions, to test each one's epipolar distance. Computed
+/// once per step by resolve_dot_assignment() itself (it needs every camera's
+/// candidates, not just the one being costed), so a caller leaves this at its
+/// default; it is not meant to be filled in by hand.
+using SlotEvidence = std::unordered_map<
+    int, std::unordered_map<int, std::unordered_map<int, std::vector<Eigen::Vector2d>>>>;
+
+/// @brief The fundamental matrix from one camera to another, for every ordered
+/// pair of cameras CrossViewCorroborationModifier might compare -- keyed by
+/// `(int64_t(from_camera_id) << 32) | uint32_t(to_camera_id)`, F such that for a
+/// point x in *from_camera_id*'s undistorted pixels, `F * [x;1]` is its epipolar
+/// line in *to_camera_id*. Computed once per call by resolve_shared_dot_assignment()
+/// from the calibrated cameras (the pure core never touches a Camera object) --
+/// see build_camera_fundamentals(). Empty when corroboration is off.
+using CameraPairFundamental = std::unordered_map<std::int64_t, Eigen::Matrix3d>;
 
 /// @brief One subject's resolved dot observations for this frame -- the
 /// per-subject share of resolve_dot_assignment()'s / resolve_shared_dot_assignment()'s
@@ -162,15 +176,38 @@ struct DotAssignmentContext {
     /// ReacquisitionGateModifier. 0 turns it off.
     int dot_reacquire_gap_frames = 0;
     /// Radius (TrackerConfig::dot_reacquire_max_px) for the gate's cross-camera
-    /// "near the prediction" evidence.
+    /// "near the prediction" evidence -- shared with CrossViewCorroborationModifier's
+    /// own evidence-gathering pass (see SlotEvidence).
     double dot_reacquire_max_px = 0.0;
     /// The frame_idx each slot was last resolved on; empty means the gate never
     /// applies (nothing has resolved yet to protect).
     PrevDotResolvedFrame prev_resolved_frame;
-    /// Which cameras hold a near-prediction candidate for each slot this step.
-    /// Computed internally by resolve_dot_assignment(); left at its default by
-    /// every caller.
-    NearPredictionCameras near_prediction_cameras;
+    /// Cross-camera candidate evidence for each slot this step (shared by
+    /// ReacquisitionGateModifier and CrossViewCorroborationModifier). Computed
+    /// internally by resolve_dot_assignment(); left at its default by every caller.
+    SlotEvidence slot_evidence;
+    /// Epipolar tolerance, in pixels, for CrossViewCorroborationModifier (TrackerConfig::
+    /// dot_cross_view_corroboration_px). 0 turns it off.
+    double dot_cross_view_corroboration_px = 0.0;
+    /// Cost discount for a corroborated pair (TrackerConfig::
+    /// dot_corroboration_gate_multiplier), same divide-the-cost convention as
+    /// dot_tracklet_gate_multiplier. 1.0 is a no-op.
+    double dot_corroboration_gate_multiplier = 1.0;
+    /// Fundamental matrices for the participating cameras, computed by
+    /// resolve_shared_dot_assignment() from the calibrated cameras. Empty
+    /// disables corroboration regardless of the settings above (there is
+    /// nothing to test candidates against) -- left at its default by every
+    /// caller that does not have real cameras to offer (e.g. a unit test can
+    /// still fill it in by hand against fabricated matrices).
+    CameraPairFundamental camera_fundamentals;
+    /// Per-camera factor (TrackerConfig::dot_camera_noise_scale, keyed by camera_id)
+    /// on the measurement noise of a resolved dot observation from that camera --
+    /// applied directly to Observation::noise_std_override, not a cost modifier (a
+    /// per-camera trust is not usually a reason a candidate should *lose* the
+    /// assignment, only a reason the filter should weigh its measurement
+    /// differently once assigned). A camera absent from the map, or the map being
+    /// empty, is a 1.0 no-op.
+    std::unordered_map<int, double> dot_camera_noise_scale;
 };
 
 /// @brief One (subject, camera, marker) slot as a cost modifier sees it.
@@ -235,14 +272,19 @@ class CandidateOwnershipModifier final : public CostModifier {
 };
 
 /// @brief Excludes a pair when the slot has gone DotAssignmentContext::
-/// dot_reacquire_gap_frames-or-more steps unresolved and the candidate has
-/// neither of the two admitted kinds of independent evidence: it continues the
+/// dot_reacquire_gap_frames-or-more steps unresolved and the candidate has none
+/// of the three admitted kinds of independent evidence: it continues the
 /// slot's last resolved tracklet (the same test TrackletContinuityModifier
-/// uses, applied here regardless of the tracklet multiplier), or the slot has a
-/// near-prediction candidate in at least two cameras
-/// (DotAssignmentContext::near_prediction_cameras). Otherwise a no-op --
-/// including for a slot that has never resolved, which has no established
-/// track to protect.
+/// uses, applied here regardless of the tracklet multiplier); the slot has a
+/// near-prediction candidate in at least two cameras (DotAssignmentContext::
+/// slot_evidence); or the candidate is itself epipolar-corroborated (the same
+/// test CrossViewCorroborationModifier uses, applied here regardless of
+/// dot_corroboration_gate_multiplier -- corroboration is real cross-camera
+/// identity evidence for this exact candidate, the same kind the tracklet test
+/// is, so it belongs in this "or" list once it exists, the two positional
+/// checks above being cruder stand-ins for it). Otherwise a no-op -- including
+/// for a slot that has never resolved, which has no established track to
+/// protect.
 ///
 /// This is the "never reseed from a bad guess after a gap, verify consistency
 /// before trusting a resumed detection" rule (2026-09-14 leg-marker ankle
@@ -255,15 +297,57 @@ class ReacquisitionGateModifier final : public CostModifier {
                       DotAssignmentContext const& context) const override;
 };
 
+/// @brief Makes a pair cheaper when the candidate is corroborated by another
+/// camera: some candidate near another camera's own prediction for the same
+/// slot (DotAssignmentContext::slot_evidence) lies within
+/// dot_cross_view_corroboration_px of this candidate's epipolar line in that
+/// camera (DotAssignmentContext::camera_fundamentals). The factor is
+/// dot_corroboration_gate_multiplier; never below 1 (a lone camera with every
+/// other one occluded must not be penalised, only a corroborated one
+/// rewarded). A no-op when camera_fundamentals is empty (no cameras to
+/// corroborate against) or dot_cross_view_corroboration_px is 0.
+///
+/// A candidate inside the assignment gate is already close to the true one, so
+/// its epipolar line is close to the true candidate's own -- this test only
+/// separates a confidently wrong candidate from a real one when
+/// dot_cross_view_corroboration_px is tighter than the wrong candidate's own
+/// offset, and that tolerance cannot be tighter than the camera pair's own
+/// calibration/sync accuracy. Measured on the ball-with-clutter case (WS2 plan
+/// §"Status of the work packages"): real correspondences between well-behaved
+/// camera pairs residual under about 20 px, a fast-moving one (sync-sensitive)
+/// up to about 60 px, while the clutter candidates were typically hundreds of
+/// pixels off epipolar -- separable in practice, with a small unavoidable tail
+/// where a wrong candidate happens to sit near the true one's epipolar ray
+/// (the geometry any single other camera's epipolar line cannot resolve).
+class CrossViewCorroborationModifier final : public CostModifier {
+   public:
+    CostSupport apply(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
+                      DotAssignmentContext const& context) const override;
+};
+
 /// @brief The modifiers a context asks for, in the order they apply: tracklet
 /// continuity (only when its multiplier is above 1 and there are previous
-/// tracklet ids), then candidate ownership, then the reacquisition gate (only
-/// when dot_reacquire_gap_frames is above 0).
+/// tracklet ids), then candidate ownership, then cross-view corroboration
+/// (only when dot_cross_view_corroboration_px and dot_corroboration_gate_
+/// multiplier are both set to have an effect and camera_fundamentals is not
+/// empty), then the reacquisition gate (only when dot_reacquire_gap_frames is
+/// above 0).
 ///
 /// @param context The frame's context.
 /// @return Owning pointers to the modifiers.
 std::vector<std::unique_ptr<CostModifier>>
 default_cost_modifiers(DotAssignmentContext const& context);
+
+/// @brief Fundamental matrices for every ordered pair of *cameras* (design doc
+/// §2.3) -- see CameraPairFundamental for the convention and key encoding.
+/// Called by resolve_shared_dot_assignment(); a unit test wanting
+/// DotAssignmentContext::camera_fundamentals can call it directly against its
+/// own fabricated Camera objects, since this is pure geometry with no
+/// Tracker/skeleton access.
+///
+/// @param cameras Every camera the participating subjects were built against.
+/// @return Fundamental matrix for each ordered pair (both directions).
+CameraPairFundamental build_camera_fundamentals(std::unordered_map<int, Camera> const& cameras);
 
 /// @brief Pure core of the shared dot-assignment phase (design doc §5.2/§7.1):
 /// one combined Hungarian solve per camera, columns = the union of every

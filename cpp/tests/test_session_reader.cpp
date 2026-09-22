@@ -211,7 +211,10 @@ static void create_fixture_db() {
             confidence_threshold_marker_names TEXT,
             confidence_threshold_override REAL,
             dot_reacquire_gap_frames INTEGER,
-            dot_reacquire_max_px REAL
+            dot_reacquire_max_px REAL,
+            dot_cross_view_corroboration_px REAL,
+            dot_corroboration_gate_multiplier REAL,
+            dot_camera_noise_scale TEXT
         );
     )");
 

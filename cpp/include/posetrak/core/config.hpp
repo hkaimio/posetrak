@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace posetrak {
@@ -101,8 +102,43 @@ struct TrackerConfig {
     /// finally admitted) and only improves on the no-gate baseline at 80 px
     /// (see ws2-assignment-robustness-plan.md §"Status of the work
     /// packages"). Tune against that case, or a similar one, before turning
-    /// dot_reacquire_gap_frames on for real use.
+    /// dot_reacquire_gap_frames on for real use. Also the evidence-gathering
+    /// radius for dot_cross_view_corroboration_px below -- the plan calls for
+    /// one shared pre-pass, not a second radius to tune.
     double dot_reacquire_max_px = 30.0;
+
+    /// @brief Epipolar tolerance, in pixels, for CrossViewCorroborationModifier
+    /// (dot_assignment.hpp): a candidate is corroborated when another camera's
+    /// near-prediction candidate for the same slot (within dot_reacquire_max_px)
+    /// falls within this distance of the candidate's own epipolar line in that
+    /// camera. Feeds both a cost discount (dot_corroboration_gate_multiplier)
+    /// and, once true, the reacquisition gate's "or" list (dot_reacquire_gap_
+    /// frames). 0.0 (default) disables corroboration entirely: every existing
+    /// config is unaffected until this is deliberately raised. A candidate
+    /// inside the assignment gate is already close to the true one, so this
+    /// only separates a confidently wrong candidate when the tolerance is
+    /// tighter than the wrong candidate's own offset and looser than the
+    /// camera pair's own calibration/sync accuracy -- see
+    /// CrossViewCorroborationModifier's own doc comment for the numbers that
+    /// motivated this default being left unset rather than guessed.
+    double dot_cross_view_corroboration_px = 0.0;
+
+    /// @brief Divides a corroborated pairing's squared-Mahalanobis cost by this
+    /// (CrossViewCorroborationModifier), same divide-the-cost convention as
+    /// dot_tracklet_gate_multiplier. 1.0 (default) is a no-op divide.
+    double dot_corroboration_gate_multiplier = 1.0;
+
+    /// @brief Per-camera factor on the measurement noise of a resolved dot
+    /// observation from that camera (applied to Observation::noise_std_override,
+    /// not the assignment cost -- a camera's own trust is a reason to weigh its
+    /// measurements differently once assigned, not usually a reason a candidate
+    /// should lose the assignment to begin with). Keyed by the tracker's own
+    /// integer camera_id (same convention as velocity_mode_camera_ids), not by
+    /// camera label. Empty (default) leaves every camera's noise as computed.
+    /// Values are not derived automatically -- see ws2-assignment-robustness-
+    /// plan.md §2.4 for how to derive them from a baseline run's per-camera
+    /// reprojection medians.
+    std::unordered_map<int, double> dot_camera_noise_scale;
 
     // === Streak-derived dot velocity ===
     // See docs/roadmap/features/marker-based-mocap/streak-velocity-design.md §3/§4.
@@ -334,10 +370,14 @@ struct TrackerAppConfig {
     double pose_noise_std = 0.0;   ///< Pose estimation error (pixels in model input image)
     double calib_noise_std = 2.0;  ///< Calibration error (pixels in original video)
     double outlier_threshold = 4.0;
-    double dot_assignment_gate_mahalanobis = 9.21;  ///< See TrackerConfig's own field doc comment.
-    double dot_tracklet_gate_multiplier = 1.0;      ///< See TrackerConfig's own field doc comment.
-    int dot_reacquire_gap_frames = 0;               ///< See TrackerConfig's own field doc comment.
-    double dot_reacquire_max_px = 30.0;             ///< See TrackerConfig's own field doc comment.
+    double dot_assignment_gate_mahalanobis = 9.21;   ///< See TrackerConfig's own field doc comment.
+    double dot_tracklet_gate_multiplier = 1.0;       ///< See TrackerConfig's own field doc comment.
+    int dot_reacquire_gap_frames = 0;                ///< See TrackerConfig's own field doc comment.
+    double dot_reacquire_max_px = 30.0;              ///< See TrackerConfig's own field doc comment.
+    double dot_cross_view_corroboration_px = 0.0;    ///< See TrackerConfig's own field doc comment.
+    double dot_corroboration_gate_multiplier = 1.0;  ///< See TrackerConfig's own field doc comment.
+    std::unordered_map<int, double>
+        dot_camera_noise_scale;  ///< See TrackerConfig's own field doc comment.
 
     // === Streak-derived dot velocity === (see TrackerConfig's own field doc comments)
     bool dot_streak_velocity_enabled = false;
@@ -490,6 +530,9 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.dot_tracklet_gate_multiplier = dot_tracklet_gate_multiplier;
     tc.dot_reacquire_gap_frames = dot_reacquire_gap_frames;
     tc.dot_reacquire_max_px = dot_reacquire_max_px;
+    tc.dot_cross_view_corroboration_px = dot_cross_view_corroboration_px;
+    tc.dot_corroboration_gate_multiplier = dot_corroboration_gate_multiplier;
+    tc.dot_camera_noise_scale = dot_camera_noise_scale;
     tc.dot_streak_velocity_enabled = dot_streak_velocity_enabled;
     tc.dot_streak_k_window = dot_streak_k_window;
     tc.dot_streak_k_min_samples = dot_streak_k_min_samples;

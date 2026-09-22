@@ -114,6 +114,18 @@ class Tracker {
             TrackerConfig const& config = TrackerConfig{});
 
     /**
+     * @brief The calibrated cameras this Tracker was constructed against.
+     *
+     * Exposed (read-only) for resolve_shared_dot_assignment() (dot_assignment.cpp),
+     * which needs the participating subjects' cameras to build cross-view
+     * corroboration's fundamental matrices -- it reads the first subject's own
+     * Tracker rather than taking a separate parameter, the same precedent as its
+     * streak_k_accumulators() use (every dot-bearing subject in one shared
+     * resolution is assumed built against the same camera set).
+     */
+    std::unordered_map<int, Camera> const& cameras() const { return cameras_; }
+
+    /**
      * @brief Initialize tracker from first frame observations
      *
      * Steps:

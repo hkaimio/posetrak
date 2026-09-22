@@ -31,6 +31,47 @@ bool tracklet_continues(DotSlotRef const& slot, UnlabeledCandidate const& candid
     auto const marker_it = camera_it->second.find(slot.marker_id);
     return marker_it != camera_it->second.end() && marker_it->second == candidate.tracklet_id;
 }
+
+// Distance from point b to point a's epipolar line under fundamental matrix F
+// (F such that F * [a;1] is a's epipolar line in b's camera). Large when F
+// (or a, or b) is degenerate (a zero line direction) -- callers only use this
+// where F comes from real, distinct cameras, so that is not guarded against.
+double epipolar_distance(Eigen::Matrix3d const& F, Eigen::Vector2d const& a,
+                         Eigen::Vector2d const& b) {
+    Eigen::Vector3d const line = F * Eigen::Vector3d(a.x(), a.y(), 1.0);
+    Eigen::Vector3d const point(b.x(), b.y(), 1.0);
+    return std::abs(line.dot(point)) / std::hypot(line.x(), line.y());
+}
+
+// Shared by ReacquisitionGateModifier (independent evidence for a gapped slot)
+// and CrossViewCorroborationModifier (the cost discount itself): is *candidate*,
+// seen in *slot.camera_id*, corroborated by some other camera's near-prediction
+// candidate for the same slot (DotAssignmentContext::slot_evidence)?
+bool corroborated(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
+                  DotAssignmentContext const& context) {
+    if (context.dot_cross_view_corroboration_px <= 0.0 || context.camera_fundamentals.empty())
+        return false;
+    auto const evidence_subject = context.slot_evidence.find(slot.subject_id);
+    if (evidence_subject == context.slot_evidence.end())
+        return false;
+    auto const evidence_marker = evidence_subject->second.find(slot.marker_id);
+    if (evidence_marker == evidence_subject->second.end())
+        return false;
+    for (auto const& [other_camera_id, positions] : evidence_marker->second) {
+        if (other_camera_id == slot.camera_id)
+            continue;  // corroboration needs an *other* camera's own candidate
+        auto const f_it = context.camera_fundamentals.find(
+            (std::int64_t{slot.camera_id} << 32) | static_cast<std::uint32_t>(other_camera_id));
+        if (f_it == context.camera_fundamentals.end())
+            continue;  // no calibrated pair for these two cameras
+        for (auto const& other_pos : positions) {
+            if (epipolar_distance(f_it->second, candidate.position, other_pos) <=
+                context.dot_cross_view_corroboration_px)
+                return true;
+        }
+    }
+    return false;
+}
 }  // namespace
 
 CostSupport TrackletContinuityModifier::apply(DotSlotRef const& slot,
@@ -67,8 +108,10 @@ CostSupport ReacquisitionGateModifier::apply(DotSlotRef const& slot,
 
     if (tracklet_continues(slot, candidate, context.prev_tracklet_ids))
         return {};
-    auto const evidence_subject = context.near_prediction_cameras.find(slot.subject_id);
-    if (evidence_subject != context.near_prediction_cameras.end()) {
+    if (corroborated(slot, candidate, context))
+        return {};
+    auto const evidence_subject = context.slot_evidence.find(slot.subject_id);
+    if (evidence_subject != context.slot_evidence.end()) {
         auto const evidence_marker = evidence_subject->second.find(slot.marker_id);
         if (evidence_marker != evidence_subject->second.end() &&
             evidence_marker->second.size() >= 2)
@@ -77,53 +120,100 @@ CostSupport ReacquisitionGateModifier::apply(DotSlotRef const& slot,
     return {1.0, true};
 }
 
+CostSupport CrossViewCorroborationModifier::apply(DotSlotRef const& slot,
+                                                  UnlabeledCandidate const& candidate,
+                                                  DotAssignmentContext const& context) const {
+    if (!corroborated(slot, candidate, context))
+        return {};
+    return {context.dot_corroboration_gate_multiplier, false};
+}
+
 std::vector<std::unique_ptr<CostModifier>>
 default_cost_modifiers(DotAssignmentContext const& context) {
     std::vector<std::unique_ptr<CostModifier>> modifiers;
     if (context.dot_tracklet_gate_multiplier > 1.0 && !context.prev_tracklet_ids.empty())
         modifiers.push_back(std::make_unique<TrackletContinuityModifier>());
     modifiers.push_back(std::make_unique<CandidateOwnershipModifier>());
+    if (context.dot_cross_view_corroboration_px > 0.0 &&
+        context.dot_corroboration_gate_multiplier > 1.0 && !context.camera_fundamentals.empty())
+        modifiers.push_back(std::make_unique<CrossViewCorroborationModifier>());
     if (context.dot_reacquire_gap_frames > 0)
         modifiers.push_back(std::make_unique<ReacquisitionGateModifier>());
     return modifiers;
 }
 
 namespace {
-// Cross-camera half of ReacquisitionGateModifier's evidence (design doc §2.3's
-// "two cameras near the prediction" test): for every (subject, marker) slot,
-// which cameras hold a candidate within *max_px* of that camera's own
+// Shared evidence pre-pass for ReacquisitionGateModifier and
+// CrossViewCorroborationModifier (design plan §2.2/§2.3: "build it once per
+// step in a pre-pass", not once per mechanism): for every (subject, marker)
+// slot, the candidate positions found within *max_px* of each camera's own
 // prediction for the slot. A plain pixel radius, not the assignment gate's
 // Mahalanobis metric -- this is corroboration evidence, not a substitute for
-// the gate. Only built when the reacquisition gate is on (dot_reacquire_gap_
-// frames > 0), since it costs an extra pass over every (camera, slot,
-// candidate) triple that the rest of resolve_dot_assignment() does not
-// otherwise need.
-NearPredictionCameras build_near_prediction_cameras(
+// the gate. Only built when at least one of the two mechanisms is on, since
+// it costs an extra pass over every (camera, slot, candidate) triple that the
+// rest of resolve_dot_assignment() does not otherwise need.
+SlotEvidence build_slot_evidence(
     std::vector<SubjectDotPredictions> const& subjects,
     std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
     double max_px) {
-    NearPredictionCameras near;
+    SlotEvidence evidence;
     for (auto const& [camera_id, candidates] : candidates_by_camera) {
         for (auto const& subject : subjects) {
             auto const cam_it = subject.predictions_by_camera.find(camera_id);
             if (cam_it == subject.predictions_by_camera.end())
                 continue;
             for (auto const& [marker_id, prediction] : cam_it->second) {
-                bool found = false;
+                std::vector<Eigen::Vector2d> near;
                 for (auto const& candidate : candidates) {
-                    if ((candidate.position - prediction.position).norm() <= max_px) {
-                        found = true;
-                        break;
-                    }
+                    if ((candidate.position - prediction.position).norm() <= max_px)
+                        near.push_back(candidate.position);
                 }
-                if (found)
-                    near[subject.subject_id][marker_id].push_back(camera_id);
+                if (!near.empty())
+                    evidence[subject.subject_id][marker_id][camera_id] = std::move(near);
             }
         }
     }
-    return near;
+    return evidence;
 }
 }  // namespace
+
+CameraPairFundamental build_camera_fundamentals(std::unordered_map<int, Camera> const& cameras) {
+    CameraPairFundamental result;
+    for (auto const& [id_a, cam_a] : cameras) {
+        Eigen::Matrix3d const Ra = cam_a.orientation().toRotationMatrix();
+        Eigen::Vector3d const ta = -Ra * cam_a.position();
+        Eigen::Matrix3d Ka = Eigen::Matrix3d::Identity();
+        Ka(0, 0) = cam_a.intrinsics().fx;
+        Ka(1, 1) = cam_a.intrinsics().fy;
+        Ka(0, 2) = cam_a.intrinsics().cx;
+        Ka(1, 2) = cam_a.intrinsics().cy;
+        for (auto const& [id_b, cam_b] : cameras) {
+            if (id_a == id_b)
+                continue;
+            Eigen::Matrix3d const Rb = cam_b.orientation().toRotationMatrix();
+            Eigen::Vector3d const tb = -Rb * cam_b.position();
+            Eigen::Matrix3d Kb = Eigen::Matrix3d::Identity();
+            Kb(0, 0) = cam_b.intrinsics().fx;
+            Kb(1, 1) = cam_b.intrinsics().fy;
+            Kb(0, 2) = cam_b.intrinsics().cx;
+            Kb(1, 2) = cam_b.intrinsics().cy;
+
+            // Relative pose of B with respect to A, then the essential and
+            // fundamental matrices such that F * [x_a; 1] is x_a's epipolar
+            // line in B's undistorted pixels (Hartley & Zisserman §9.6.1).
+            Eigen::Matrix3d const R_rel = Rb * Ra.transpose();
+            Eigen::Vector3d const t_rel = tb - R_rel * ta;
+            Eigen::Matrix3d t_cross;
+            t_cross << 0.0, -t_rel.z(), t_rel.y(), t_rel.z(), 0.0, -t_rel.x(), -t_rel.y(),
+                t_rel.x(), 0.0;
+            Eigen::Matrix3d const E = t_cross * R_rel;
+            Eigen::Matrix3d const F = Kb.inverse().transpose() * E * Ka.inverse();
+
+            result[(std::int64_t{id_a} << 32) | static_cast<std::uint32_t>(id_b)] = F;
+        }
+    }
+    return result;
+}
 
 std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
     std::vector<SubjectDotPredictions> const& subjects,
@@ -146,14 +236,14 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
 
     auto const modifiers = default_cost_modifiers(context);
 
-    // The reacquisition gate's cross-camera evidence needs every camera's
-    // candidates already gathered, so it is computed once here rather than by
-    // the caller, and folded into a local copy of the context the modifiers
-    // below read instead of *context* itself.
+    // The reacquisition gate's and cross-view corroboration's shared evidence
+    // needs every camera's candidates already gathered, so it is computed once
+    // here rather than by the caller, and folded into a local copy of the
+    // context the modifiers below read instead of *context* itself.
     DotAssignmentContext effective_context = context;
-    if (context.dot_reacquire_gap_frames > 0) {
-        effective_context.near_prediction_cameras = build_near_prediction_cameras(
-            subjects, candidates_by_camera, context.dot_reacquire_max_px);
+    if (context.dot_reacquire_gap_frames > 0 || context.dot_cross_view_corroboration_px > 0.0) {
+        effective_context.slot_evidence =
+            build_slot_evidence(subjects, candidates_by_camera, context.dot_reacquire_max_px);
     }
 
     // One column per (subject, marker) slot with a prediction for this camera.
@@ -207,6 +297,13 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
             }
         }
 
+        // Per-camera trust (TrackerConfig::dot_camera_noise_scale): looked up once per
+        // camera, since it does not vary per candidate or slot.
+        double const camera_noise_scale = [&] {
+            auto const it = context.dot_camera_noise_scale.find(camera_id);
+            return it != context.dot_camera_noise_scale.end() ? it->second : 1.0;
+        }();
+
         auto pairs = solve_assignment(cost, n_rows, n_cols, gate_mahalanobis);
         for (auto const& pair : pairs) {
             Column const& col = columns[static_cast<size_t>(pair.col)];
@@ -245,6 +342,16 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
             double const elongation = cand.major_axis - cand.minor_axis;
             if (elongation > 1.0) {
                 obs.noise_std_override = calib_noise_std + elongation / std::sqrt(12.0);
+            }
+            // Per-camera trust: scales whatever noise this observation would otherwise
+            // get (the streak-inflated value above, or the base calibration noise), not
+            // a cost -- a distrusted camera should still win its candidates on
+            // geometry, only be weighed less once assigned. 1.0 (default, no entry for
+            // this camera) leaves noise_std_override exactly as set above.
+            if (camera_noise_scale != 1.0) {
+                double const base =
+                    obs.noise_std_override > 0.0 ? obs.noise_std_override : calib_noise_std;
+                obs.noise_std_override = base * camera_noise_scale;
             }
 
             result[col.subject_id].resolved.push_back(obs);
@@ -298,6 +405,9 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
                                     vel_obs.prev_position = cand.position - frame_equiv_disp;
                                     vel_obs.crop_scale = 0.0;
                                     vel_obs.noise_std_override = streak_config.velocity_noise_std;
+                                    if (camera_noise_scale != 1.0) {
+                                        vel_obs.noise_std_override *= camera_noise_scale;
+                                    }
 
                                     result[col.subject_id].resolved.push_back(vel_obs);
                                 }
@@ -355,6 +465,9 @@ std::string find_dot_config_disagreement(std::vector<TrackerConfig const*> const
         POSETRAK_CHECK_DOT_FIELD(dot_streak_velocity_noise_std)
         POSETRAK_CHECK_DOT_FIELD(dot_reacquire_gap_frames)
         POSETRAK_CHECK_DOT_FIELD(dot_reacquire_max_px)
+        POSETRAK_CHECK_DOT_FIELD(dot_cross_view_corroboration_px)
+        POSETRAK_CHECK_DOT_FIELD(dot_corroboration_gate_multiplier)
+        POSETRAK_CHECK_DOT_FIELD(dot_camera_noise_scale)
 #undef POSETRAK_CHECK_DOT_FIELD
     }
     return {};
@@ -421,6 +534,18 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     context.dot_reacquire_gap_frames = config.dot_reacquire_gap_frames;
     context.dot_reacquire_max_px = config.dot_reacquire_max_px;
     context.prev_resolved_frame = std::move(prev_resolved_frame);
+    context.dot_cross_view_corroboration_px = config.dot_cross_view_corroboration_px;
+    context.dot_corroboration_gate_multiplier = config.dot_corroboration_gate_multiplier;
+    context.dot_camera_noise_scale = config.dot_camera_noise_scale;
+    // Fundamental matrices are pure geometry from the calibrated cameras, so any
+    // subject's own Tracker gives the same answer -- same "first subject" precedent
+    // as streak_k_state above (every dot-bearing subject here is assumed built
+    // against the same camera set). Skipped entirely when corroboration is off, to
+    // avoid the O(cameras^2) matrix work on every step for a run that never uses it.
+    if (config.dot_cross_view_corroboration_px > 0.0 && !subjects.empty()) {
+        context.camera_fundamentals =
+            build_camera_fundamentals(subjects.front().tracker->cameras());
+    }
     return resolve_dot_assignment(predictions, candidates_by_camera, context);
 }
 

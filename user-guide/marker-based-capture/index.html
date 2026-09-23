@@ -1,0 +1,2482 @@
+<!--
+SPDX-FileCopyrightText: 2026 Harri Kaimio
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Video-based multi-camera skeletal motion capture">
+      
+      
+      
+        <link rel="canonical" href="https://hkaimio.github.io/posetrak/user-guide/marker-based-capture/">
+      
+      
+        <link rel="prev" href="../tracking-troubleshooting/">
+      
+      
+        <link rel="next" href="../retargeting-blender/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Marker-based capture (command line) - Posetrak</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/video-embed.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  
+  
+  
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Marker-based capture (command line) - Posetrak">
+  <meta property="og:description" content="Video-based multi-camera skeletal motion capture">
+  <meta property="og:image" content="https://hkaimio.github.io/posetrak/assets/some-banner.png">
+  <meta property="og:url" content="https://hkaimio.github.io/posetrak/user-guide/marker-based-capture/">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Marker-based capture (command line) - Posetrak">
+  <meta name="twitter:description" content="Video-based multi-camera skeletal motion capture">
+  <meta name="twitter:image" content="https://hkaimio.github.io/posetrak/assets/some-banner.png">
+
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#marker-based-capture-from-the-command-line" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="Posetrak" class="md-header__button md-logo" aria-label="Posetrak" data-md-component="logo">
+      
+  <img src="../../assets/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Posetrak
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Marker-based capture (command line)
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/hkaimio/posetrak" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    hkaimio/posetrak
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="Posetrak" class="md-nav__button md-logo" aria-label="Posetrak" data-md-component="logo">
+      
+  <img src="../../assets/logo.png" alt="logo">
+
+    </a>
+    Posetrak
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/hkaimio/posetrak" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    hkaimio/posetrak
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Background
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tutorial1/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tutorial: tracking a capture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../first-capture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Your first capture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../camera-intrinsics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Camera intrinsics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../extrinsics-calibration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Extrinsics calibration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../synchronizing-videos/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Synchronizing videos
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../segmentation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Segmenting multi-person scenes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../analyzing-poses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Analyzing poses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tracking-troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracking & troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Marker-based capture (command line)
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Marker-based capture (command line)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-you-need-first" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What you need first
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#which-workflow-do-you-need" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which workflow do you need?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-pieces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The pieces
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-a-rigid-prop-with-aruco-markers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A. A rigid prop with ArUco markers
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="A. A rigid prop with ArUco markers">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a1-describe-the-prop" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A1. Describe the prop
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a2-register-the-prop" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A2. Register the prop
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a3-create-the-trial" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A3. Create the trial
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a4-detect-the-markers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A4. Detect the markers
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a5-make-the-observation-sequence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A5. Make the observation sequence
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a6-track" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A6. Track
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a7-look-at-the-result" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A7. Look at the result
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#several-props-one-detection-pass" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Several props, one detection pass
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#b-a-prop-with-only-a-reflective-dot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        B. A prop with only a reflective dot
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="B. A prop with only a reflective dot">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#b1-register-the-ball" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        B1. Register the ball
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#b2-get-the-dot-observations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        B2. Get the dot observations
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#b3-combine-sources" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        B3. Combine sources
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#b4-track-with-a-starting-position" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        B4. Track with a starting position
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#c-a-person-wearing-reflective-dots" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C. A person wearing reflective dots
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#d-tracking-several-subjects-together" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        D. Tracking several subjects together
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#solving-a-marker-body-from-video" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Solving a marker body from video
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Solving a marker body from video">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#from-several-fixed-cameras-marker-body-calibrate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From several fixed cameras: marker-body calibrate
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#from-one-moving-camera-marker-body-calibrate-video" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From one moving camera: marker-body calibrate-video
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#detecting-dots" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Detecting dots
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-something-goes-wrong" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When something goes wrong
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Limits
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#quick-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quick reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../retargeting-blender/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Retargeting to Blender
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/cpp-tracker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    C++ tracker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/python-apps/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python apps
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/data-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/algorithms/ukf/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    UKF algorithm
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../skeleton-format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Skeleton format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../state-vector-format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    State vector format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../sync-metadata-format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sync metadata format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://github.com/hkaimio/posetrak/blob/main/CONTRIBUTING.md" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-you-need-first" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What you need first
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#which-workflow-do-you-need" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which workflow do you need?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-pieces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The pieces
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-a-rigid-prop-with-aruco-markers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A. A rigid prop with ArUco markers
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="A. A rigid prop with ArUco markers">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a1-describe-the-prop" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A1. Describe the prop
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a2-register-the-prop" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A2. Register the prop
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a3-create-the-trial" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A3. Create the trial
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a4-detect-the-markers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A4. Detect the markers
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a5-make-the-observation-sequence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A5. Make the observation sequence
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a6-track" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A6. Track
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a7-look-at-the-result" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A7. Look at the result
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#several-props-one-detection-pass" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Several props, one detection pass
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#b-a-prop-with-only-a-reflective-dot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        B. A prop with only a reflective dot
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="B. A prop with only a reflective dot">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#b1-register-the-ball" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        B1. Register the ball
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#b2-get-the-dot-observations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        B2. Get the dot observations
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#b3-combine-sources" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        B3. Combine sources
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#b4-track-with-a-starting-position" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        B4. Track with a starting position
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#c-a-person-wearing-reflective-dots" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C. A person wearing reflective dots
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#d-tracking-several-subjects-together" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        D. Tracking several subjects together
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#solving-a-marker-body-from-video" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Solving a marker body from video
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Solving a marker body from video">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#from-several-fixed-cameras-marker-body-calibrate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From several fixed cameras: marker-body calibrate
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#from-one-moving-camera-marker-body-calibrate-video" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From one moving camera: marker-body calibrate-video
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#detecting-dots" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Detecting dots
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-something-goes-wrong" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When something goes wrong
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Limits
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#quick-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quick reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/hkaimio/posetrak/edit/main/docs/user-guide/marker-based-capture.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="marker-based-capture-from-the-command-line">Marker-based capture from the command line<a class="headerlink" href="#marker-based-capture-from-the-command-line" title="Permanent link">&para;</a></h1>
+<p>Posetrak can track more than a person's body. With <strong>markers</strong> it also tracks rigid
+props such as a sword, a pen or a ball, and it can follow markers worn on a person.
+This page walks through the command-line workflow for each case that is supported today.</p>
+<p>Two kinds of marker are used:</p>
+<ul>
+<li><strong>ArUco markers</strong> are printed square tags. Each has a number, so a detection says
+  which marker it is, and its four corners give the marker's full position and
+  orientation.</li>
+<li><strong>Reflective dots</strong> are small retroreflective spots, usually lit by a ring light on
+  the camera. A detected dot has no identity: the tracker works out which dot is which
+  from where each should be.</li>
+</ul>
+<div class="admonition note">
+<p class="admonition-title">Command syntax</p>
+<p>Every command is <code>posetrak [--session PATH] &lt;group&gt; &lt;command&gt; ...</code>. Give the
+session database once with <code>-s</code>/<code>--session</code>, or set <code>POSETRAK_SESSION_DB</code>. Long
+commands below are split with <code>\</code>; in PowerShell write a backtick instead, or put
+the command on one line. IDs are printed in full and may be shortened to any unique
+prefix. Options that repeat (<code>--dots-camera</code>, <code>--camera</code>, <code>--object</code>) are given once
+per value.</p>
+</div>
+<h2 id="what-you-need-first">What you need first<a class="headerlink" href="#what-you-need-first" title="Permanent link">&para;</a></h2>
+<p>The session must already hold a <strong>capture</strong> with its videos, the cameras' <strong>intrinsics</strong>
+and <strong>extrinsics</strong>, and a <strong>sync</strong> configuration. Those steps are the same as for any
+capture and are described in <a href="../first-capture/">Your first capture</a>,
+<a href="../camera-intrinsics/">Camera intrinsics</a>,
+<a href="../extrinsics-calibration/">Extrinsics calibration</a> and
+<a href="../synchronizing-videos/">Synchronizing videos</a>. Marker tracking uses the same cameras
+and calibration as body tracking.</p>
+<p>You also need the tracker program <code>posetrak-tracker</code> (see <a href="../../setup/">Setup</a>). Pass
+<code>--binary PATH</code> to the tracking commands if it is not where Posetrak looks for it.</p>
+<h2 id="which-workflow-do-you-need">Which workflow do you need?<a class="headerlink" href="#which-workflow-do-you-need" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>You want to track</th>
+<th>Follow</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A rigid prop with one or more ArUco markers, with or without reflective dots</td>
+<td><a href="#a-a-rigid-prop-with-aruco-markers">A</a></td>
+<td>Complete on the command line</td>
+</tr>
+<tr>
+<td>A prop that has one reflective dot and no ArUco marker (a ball)</td>
+<td><a href="#b-a-prop-with-only-a-reflective-dot">B</a></td>
+<td>Complete, needs a starting position</td>
+</tr>
+<tr>
+<td>A prop with several reflective dots and no ArUco marker</td>
+<td>not supported</td>
+<td><a href="#limits">Add one ArUco marker</a></td>
+</tr>
+<tr>
+<td>Points you tracked by hand in another program (Blender)</td>
+<td><a href="#b-a-prop-with-only-a-reflective-dot">B</a></td>
+<td>Complete</td>
+</tr>
+<tr>
+<td>A person wearing reflective dots</td>
+<td><a href="#c-a-person-wearing-reflective-dots">C</a></td>
+<td>Tracking is on the command line; preparing the dot set is still done with scripts</td>
+</tr>
+<tr>
+<td>A person and a prop together</td>
+<td><a href="#d-tracking-several-subjects-together">D</a></td>
+<td>Complete</td>
+</tr>
+</tbody>
+</table>
+<h2 id="the-pieces">The pieces<a class="headerlink" href="#the-pieces" title="Permanent link">&para;</a></h2>
+<ul>
+<li>A <strong>marker body</strong> is the geometry of a prop: where its ArUco markers and dots are, in
+  one marker's own coordinate frame. You write it by hand, or solve it from video
+  (<a href="#solving-a-marker-body-from-video">Solving a marker body from video</a>).</li>
+<li>A <strong>capture object</strong> is one physical prop in one capture. It names a marker body.
+  A name is unique within a capture.</li>
+<li>A <strong>detection run</strong> is one pass of a detector over the videos: coded markers
+  (<code>aruco</code>), reflective dots (<code>dots</code>) or imported tracks (<code>external_2d</code>).</li>
+<li>An <strong>observation sequence</strong> is what the tracker reads for one subject. Making one from
+  a detection run is called <em>finalising</em> it.</li>
+<li>A <strong>tracking skeleton</strong> is what the tracker moves. A prop's skeleton is one free-floating
+  body carrying its markers; it is generated from the marker body.</li>
+<li>A <strong>tracking run</strong> is one execution of the tracker.</li>
+</ul>
+<h2 id="a-a-rigid-prop-with-aruco-markers">A. A rigid prop with ArUco markers<a class="headerlink" href="#a-a-rigid-prop-with-aruco-markers" title="Permanent link">&para;</a></h2>
+<p>Print the markers, glue them on the prop, and measure or solve where they sit. The
+markers must be large enough to be recognised in the cameras that should see them. A prop
+whose markers face different directions is tracked through all of them, so put markers on
+every side that the cameras will see.</p>
+<h3 id="a1-describe-the-prop">A1. Describe the prop<a class="headerlink" href="#a1-describe-the-prop" title="Permanent link">&para;</a></h3>
+<p>You need the marker body of the prop as a YAML file. There are three ways.</p>
+<p><strong>Write it by hand.</strong> Choose one marker's frame as the prop's frame and give every marker
+a <code>center</code>, the direction its face points (<code>normal</code>), a direction along its top edge
+(<code>up</code>) and its <code>size</code> (side length of the printed square, metres). Reflective dots need
+only a <code>center</code>.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">bokken</span>
+<span class="nt">units</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">meters</span>
+<span class="nt">markers</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">hilt</span>
+<span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">aruco</span>
+<span class="w">    </span><span class="nt">dictionary</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">DICT_4X4_50</span>
+<span class="w">    </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="s">"3"</span>
+<span class="w">    </span><span class="nt">size</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.05</span>
+<span class="w">    </span><span class="nt">center</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">0.0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">0.0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">0.0</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">normal</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">0.0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">0.0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">1.0</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">up</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">0.0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">1.0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">0.0</span><span class="p p-Indicator">]</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">tip</span>
+<span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">aruco</span>
+<span class="w">    </span><span class="nt">dictionary</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">DICT_4X4_50</span>
+<span class="w">    </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="s">"7"</span>
+<span class="w">    </span><span class="nt">size</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.03</span>
+<span class="w">    </span><span class="nt">center</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">0.0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">0.9</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">0.0</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">normal</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">0.0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">0.0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">1.0</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">up</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">0.0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">1.0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">0.0</span><span class="p p-Indicator">]</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">dot1</span>
+<span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">reflective_dot</span>
+<span class="w">    </span><span class="nt">center</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">0.05</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">0.4</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">0.01</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+<p><strong>Solve it from several fixed cameras</strong> when the prop is in your normal capture:</p>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>marker-body<span class="w"> </span>calibrate<span class="w"> </span>--capture<span class="w"> </span>&lt;capture&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--time-start<span class="w"> </span><span class="m">34</span>.4<span class="w"> </span>--time-end<span class="w"> </span><span class="m">100</span>.6<span class="w"> </span>--marker-size<span class="w"> </span><span class="m">0</span>.05<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--marker-ids<span class="w"> </span><span class="m">3</span>,7<span class="w"> </span>--reference-id<span class="w"> </span><span class="m">3</span><span class="w"> </span>--detect-dots<span class="w"> </span>--output<span class="w"> </span>bokken.yaml
+</code></pre></div>
+<p><strong>Solve it from one moving camera</strong> when you can film the prop separately. This is often
+easier and more accurate than the multi-camera method. See
+<a href="#solving-a-marker-body-from-video">Solving a marker body from video</a> for both, and for
+how to film.</p>
+<h3 id="a2-register-the-prop">A2. Register the prop<a class="headerlink" href="#a2-register-the-prop" title="Permanent link">&para;</a></h3>
+<p>Import the body, tell the capture about the prop, and generate the prop's tracking
+skeleton:</p>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>marker-body<span class="w"> </span>import<span class="w"> </span>--file<span class="w"> </span>bokken.yaml<span class="w"> </span>--name<span class="w"> </span>bokken
+<span class="c1"># marker_body_id: &lt;body&gt;</span>
+
+posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>capture<span class="w"> </span>object<span class="w"> </span>add<span class="w"> </span>--capture<span class="w"> </span>&lt;capture&gt;<span class="w"> </span>--name<span class="w"> </span>bokken<span class="w"> </span>--marker-body<span class="w"> </span>&lt;body&gt;
+<span class="c1"># capture_object_id: &lt;object&gt;</span>
+
+posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>marker-body<span class="w"> </span>to-skeleton<span class="w"> </span>&lt;body&gt;<span class="w"> </span>--name<span class="w"> </span>bokken
+<span class="c1"># skeleton_id: &lt;skeleton&gt;</span>
+</code></pre></div>
+<p><code>marker-body import</code> and <code>capture object add</code> accept ID prefixes. <code>capture object list
+--capture &lt;capture&gt;</code> shows the objects. The skeleton generation is safe to repeat: the
+same body and name give the same skeleton back.</p>
+<p><code>--marker-body</code> on <code>capture object add</code> also finds a body that is in the registry but not
+yet in the session, and copies it in.</p>
+<h3 id="a3-create-the-trial">A3. Create the trial<a class="headerlink" href="#a3-create-the-trial" title="Permanent link">&para;</a></h3>
+<p>Tracking works on a <strong>trial</strong>: a named time range of a capture. Create it before you detect,
+because a prop's observation sequence belongs to a trial through its detection run, and
+<code>track run-persons</code> only finds sequences on the trial it is given.</p>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>trial<span class="w"> </span>create<span class="w"> </span>--capture<span class="w"> </span>&lt;capture&gt;<span class="w"> </span>--name<span class="w"> </span><span class="s2">"Swing 1"</span><span class="w"> </span>--start<span class="w"> </span><span class="m">34</span><span class="w"> </span>--end<span class="w"> </span><span class="m">100</span>
+<span class="c1"># trial_id: &lt;trial&gt;</span>
+</code></pre></div>
+<h3 id="a4-detect-the-markers">A4. Detect the markers<a class="headerlink" href="#a4-detect-the-markers" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>detect<span class="w"> </span>run<span class="w"> </span>--type<span class="w"> </span>aruco<span class="w"> </span>--object<span class="w"> </span>bokken<span class="w"> </span>--trial<span class="w"> </span>&lt;trial&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--capture<span class="w"> </span>&lt;capture&gt;<span class="w"> </span>--sync<span class="w"> </span>&lt;sync&gt;<span class="w"> </span>--start<span class="w"> </span><span class="m">34</span><span class="w"> </span>--end<span class="w"> </span><span class="m">100</span>
+<span class="c1"># prints the detection run id</span>
+</code></pre></div>
+<p>The run reads every camera's video between the two times. The ArUco dictionary and the
+marker ids come from the object's marker body. Progress goes to the terminal; the run id
+is printed to stdout when it ends.</p>
+<p>To also detect the prop's reflective dots in the same pass, name the cameras that should
+look for them:</p>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>detect<span class="w"> </span>run<span class="w"> </span>--type<span class="w"> </span>aruco<span class="w"> </span>--object<span class="w"> </span>bokken<span class="w"> </span>--trial<span class="w"> </span>&lt;trial&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--capture<span class="w"> </span>&lt;capture&gt;<span class="w"> </span>--sync<span class="w"> </span>&lt;sync&gt;<span class="w"> </span>--start<span class="w"> </span><span class="m">34</span><span class="w"> </span>--end<span class="w"> </span><span class="m">100</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--dots-camera<span class="w"> </span>gopro13_01<span class="w"> </span>--dots-camera<span class="w"> </span>gopro13_02
+</code></pre></div>
+<p>Name only cameras that really see the dots: those with a ring light next to the lens, or
+that look at strongly reflective markers. Other settings are described in
+<a href="#detecting-dots">Detecting dots</a>. Add <code>--parallel</code> to process the cameras in parallel.</p>
+<p>A detection run is never changed afterwards. To try different settings, run detection
+again.</p>
+<h3 id="a5-make-the-observation-sequence">A5. Make the observation sequence<a class="headerlink" href="#a5-make-the-observation-sequence" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>sequence<span class="w"> </span>finalise-object<span class="w"> </span>--detection-run<span class="w"> </span>&lt;run&gt;
+<span class="c1"># sequence_id: &lt;sequence&gt;</span>
+</code></pre></div>
+<p>This copies the coded-marker corners and any dot candidates of the run into one sequence
+for the object. Finalising the same run again replaces its sequence, unless that sequence
+has already been tracked or edited.</p>
+<h3 id="a6-track">A6. Track<a class="headerlink" href="#a6-track" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>track<span class="w"> </span>run-persons<span class="w"> </span>--trial<span class="w"> </span>&lt;trial&gt;<span class="w"> </span>--object<span class="w"> </span><span class="nv">bokken</span><span class="o">=</span>&lt;skeleton&gt;
+<span class="c1"># prints the tracking run</span>
+</code></pre></div>
+<p>The tracker looks near the start of the range (within about two seconds) for a frame in
+which enough markers are seen by enough cameras to fix the prop's pose, starts there,
+follows the prop, and smooths the result afterwards (<code>--no-smooth</code> turns that off). Results
+are stored in the session and also written as CSV files, one folder per subject, under
+<code>&lt;session folder&gt;/posetrak_results/&lt;capture&gt;/&lt;trial&gt;/tracking</code>. When it ends it reports how
+many steps were tracked and how many were lost.</p>
+<p>By default the tracked range is the range of the sequence. <code>--start-time</code> and <code>--end-time</code>
+narrow it. <code>--config</code> selects a tracker configuration other than the trial's default.</p>
+<p>You can also give a sequence directly, which is all that is needed for one subject:</p>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>track<span class="w"> </span>run<span class="w"> </span>--sequence<span class="w"> </span>&lt;sequence&gt;<span class="w"> </span>--skeleton<span class="w"> </span>&lt;skeleton&gt;
+</code></pre></div>
+<h3 id="a7-look-at-the-result">A7. Look at the result<a class="headerlink" href="#a7-look-at-the-result" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>track<span class="w"> </span>list
+posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>track<span class="w"> </span>show<span class="w"> </span>&lt;run&gt;
+posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>track<span class="w"> </span><span class="nb">export</span><span class="w"> </span>gltf<span class="w"> </span>&lt;run&gt;<span class="w"> </span>prop.glb<span class="w"> </span>--smoothed
+</code></pre></div>
+<p><code>track export</code> also writes <code>bvh</code> and <code>usd</code>. For a run with several subjects, <code>--person-id N</code>
+selects the subject by its position in the run.</p>
+<h3 id="several-props-one-detection-pass">Several props, one detection pass<a class="headerlink" href="#several-props-one-detection-pass" title="Permanent link">&para;</a></h3>
+<p>Reading the videos is the slow part, so detect all props together and finalise each one
+from the shared run. Detect once for every marker id, bound to no object:</p>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>detect<span class="w"> </span>run<span class="w"> </span>--type<span class="w"> </span>aruco<span class="w"> </span>--marker-ids<span class="w"> </span><span class="m">2</span>,3,16,17<span class="w"> </span>--trial<span class="w"> </span>&lt;trial&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--capture<span class="w"> </span>&lt;capture&gt;<span class="w"> </span>--sync<span class="w"> </span>&lt;sync&gt;<span class="w"> </span>--start<span class="w"> </span><span class="m">34</span><span class="w"> </span>--end<span class="w"> </span><span class="m">100</span>
+<span class="c1"># prints the shared run</span>
+</code></pre></div>
+<p>Then make each prop's sequence from it:</p>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>sequence<span class="w"> </span>finalise-object<span class="w"> </span>--detection-run<span class="w"> </span>&lt;shared&gt;<span class="w"> </span>--object<span class="w"> </span>pen
+posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>sequence<span class="w"> </span>finalise-object<span class="w"> </span>--detection-run<span class="w"> </span>&lt;shared&gt;<span class="w"> </span>--object<span class="w"> </span>pad
+</code></pre></div>
+<p>Each prop gets a detection run of its own, derived from the shared one (and so on the same
+trial), holding only its markers in the order its marker body gives. The shared run is not changed. Add
+<code>--with-dots</code> if the prop's body has reflective dots and the shared run detected them.
+If a marker id is meant for one prop only, the other props' bodies must not list it:
+markers that are not in a prop's body never reach its sequence.</p>
+<h2 id="b-a-prop-with-only-a-reflective-dot">B. A prop with only a reflective dot<a class="headerlink" href="#b-a-prop-with-only-a-reflective-dot" title="Permanent link">&para;</a></h2>
+<p>A ball with one reflective dot has no marker that says where it is and which way it faces,
+so the tracker cannot find it by itself: <strong>you give the starting position</strong>. A prop with
+several dots and no ArUco marker is not supported, because the dots alone do not give the
+prop's orientation. Put one ArUco marker on it and follow <a href="#a-a-rigid-prop-with-aruco-markers">A</a>.</p>
+<h3 id="b1-register-the-ball">B1. Register the ball<a class="headerlink" href="#b1-register-the-ball" title="Permanent link">&para;</a></h3>
+<p>The marker body has one dot:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ball</span>
+<span class="nt">units</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">meters</span>
+<span class="nt">markers</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">dot0</span>
+<span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">reflective_dot</span>
+<span class="w">    </span><span class="nt">center</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">0.0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">0.0</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">0.0</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>marker-body<span class="w"> </span>import<span class="w"> </span>--file<span class="w"> </span>ball.yaml<span class="w"> </span>--name<span class="w"> </span>ball
+posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>capture<span class="w"> </span>object<span class="w"> </span>add<span class="w"> </span>--capture<span class="w"> </span>&lt;capture&gt;<span class="w"> </span>--name<span class="w"> </span>ball<span class="w"> </span>--marker-body<span class="w"> </span>&lt;body&gt;
+posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>marker-body<span class="w"> </span>to-skeleton<span class="w"> </span>&lt;body&gt;<span class="w"> </span>--name<span class="w"> </span>ball
+</code></pre></div>
+<h3 id="b2-get-the-dot-observations">B2. Get the dot observations<a class="headerlink" href="#b2-get-the-dot-observations" title="Permanent link">&para;</a></h3>
+<p>Either detect the dots automatically, bound to the ball:</p>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>detect<span class="w"> </span>run<span class="w"> </span>--type<span class="w"> </span>dots<span class="w"> </span>--object<span class="w"> </span>ball<span class="w"> </span>--trial<span class="w"> </span>&lt;trial&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--capture<span class="w"> </span>&lt;capture&gt;<span class="w"> </span>--sync<span class="w"> </span>&lt;sync&gt;<span class="w"> </span>--start<span class="w"> </span><span class="m">56</span><span class="w"> </span>--end<span class="w"> </span><span class="m">70</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--dots-camera<span class="w"> </span>gopro13_01<span class="w"> </span>--dots-camera<span class="w"> </span>gopro13_02<span class="w"> </span>--dot-background-mode<span class="w"> </span>blacklist
+</code></pre></div>
+<p>or import points that you tracked by hand in another program. Blender's Movie Clip
+Editor works well when the automatic detector struggles. Each file is one track of one
+camera and needs the columns <code>video_frame</code>, <code>pixel_x</code> and <code>pixel_y</code> (raw image pixels,
+origin at the top left). <code>python/tools/blender/blender_export_2d_tracks.py</code> writes them in
+this form.</p>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>detect<span class="w"> </span>import-2d<span class="w"> </span>--capture<span class="w"> </span>&lt;capture&gt;<span class="w"> </span>--sync<span class="w"> </span>&lt;sync&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--object<span class="w"> </span>ball<span class="w"> </span>--trial<span class="w"> </span>&lt;trial&gt;<span class="w"> </span>--source<span class="w"> </span>blender<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--camera<span class="w"> </span>gopro13_01<span class="w"> </span>ball-gopro13_01.csv<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--camera<span class="w"> </span>gopro13_01<span class="w"> </span>ball-gopro13_01-b.csv<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--camera<span class="w"> </span>gopro-11_mini_01<span class="w"> </span>ball-gopro11.csv
+</code></pre></div>
+<p>A camera may have several files, for instance when you restarted the track after the ball
+was hidden. Each file is kept as a separate track. A point outside the video's own frame
+numbers is rejected: it means the export's frame numbering does not match the video.</p>
+<h3 id="b3-combine-sources">B3. Combine sources<a class="headerlink" href="#b3-combine-sources" title="Permanent link">&para;</a></h3>
+<p>A sequence holds one dot row per camera and frame, so different runs can share a
+sequence only on different cameras. For example: hand-tracked points on three cameras and
+the automatic detector on a fourth:</p>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>sequence<span class="w"> </span>finalise-object<span class="w"> </span>--detection-run<span class="w"> </span>&lt;imported-run&gt;
+posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>sequence<span class="w"> </span>add-dots<span class="w"> </span>--detection-run<span class="w"> </span>&lt;automatic-run&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--sequence<span class="w"> </span>&lt;sequence&gt;<span class="w"> </span>--camera<span class="w"> </span>gopro13_02
+</code></pre></div>
+<p><code>add-dots</code> refuses a camera the sequence already has dots for. <code>--replace</code> swaps exactly
+those cameras for the new run's, and is refused once the sequence has been tracked.</p>
+<h3 id="b4-track-with-a-starting-position">B4. Track with a starting position<a class="headerlink" href="#b4-track-with-a-starting-position" title="Permanent link">&para;</a></h3>
+<p>Create the trial before B2 (see <a href="#a3-create-the-trial">A3</a>), give the same <code>--trial</code> to the
+detection or the import, and finalise the run with <code>sequence finalise-object</code>. Then:</p>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>track<span class="w"> </span>run-persons<span class="w"> </span>--trial<span class="w"> </span>&lt;trial&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--object<span class="w"> </span><span class="nv">ball</span><span class="o">=</span>&lt;skeleton&gt;@0.0,-0.97,1.1
+</code></pre></div>
+<p>The position <code>@X,Y,Z</code> is the ball's position in the world frame of the calibration, in
+metres, at the start of the tracked range. The tracker starts from it, so it should be where
+the ball really is. Every object that is only dots needs its own position. Without it the
+command says so and stops.</p>
+<h2 id="c-a-person-wearing-reflective-dots">C. A person wearing reflective dots<a class="headerlink" href="#c-a-person-wearing-reflective-dots" title="Permanent link">&para;</a></h2>
+<p>Dots worn on a person are tracked together with the body. The tracker predicts where each
+dot should appear from the body's pose and matches detections to those predictions.</p>
+<p>Three things are needed, and the first two are the same as in a body-only capture:</p>
+<ol>
+<li><strong>The person's observation sequence from body detection</strong>, made and stitched as usual
+   (see <a href="../tutorial1/">Tutorial: tracking a capture</a>).</li>
+<li><strong>A skeleton that has the dots as markers.</strong> This is the person's skeleton plus a set
+   of dot slots with fitted positions on the bones.</li>
+<li><strong>The dot detections in the person's sequence.</strong></li>
+</ol>
+<p>Step 3 is on the command line. Detect the dots over the whole span, then add them to the
+person's sequence:</p>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>detect<span class="w"> </span>run<span class="w"> </span>--type<span class="w"> </span>dots<span class="w"> </span>--capture<span class="w"> </span>&lt;capture&gt;<span class="w"> </span>--sync<span class="w"> </span>&lt;sync&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--start<span class="w"> </span><span class="m">30</span><span class="w"> </span>--end<span class="w"> </span><span class="m">130</span><span class="w"> </span>--dots-camera<span class="w"> </span>gopro13_01<span class="w"> </span>--dots-camera<span class="w"> </span>gopro13_02<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--dot-background-mode<span class="w"> </span>blacklist<span class="w"> </span>--dot-threshold-by-camera<span class="w"> </span><span class="nv">gopro13_02</span><span class="o">=</span><span class="m">200</span>
+<span class="c1"># prints the run</span>
+
+posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>sequence<span class="w"> </span>add-dots<span class="w"> </span>--detection-run<span class="w"> </span>&lt;run&gt;<span class="w"> </span>--sequence<span class="w"> </span>&lt;person-sequence&gt;
+</code></pre></div>
+<p>The dots run must use the same sync configuration as the person's sequence, or the frames
+would map to the wrong times; the command refuses a mismatch.</p>
+<p>Then track with the dot skeleton:</p>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>track<span class="w"> </span>run<span class="w"> </span>--sequence<span class="w"> </span>&lt;person-sequence&gt;<span class="w"> </span>--skeleton<span class="w"> </span>&lt;dot-skeleton&gt;
+</code></pre></div>
+<p><code>--dot-background-mode blacklist</code> is the mode to start with for markers worn on a moving
+person; the default <code>subtract</code> can merge a dot into the limb it sits on. Cameras differ in
+how bright a real dot appears, so give the worse cameras their own threshold.</p>
+<div class="admonition warning">
+<p class="admonition-title">Step 2 is not a command-line workflow yet</p>
+<p>Preparing the dot skeleton means labelling which detected dots are which slot, fitting
+the dots' positions on the bones, and merging them into the skeleton. Today this is done
+with the scripts in <code>python/tools/</code> (<code>build_tracklet_groups.py</code>,
+<code>label_tracklet_groups_gui.py</code>, <code>fit_calibrated_attachment_set.py</code>,
+<code>build_dot_augmented_skeleton.py</code>). The slot names and joints of a leg set are in
+<code>catalog/modules/leg.marker-module.yaml</code>, and the tools refuse a skeleton the set does
+not fit. A <code>marker-set</code> command group is planned for this.</p>
+</div>
+<h2 id="d-tracking-several-subjects-together">D. Tracking several subjects together<a class="headerlink" href="#d-tracking-several-subjects-together" title="Permanent link">&para;</a></h2>
+<p>Persons and props of a trial are tracked in one run, so that the dots they have in common
+are shared correctly: every detected dot goes to at most one subject.</p>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>track<span class="w"> </span>run-persons<span class="w"> </span>--trial<span class="w"> </span>&lt;trial&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--persons<span class="w"> </span>Alice<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--object<span class="w"> </span><span class="nv">sword</span><span class="o">=</span>&lt;sword-skeleton&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--object<span class="w"> </span><span class="nv">ball</span><span class="o">=</span>&lt;ball-skeleton&gt;@0.0,-0.97,1.1
+</code></pre></div>
+<ul>
+<li><code>--persons</code> lists persons of the capture by name. Each person's default skeleton and
+  observation sequence are used. Use <code>track run</code> if a person needs another skeleton.</li>
+<li>Each <code>--object</code> is a capture object's name with its skeleton, and a starting position if
+  it is only dots. Repeat <code>--object</code> for several objects. Every subject's detections must be
+  recorded on the trial: for objects, through <code>--trial</code> on <code>detect run</code> or <code>detect import-2d</code>.</li>
+<li>All subjects are stepped together over one time range. The default is where every
+  subject's sequence overlaps; <code>--start-time</code> and <code>--end-time</code> set it explicitly.</li>
+<li><code>--config</code> gives one tracker configuration to every subject, which is what subjects that
+  share dot detections need: they must agree on the dot settings.</li>
+</ul>
+<h2 id="solving-a-marker-body-from-video">Solving a marker body from video<a class="headerlink" href="#solving-a-marker-body-from-video" title="Permanent link">&para;</a></h2>
+<p>The marker body's geometry follows from footage. Both methods write the same file, in the
+frame of the reference marker (a marker you choose), and <code>--output</code> writes it while
+<code>--import</code> also adds it to the session.</p>
+<h3 id="from-several-fixed-cameras-marker-body-calibrate">From several fixed cameras: <code>marker-body calibrate</code><a class="headerlink" href="#from-several-fixed-cameras-marker-body-calibrate" title="Permanent link">&para;</a></h3>
+<p>Use footage from your normal, already calibrated cameras. The prop moves in front of them.
+Every marker of the body must be seen in the same instant as the reference marker
+somewhere in the footage, by two or more cameras, though not necessarily by the same
+cameras.</p>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>marker-body<span class="w"> </span>calibrate<span class="w"> </span>--capture<span class="w"> </span>&lt;capture&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--time-start<span class="w"> </span><span class="m">98</span><span class="w"> </span>--time-end<span class="w"> </span><span class="m">113</span><span class="w"> </span>--marker-size<span class="w"> </span><span class="m">0</span>.095<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--marker-ids<span class="w"> </span><span class="m">2</span>,3<span class="w"> </span>--reference-id<span class="w"> </span><span class="m">2</span><span class="w"> </span>--output<span class="w"> </span>pen.yaml
+</code></pre></div>
+<p><code>--detect-dots</code> also solves the reflective dots. <code>--camera LABEL</code> (repeated) restricts the
+cameras, which you need when a marker id also occurs on something else in some camera's
+view. A marker that is never seen together with the reference is left out, and the command
+says so.</p>
+<h3 id="from-one-moving-camera-marker-body-calibrate-video">From one moving camera: <code>marker-body calibrate-video</code><a class="headerlink" href="#from-one-moving-camera-marker-body-calibrate-video" title="Permanent link">&para;</a></h3>
+<p>Film the prop with one camera that you move around it, while the prop and everything
+around it stay still. This method often needs less equipment and gives a better result.</p>
+<p>Give it the video and the <strong>intrinsics calibration</strong> of the camera that filmed it, in the mode
+it was filmed in. <code>posetrak calib list</code> shows the calibrations with their ids and <code>posetrak calib show &lt;id&gt;</code>
+all their parameters; a unique prefix
+of an id is enough. The video is not a capture, so it has no calibration of its own, and it
+must have the image size the calibration was made for: the command refuses a video of another
+size.</p>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>calib<span class="w"> </span>list<span class="w">        </span><span class="c1"># find the calibration id of the camera and mode</span>
+posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>marker-body<span class="w"> </span>calibrate-video<span class="w"> </span>--video<span class="w"> </span>orbit.mp4<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--intrinsics<span class="w"> </span>&lt;calibration&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--body-markers<span class="w"> </span><span class="m">2</span>,3:0.06<span class="w"> </span>--body-marker-size<span class="w"> </span><span class="m">0</span>.095<span class="w"> </span>--reference-id<span class="w"> </span><span class="m">2</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--anchor-markers<span class="w"> </span><span class="m">0</span>,1<span class="w"> </span>--anchor-marker-size<span class="w"> </span><span class="m">0</span>.19<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--detect-dots<span class="w"> </span>--output<span class="w"> </span>prop.yaml
+</code></pre></div>
+<ul>
+<li><code>--body-markers</code> are the markers on the prop, each with its side length in metres
+  (<code>ID:SIZE</code>, or a default from <code>--body-marker-size</code>). Sizes may differ.</li>
+<li><code>--anchor-markers</code> are further markers <strong>around</strong> the prop, not part of it. They only
+  track the camera while the prop's own markers face away, so they can be larger and
+  need no measured position. They must stand still.</li>
+<li><code>--reference-id</code> is the prop marker whose frame becomes the prop's frame.</li>
+<li><code>--dictionary</code> (default <code>DICT_4X4_50</code>) applies to all markers.</li>
+</ul>
+<div class="admonition warning">
+<p class="admonition-title">Measure the marker sizes exactly</p>
+<p>The sizes fix the scale of the result and the distance of every marker, so a wrong size
+spoils the fit. The size that counts is the <strong>outer edge of the black border</strong>, not the
+printed sheet and not the pattern inside the border. After the fit the command checks the
+sizes against each other and warns when one disagrees, for instance:
+<code>warning: the footage fits marker '29' best at 1.20 times the size given (0.0457 m
+instead of 0.0380 m), relative to the other markers</code>. It can only say that a marker
+disagrees with the others, not which of them is right, so measure again before you
+change a size. With fewer than three markers it cannot compare.</p>
+</div>
+<p>Two kinds of target work:</p>
+<ol>
+<li><strong>A prop with one or a few markers, plus anchors around it.</strong> Put the anchors so that
+   every side of the prop is filmed together with some anchor, and that the anchors
+   themselves are seen together in turn. A chain of frames that see two markers each
+   connects them all to the reference.</li>
+<li><strong>A prop with markers on every side</strong> (a box). No anchors are needed, because the
+   prop's own markers keep the camera tracked.</li>
+</ol>
+<p>To film: move slowly and steadily all the way around, keep the markers sharp, and cover every
+side of the prop, at more than one height if you can. A frame counts once it shows two known
+markers. <code>--stride</code> (default 6) samples every sixth frame; <code>--first-frame</code> and
+<code>--last-frame</code> narrow the video.</p>
+<p>The command reports how many frames it used, the reprojection error per marker (a healthy
+result is around one pixel), and any prop marker that no frames connect to the reference.
+Solving the dots also lists how many views back each one. Dots are only kept if they lie
+within <code>--dot-max-distance-m</code> of the reference marker (default 1 m; lower it for a small
+prop such as a ball, raise it for a long one), if they are not on a marker's printed area,
+and if their views agree on a single point about as well as the markers do
+(<code>--dot-max-rms-px</code> sets a limit by hand).</p>
+<p>A prop that you film close up has big dots: a 10 mm dot is about 45 pixels across at 4K from
+40 cm. Raise <code>--dot-max-area</code> for it (the default suits dots that are a few pixels across).</p>
+<p><strong>Worked example: a ball.</strong> A ball with an ArUco marker (<code>DICT_4X4_1000</code>, id 29), twelve 10 mm
+reflective dots, and four anchor markers of 9.5 cm (ids 0, 1, 14, 15) on the floor around it,
+filmed with one camera at 4K:</p>
+<div class="highlight"><pre><span></span><code>posetrak<span class="w"> </span>-s<span class="w"> </span>session.db<span class="w"> </span>marker-body<span class="w"> </span>calibrate-video<span class="w"> </span>--video<span class="w"> </span>ball-orbit.mp4<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--intrinsics<span class="w"> </span>&lt;calibration&gt;<span class="w"> </span>--dictionary<span class="w"> </span>DICT_4X4_1000<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--body-markers<span class="w"> </span><span class="m">29</span>:0.0457<span class="w"> </span>--reference-id<span class="w"> </span><span class="m">29</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--anchor-markers<span class="w"> </span><span class="m">0</span>,1,14,15<span class="w"> </span>--anchor-marker-size<span class="w"> </span><span class="m">0</span>.095<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--detect-dots<span class="w"> </span>--dot-max-area<span class="w"> </span><span class="m">6000</span><span class="w"> </span>--dot-max-distance-m<span class="w"> </span><span class="m">0</span>.25<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--name<span class="w"> </span>ball<span class="w"> </span>--output<span class="w"> </span>ball.yaml
+</code></pre></div>
+<p>Here the marker was first given as 3.8 cm, the command warned that 4.6 cm fits, and the
+measurement confirmed it. The dots that come out should lie on the ball. Fitting a sphere
+through the result is a good independent check: ten of the thirteen dots came out on one
+sphere 20 cm across to within a few millimetres, and the other three were bright things that
+are not on the ball.</p>
+<div class="admonition tip">
+<p class="admonition-title">The prop's origin and axes</p>
+<p>The result is in the frame of the reference marker. To put the origin and axes elsewhere
+(the handle, say, with an axis along the blade), apply one rigid transform to every marker
+corner and dot in the YAML before importing it. There is no command for this yet.</p>
+</div>
+<h2 id="detecting-dots">Detecting dots<a class="headerlink" href="#detecting-dots" title="Permanent link">&para;</a></h2>
+<p>Dots are found as small bright blobs. These options belong to <code>detect run --type aruco</code> and
+<code>--type dots</code>, and are recorded with the run:</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--dots-camera LABEL</code></td>
+<td>Cameras that look for dots. Repeat for several. Required for <code>--type dots</code>.</td>
+</tr>
+<tr>
+<td><code>--dot-threshold N</code></td>
+<td>Brightness a dot must reach (default 235).</td>
+</tr>
+<tr>
+<td><code>--dot-threshold-by-camera LABEL=N</code></td>
+<td>The same, per camera, for cameras that render dots dimmer.</td>
+</tr>
+<tr>
+<td><code>--dot-background-mode subtract\|blacklist</code></td>
+<td><code>subtract</code> thresholds the difference from an empty-scene background. <code>blacklist</code> thresholds the raw brightness and uses the background only to reject glare. Use <code>blacklist</code> for worn markers.</td>
+</tr>
+<tr>
+<td><code>--dot-blacklist-frac X</code>, <code>--dot-blacklist-frac-by-camera LABEL=X</code></td>
+<td>Looseness of the glare rejection. Higher rejects fewer real dots.</td>
+</tr>
+<tr>
+<td><code>--dot-max-saturation X</code>, <code>--dot-max-saturation-by-camera LABEL=X</code></td>
+<td>Reject colourful candidates (skin, fabric). 255 turns it off.</td>
+</tr>
+<tr>
+<td><code>--dot-bg-sample-count N</code></td>
+<td>Frames sampled to build the background.</td>
+</tr>
+<tr>
+<td><code>--frame-step N</code></td>
+<td>Process every Nth frame.</td>
+</tr>
+</tbody>
+</table>
+<p>Options that belong to another kind of run are rejected rather than ignored. Cameras
+render the same marker differently, so it pays to look at a few frames and set per-camera
+values rather than one for all.</p>
+<h2 id="when-something-goes-wrong">When something goes wrong<a class="headerlink" href="#when-something-goes-wrong" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Message or symptom</th>
+<th>What it means</th>
+<th>What to do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--type aruco needs --object, or --marker-ids ...</code></td>
+<td>An unbound marker run has to say which ids to look for.</td>
+<td>Add <code>--object NAME</code> or <code>--marker-ids 2,3</code>.</td>
+</tr>
+<tr>
+<td><code>no video in this capture and time range for ...</code></td>
+<td>A <code>--dots-camera</code> has no video in the range.</td>
+<td>Check the label with <code>capture show</code>, and the times.</td>
+</tr>
+<tr>
+<td><code>... has none of the marker ids of object ...</code></td>
+<td>The shared run was not told to look for this prop's markers.</td>
+<td>Detect again with <code>--marker-ids</code> that include them.</td>
+</tr>
+<tr>
+<td><code>... already has run ... derived from this one</code></td>
+<td>The prop was already finalised from this shared run.</td>
+<td>Use the run the message names.</td>
+</tr>
+<tr>
+<td><code>sequence ... already has N dot rows for these cameras</code></td>
+<td>The sequence already has dots for that camera.</td>
+<td>Choose other cameras with <code>--camera</code>, or <code>--replace</code>.</td>
+</tr>
+<tr>
+<td><code>No finalised sequence for object '...' in trial '...'</code></td>
+<td>The object's detection run was made without this trial.</td>
+<td>Detect again with <code>--trial &lt;trial&gt;</code>, then <code>sequence finalise-object</code>.</td>
+</tr>
+<tr>
+<td><code>Subject '...' has only anonymous-dot markers ... seed position</code></td>
+<td>A dots-only prop needs a starting position.</td>
+<td>Add <code>@X,Y,Z</code> to the <code>--object</code>.</td>
+</tr>
+<tr>
+<td><code>... has N anonymous-dot markers and no coded marker</code></td>
+<td>A prop with several dots and no ArUco marker cannot be started.</td>
+<td>Add an ArUco marker.</td>
+</tr>
+<tr>
+<td><code>marker '3': never seen together with the reference, left out</code> (<code>calibrate</code>), <code>body marker '3': not linked to the reference by any shared frame, left out</code> (<code>calibrate-video</code>)</td>
+<td>The footage never puts that marker in the same instant or frame as the reference, directly or through anchors.</td>
+<td>Film so that it is seen with the reference, or with markers that are.</td>
+</tr>
+<tr>
+<td><code>the reference marker ... was never seen by 2 or more cameras at once</code> (<code>calibrate</code>), <code>... never seen in a frame together with another known marker</code> (<code>calibrate-video</code>)</td>
+<td>The reference marker's pose could not be solved.</td>
+<td>Check the marker id, the dictionary and the sizes, and that the markers are visible.</td>
+</tr>
+<tr>
+<td><code>warning: the footage fits marker '29' best at 1.20 times the size given ...</code></td>
+<td>The marker's size disagrees with the others'.</td>
+<td>Measure the outer edge of its black border again; fix the size that is wrong.</td>
+</tr>
+<tr>
+<td><code>the video is 1920x1080 but intrinsics calibration ... is for 3840x2160</code></td>
+<td>The calibration is for another camera mode.</td>
+<td>Use the calibration of the camera in the mode that filmed the video (<code>calib list</code>).</td>
+</tr>
+<tr>
+<td><code>no intrinsics calibration '...' in the session or the registry</code></td>
+<td>The id is not one that <code>calib list</code> shows.</td>
+<td>Check the id, or give a longer prefix.</td>
+</tr>
+<tr>
+<td>Reprojection error of several pixels</td>
+<td>Some marker sizes are wrong, a marker is not flat or not still, or the intrinsics do not match the video.</td>
+<td>Re-measure the printed sizes; check the mode of the camera.</td>
+</tr>
+<tr>
+<td>The tracker loses the prop</td>
+<td>Not enough markers in view, or a marker id is repeated on another object.</td>
+<td>Look at the detections; use more markers; give the ids per object.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="limits">Limits<a class="headerlink" href="#limits" title="Permanent link">&para;</a></h2>
+<ul>
+<li>A prop of only reflective dots is supported when it has a single dot. With several dots it
+  needs at least one ArUco marker.</li>
+<li>The single-camera calibration needs the prop and its surroundings to stay still. Solving
+  the origin and axes of the prop is left to you.</li>
+<li>Dots worn on a person still need their slot set prepared with scripts.</li>
+<li>The colour patches around dots, which could help tell dots apart, are not used.</li>
+<li>Importing points as <strong>labelled</strong> markers (naming each track after a marker) is not available;
+  imported tracks are anonymous dots.</li>
+<li>The graphical tools do not yet expose every option described here.</li>
+</ul>
+<h2 id="quick-reference">Quick reference<a class="headerlink" href="#quick-reference" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Task</th>
+<th>Command</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Solve a body, fixed cameras</td>
+<td><code>marker-body calibrate</code></td>
+</tr>
+<tr>
+<td>Solve a body, one moving camera</td>
+<td><code>marker-body calibrate-video</code></td>
+</tr>
+<tr>
+<td>Import / list / show a body</td>
+<td><code>marker-body import</code>, <code>list</code>, <code>show</code></td>
+</tr>
+<tr>
+<td>Prop skeleton from a body</td>
+<td><code>marker-body to-skeleton</code></td>
+</tr>
+<tr>
+<td>Add / list / rename / remove props</td>
+<td><code>capture object add</code>, <code>list</code>, <code>rename</code>, <code>rm</code></td>
+</tr>
+<tr>
+<td>Detect markers or dots</td>
+<td><code>detect run --type aruco</code> or <code>--type dots</code></td>
+</tr>
+<tr>
+<td>Import tracks from another program</td>
+<td><code>detect import-2d</code></td>
+</tr>
+<tr>
+<td>Sequence of a prop</td>
+<td><code>sequence finalise-object</code></td>
+</tr>
+<tr>
+<td>Dots into an existing sequence</td>
+<td><code>sequence add-dots</code></td>
+</tr>
+<tr>
+<td>Track one or several subjects</td>
+<td><code>track run</code>, <code>track run-persons</code></td>
+</tr>
+<tr>
+<td>Results</td>
+<td><code>track list</code>, <code>track show</code>, <code>track export gltf\|bvh\|usd</code></td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.tracking", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="https://player.vimeo.com/api/player.js"></script>
+      
+        <script src="../../assets/video-embed.js"></script>
+      
+    
+  </body>
+</html>

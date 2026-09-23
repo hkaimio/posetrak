@@ -1186,6 +1186,7 @@ TrackingResult Tracker::update_step(std::vector<Observation> const& observations
         for (Observation const& obs : observations) {
             prev_observations_[obs.camera_id][obs.marker_id] = obs.position;
             prev_dot_tracklet_ids_[obs.camera_id][obs.marker_id] = obs.tracklet_id;
+            prev_dot_resolved_frame_[obs.camera_id][obs.marker_id] = obs.frame_idx;
         }
         if (frame_callback_) {
             frame_callback_(result);
@@ -1208,6 +1209,7 @@ void Tracker::reset() {
     smoother_cache_.clear();
     prev_observations_.clear();
     prev_dot_tracklet_ids_.clear();
+    prev_dot_resolved_frame_.clear();
     streak_k_accumulators_.clear();
 }
 

@@ -1046,6 +1046,80 @@ def test_migrate_session_v45_to_v46_adds_shot_video_id(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_migrate_registry_v12_to_v13_adds_dot_reacquire_columns(tmp_path: Path) -> None:
+    """v12->v13 adds tracker_configs.dot_reacquire_gap_frames and
+    dot_reacquire_max_px, the reacquisition gate's own settings -- see
+    db.py's _migrate_registry_v12_to_v13."""
+    db_path = tmp_path / "reg.db"
+    conn = create_registry(db_path)
+    conn.execute("PRAGMA user_version = 12")
+    conn.commit()
+    conn.close()
+
+    conn = open_registry(db_path)
+    assert get_schema_version(conn) == REGISTRY_SCHEMA_VERSION
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(tracker_configs)")}
+    assert {"dot_reacquire_gap_frames", "dot_reacquire_max_px"} <= cols
+    conn.close()
+
+
+def test_migrate_session_v53_to_v54_adds_dot_reacquire_columns(tmp_path: Path) -> None:
+    """v53->v54 is the session mirror of registry v12->v13 -- see db.py's
+    _migrate_session_v53_to_v54."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+    conn.execute("PRAGMA user_version = 53")
+    conn.commit()
+    conn.close()
+
+    conn = open_session(db_path)
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(tracker_configs)")}
+    assert {"dot_reacquire_gap_frames", "dot_reacquire_max_px"} <= cols
+    conn.close()
+
+
+def test_migrate_registry_v13_to_v14_adds_corroboration_and_camera_trust_columns(
+    tmp_path: Path,
+) -> None:
+    """v13->v14 adds tracker_configs.dot_cross_view_corroboration_px,
+    dot_corroboration_gate_multiplier and dot_camera_noise_scale -- see db.py's
+    _migrate_registry_v13_to_v14."""
+    db_path = tmp_path / "reg.db"
+    conn = create_registry(db_path)
+    conn.execute("PRAGMA user_version = 13")
+    conn.commit()
+    conn.close()
+
+    conn = open_registry(db_path)
+    assert get_schema_version(conn) == REGISTRY_SCHEMA_VERSION
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(tracker_configs)")}
+    assert {
+        "dot_cross_view_corroboration_px", "dot_corroboration_gate_multiplier", "dot_camera_noise_scale",
+    } <= cols
+    conn.close()
+
+
+def test_migrate_session_v54_to_v55_adds_corroboration_and_camera_trust_columns(
+    tmp_path: Path,
+) -> None:
+    """v54->v55 is the session mirror of registry v13->v14 -- see db.py's
+    _migrate_session_v54_to_v55."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+    conn.execute("PRAGMA user_version = 54")
+    conn.commit()
+    conn.close()
+
+    conn = open_session(db_path)
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(tracker_configs)")}
+    assert {
+        "dot_cross_view_corroboration_px", "dot_corroboration_gate_multiplier", "dot_camera_noise_scale",
+    } <= cols
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # PRAGMA foreign_keys
 # ---------------------------------------------------------------------------

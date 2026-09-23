@@ -229,7 +229,10 @@ void create_fixture_db(fs::path const& path, int num_frames, double dt) {
             dot_streak_min_elongation_px REAL, dot_streak_velocity_noise_std REAL,
             process_noise_vel_max_multiplier REAL,
             dot_assignment_gate_mahalanobis REAL, dot_tracklet_gate_multiplier REAL,
-            confidence_threshold_marker_names TEXT, confidence_threshold_override REAL
+            confidence_threshold_marker_names TEXT, confidence_threshold_override REAL,
+            dot_reacquire_gap_frames INTEGER, dot_reacquire_max_px REAL,
+            dot_cross_view_corroboration_px REAL, dot_corroboration_gate_multiplier REAL,
+            dot_camera_noise_scale TEXT
         );
     )");
     exec_sql(db, R"(

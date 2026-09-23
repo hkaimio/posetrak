@@ -47,5 +47,6 @@ one `--camera LABEL CSV` per track; the CSVs need no conversion. The run is
 bound to a capture object with `--object`, and `posetrak sequence
 finalise-object` makes the object's sequence from it.
 
-Note: `OUTPUT_DIR` at the top of `blender_export_2d_tracks.py` is a
-hardcoded path; edit it before running.
+Note: `OUTPUT_DIR` at the top of `blender_export_2d_tracks.py` has no
+default; set it before running interactively, or pass `--output-dir`
+headless.

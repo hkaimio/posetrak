@@ -1092,6 +1092,11 @@ for, and one no current capture has ever exercised.
 
 ### WS2 — Assignment robustness (M, then S per modifier)
 
+> The detailed work plan, checked against the code after WS1, is
+> [ws2-assignment-robustness-plan.md](ws2-assignment-robustness-plan.md). It
+> corrects two points below: backface culling is in the prediction, not in the
+> assignment, and the gate-config check of item 1 already exists.
+
 1. Refactor `resolve_dot_assignment()` onto `DotAssignmentContext` +
    `CostModifier` with the two existing mechanisms as modifiers;
    bit-for-bit regression against the current outputs on the sword and

@@ -114,6 +114,18 @@ class Tracker {
             TrackerConfig const& config = TrackerConfig{});
 
     /**
+     * @brief The calibrated cameras this Tracker was constructed against.
+     *
+     * Exposed (read-only) for resolve_shared_dot_assignment() (dot_assignment.cpp),
+     * which needs the participating subjects' cameras to build cross-view
+     * corroboration's fundamental matrices -- it reads the first subject's own
+     * Tracker rather than taking a separate parameter, the same precedent as its
+     * streak_k_accumulators() use (every dot-bearing subject in one shared
+     * resolution is assumed built against the same camera set).
+     */
+    std::unordered_map<int, Camera> const& cameras() const { return cameras_; }
+
+    /**
      * @brief Initialize tracker from first frame observations
      *
      * Steps:
@@ -313,6 +325,16 @@ class Tracker {
      */
     std::unordered_map<int, std::unordered_map<int, int>> const& prev_dot_tracklet_ids() const {
         return prev_dot_tracklet_ids_;
+    }
+
+    /**
+     * @brief The frame_idx each (camera, marker) slot was last resolved on,
+     * same lifetime/bookkeeping as prev_observations() above -- see
+     * dot_assignment.hpp's PrevDotResolvedFrame doc comment for the
+     * reacquisition-gate mechanism this feeds.
+     */
+    std::unordered_map<int, std::unordered_map<int, int>> const& prev_dot_resolved_frame() const {
+        return prev_dot_resolved_frame_;
     }
 
     /**
@@ -598,6 +620,11 @@ class Tracker {
     // same population point/lifetime as prev_observations_ just above, see
     // prev_dot_tracklet_ids()'s own doc comment for what consumes this.
     std::unordered_map<int, std::unordered_map<int, int>> prev_dot_tracklet_ids_;
+
+    // frame_idx each (camera, marker) slot was last resolved on -- same
+    // population point/lifetime as prev_observations_ above, see
+    // prev_dot_resolved_frame()'s own doc comment for what consumes this.
+    std::unordered_map<int, std::unordered_map<int, int>> prev_dot_resolved_frame_;
 
     // Per-camera running k=exposure_time/frame_time estimate for the streak-derived
     // dot velocity mechanism (streak-velocity-design.md §3/§4) -- see

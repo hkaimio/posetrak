@@ -289,6 +289,141 @@ class TestDetectRun:
                           "--start", "0", "--end", "1"])
         assert result.exit_code != 0
 
+    @patch("posetrak.cli.detect.DetectionPipeline")
+    @patch("posetrak.cli.detect.RTMPoseEstimator")
+    @patch("posetrak.cli.detect.YOLOXDetector")
+    def test_trial_supplies_time_range_default_and_gets_linked(
+        self, mock_det_cls, mock_rtm_cls, mock_pipeline_cls,
+        seeded_session_db_path: Path, capture_id: str, sync_id: str,
+    ) -> None:
+        """--trial with no --start/--end uses the trial's own range, and the
+        resulting run is linked to it (detect run --type pose never wrote
+        trial_id at all before this)."""
+        from posetrak.db.db import generate_id as _gen_id
+
+        trial_id = _gen_id()
+        conn = sqlite3.connect(str(seeded_session_db_path))
+        conn.execute(
+            "INSERT INTO trials (id, capture_id, name, time_start_s, time_end_s) VALUES (?,?,?,?,?)",
+            (trial_id, capture_id, "Trial 1", 5.0, 15.0),
+        )
+        conn.commit()
+        conn.close()
+
+        mock_det_cls.return_value = MagicMock(name="yolo11x", _conf=0.3)
+        mock_est = MagicMock(input_size=(288, 384))
+        mock_rtm_cls.return_value = mock_est
+        # DetectionPipeline itself is mocked away (it's what would normally
+        # INSERT the detection_runs row), so seed one under the run id the
+        # mock reports -- otherwise the CLI's post-hoc "UPDATE ... trial_id"
+        # (mirroring how the YOLO path has always linked a trial, after the
+        # fact) has no real row to affect.
+        expected_run_id = _gen_id()
+        import datetime as _dt
+        conn = sqlite3.connect(str(seeded_session_db_path))
+        conn.execute(
+            "INSERT INTO detection_runs "
+            "(id, shot_id, sync_config_id, time_start_s, time_end_s, detector_model, pose_model, "
+            " status, created_at) VALUES (?,?,?,?,?,?,?,'complete',?)",
+            (expected_run_id, capture_id, sync_id, 5.0, 15.0, "yolo11x", "rtmpose-l-133kp",
+             _dt.datetime.now(_dt.timezone.utc).isoformat()),
+        )
+        conn.commit()
+        conn.close()
+        mock_pipeline = MagicMock()
+        mock_pipeline.run.return_value = self._make_mock_pipeline_result(expected_run_id)
+        mock_pipeline_cls.return_value = mock_pipeline
+
+        result = _invoke(
+            ["detect", "run", "--capture", capture_id, "--sync", sync_id, "--trial", trial_id],
+            seeded_session_db_path,
+        )
+
+        assert result.exit_code == 0, result.output
+        call_kwargs = mock_pipeline_cls.call_args.kwargs
+        assert call_kwargs["time_start_s"] == 5.0
+        assert call_kwargs["time_end_s"] == 15.0
+        assert _last_run(seeded_session_db_path)["trial_id"] == trial_id
+
+    def test_missing_time_range_and_trial_fails(
+        self, seeded_session_db_path: Path, capture_id: str, sync_id: str,
+    ) -> None:
+        result = _invoke(
+            ["detect", "run", "--capture", capture_id, "--sync", sync_id], seeded_session_db_path,
+        )
+        assert result.exit_code != 0
+        assert "--trial" in result.output
+
+
+# ---------------------------------------------------------------------------
+# detect run --segmentation (bbox source: existing Cutie segmentation)
+# ---------------------------------------------------------------------------
+
+
+class TestDetectRunSegmentation:
+    def _seed_segmentation(self, session_path: Path, capture_id: str) -> str:
+        from posetrak.db.db import generate_id as _gen_id
+
+        seg_id = _gen_id()
+        conn = sqlite3.connect(str(session_path))
+        conn.execute(
+            "INSERT INTO seg_quality_runs "
+            "(id, shot_id, time_start_s, time_end_s, created_at, quality_source, erosion_px, persons_json) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (seg_id, capture_id, 0.0, 1.0, "2026-01-01T00:00:00+00:00", "cutie", 5, json.dumps(["alice"])),
+        )
+        conn.commit()
+        conn.close()
+        return seg_id
+
+    @patch("app.pose.finalise.auto_assign_and_finalise")
+    @patch("app.pose.pose_worker.PoseWorker")
+    def test_segmentation_sourced_run_bypasses_yolo(
+        self, mock_worker_cls, mock_finalise,
+        seeded_session_db_path: Path, capture_id: str, sync_id: str,
+    ) -> None:
+        seg_id = self._seed_segmentation(seeded_session_db_path, capture_id)
+        mock_worker_cls.return_value = MagicMock()
+        mock_finalise.return_value = ["seq1"]
+
+        result = _invoke(
+            ["detect", "run", "--capture", capture_id, "--sync", sync_id,
+             "--start", "0", "--end", "1", "--segmentation", seg_id],
+            seeded_session_db_path,
+        )
+
+        assert result.exit_code == 0, result.output
+        run = _last_run(seeded_session_db_path)
+        assert run["detector_model"] == "segmentation"
+        mock_worker_cls.return_value.run.assert_called_once()
+        mock_finalise.assert_called_once()
+        finalise_kwargs = mock_finalise.call_args.kwargs
+        assert finalise_kwargs["detection_run_id"] == run["id"]
+        assert finalise_kwargs["persons_ordered"] == ["alice"]
+
+    def test_segmentation_rejects_yolo_only_flags(
+        self, seeded_session_db_path: Path, capture_id: str, sync_id: str,
+    ) -> None:
+        seg_id = self._seed_segmentation(seeded_session_db_path, capture_id)
+        result = _invoke(
+            ["detect", "run", "--capture", capture_id, "--sync", sync_id,
+             "--start", "0", "--end", "1", "--segmentation", seg_id, "--detector", "yolox-m"],
+            seeded_session_db_path,
+        )
+        assert result.exit_code != 0
+        assert "--detector: not used when --segmentation" in result.output
+
+    def test_refine_hands_without_segmentation_is_rejected(
+        self, seeded_session_db_path: Path, capture_id: str, sync_id: str,
+    ) -> None:
+        result = _invoke(
+            ["detect", "run", "--capture", capture_id, "--sync", sync_id,
+             "--start", "0", "--end", "1", "--no-refine-hands"],
+            seeded_session_db_path,
+        )
+        assert result.exit_code != 0
+        assert "--refine-hands: only supported with --segmentation" in result.output
+
 
 # ---------------------------------------------------------------------------
 # detect show
@@ -512,6 +647,7 @@ class TestDetectRunMarkers:
             (["--type", "dots", "--dots-camera", "cam1", "--marker-ids", "3"], "--marker-ids: only for --type aruco"),
             (["--type", "aruco", "--marker-ids", "3", "--dot-threshold", "100"], "--dot-threshold: only used with --dots-camera"),
             (["--type", "dots", "--dots-camera", "cam1", "--conf", "0.5"], "--conf: only for --type pose"),
+            (["--type", "dots", "--dots-camera", "cam1", "--segmentation", "x"], "--segmentation: only for --type pose"),
             (["--type", "dots", "--dots-camera", "nope"], "no camera_instances with label 'nope'"),
             (["--type", "dots", "--dots-camera", "cam1", "--dot-threshold-by-camera", "cam1"], "expected LABEL=VALUE"),
             (["--type", "dots", "--dots-camera", "cam1", "--dot-threshold-by-camera", "cam1=high"], "bad value"),

@@ -42,9 +42,10 @@ def detect_group() -> None:
 
 
 # Options that only make sense for one kind of run. ``detect run`` rejects them for the others
-# rather than ignoring them silently.
-_POSE_OPTIONS = ("detector", "pose_model", "conf")
-_MARKER_OPTIONS = ("object_ref", "trial", "frame_step", "min_marker_perimeter_rate", "parallel", "max_workers")
+# rather than ignoring them silently. --trial is shared by pose and marker runs, so it is not
+# in either tuple.
+_POSE_OPTIONS = ("detector", "pose_model", "conf", "segmentation", "refine_hands")
+_MARKER_OPTIONS = ("object_ref", "frame_step", "min_marker_perimeter_rate", "parallel", "max_workers")
 _CODED_OPTIONS = ("marker_ids", "dictionary")
 _DOT_OPTIONS = (
     "dot_threshold", "dot_threshold_by_camera", "dot_background_mode", "dot_bg_subtract",
@@ -56,8 +57,10 @@ _DOT_OPTIONS = (
 @detect_group.command("run")
 @click.option("--capture", required=True, help="Capture ID (prefix accepted).")
 @click.option("--sync", required=True, help="Sync config ID (prefix accepted).")
-@click.option("--start", type=float, required=True, help="Start time in seconds (global).")
-@click.option("--end", type=float, required=True, help="End time in seconds (global).")
+@click.option("--start", type=float, default=None,
+              help="Start time in seconds (global). Defaults to --trial's own start.")
+@click.option("--end", type=float, default=None,
+              help="End time in seconds (global). Defaults to --trial's own end.")
 @click.option(
     "--type", "run_type", type=click.Choice(["pose", "aruco", "dots"]), default="pose", show_default=True,
     help="pose: person detection and pose estimation. aruco: coded markers, optionally with "
@@ -71,7 +74,19 @@ _DOT_OPTIONS = (
 @click.option("--object", "object_ref", default=None,
               help="Bind a marker run to this capture object (name or ID prefix). Without it the "
                    "run is not bound to any object (--type aruco then needs --marker-ids).")
-@click.option("--trial", default=None, help="Trial ID (prefix accepted) to record on a marker run.")
+@click.option("--trial", default=None,
+              help="Trial ID (prefix accepted) to record on the run. Also supplies --start/--end's "
+                   "default when they are omitted.")
+@click.option("--segmentation", default=None,
+              help="Seg quality run ID (prefix accepted) to source person bboxes from instead of "
+                   "running the YOLO detector (--type pose only). Masks give tighter crops and the "
+                   "run is finalised automatically (segmentation labels are already stable "
+                   "per-person identities, unlike YOLO tracks). See "
+                   "docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md.")
+@click.option("--refine-hands/--no-refine-hands", default=True, show_default=True,
+              help="After the pose pass, re-detect each tracked wrist's hand in a tight crop and "
+                   "patch in refined finger keypoints (--segmentation only; the plain YOLO pose "
+                   "path does not refine hands via detect run).")
 @click.option("--marker-ids", default=None,
               help="Comma-separated ids of every coded marker the scene may show, for an aruco run "
                    "that is not bound to an object. Fixes the corner-slot layout of the run: an id "
@@ -119,14 +134,16 @@ def cmd_run(
     ctx: click.Context,
     capture: str,
     sync: str,
-    start: float,
-    end: float,
+    start: float | None,
+    end: float | None,
     run_type: str,
     detector: str,
     pose_model: str,
     conf: float,
     object_ref: str | None,
     trial: str | None,
+    segmentation: str | None,
+    refine_hands: bool,
     marker_ids: str | None,
     dictionary: str,
     min_marker_perimeter_rate: float | None,
@@ -165,6 +182,12 @@ def cmd_run(
 
         posetrak -s session.db detect run --type dots --capture <id> --sync <id> \\
             --start 34 --end 100 --dots-camera gopro13_01 --dot-background-mode blacklist
+
+    Person pose sourced from an existing Cutie segmentation instead of YOLO, tied to a trial
+    (--start/--end default to the trial's own range):
+
+        posetrak -s session.db detect run --trial <id> --segmentation <seg_run_id> \\
+            --capture <id> --sync <id>
     """
     session_path: str | None = ctx.obj.get("session")
     if session_path is None:
@@ -178,8 +201,20 @@ def cmd_run(
     try:
         capture_id = resolve_id_prefix(session, "captures", capture)
         sync_id = resolve_id_prefix(session, "sync_configs", sync)
+        trial_id = resolve_id_prefix(session, "trials", trial) if trial else None
     except ValueError as exc:
         fail(str(exc))
+
+    if trial_id is not None:
+        trial_row = session.execute(
+            "SELECT time_start_s, time_end_s FROM trials WHERE id = ?", (trial_id,)
+        ).fetchone()
+        if start is None:
+            start = trial_row["time_start_s"]
+        if end is None:
+            end = trial_row["time_end_s"]
+    if start is None or end is None:
+        fail("--start/--end are required unless --trial supplies them.")
 
     flags = {p.name: p.opts[0] for p in ctx.command.params}
 
@@ -194,7 +229,14 @@ def cmd_run(
     if run_type == "pose":
         reject(_MARKER_OPTIONS + _CODED_OPTIONS + _DOT_OPTIONS + ("dots_camera",),
                "only for --type aruco or dots.")
-        _run_pose_detection(session, capture_id, sync_id, start, end, detector, pose_model, conf)
+        if segmentation is None:
+            reject(("refine_hands",), "only supported with --segmentation.")
+        else:
+            reject(("detector", "conf"), "not used when --segmentation sources bboxes instead of YOLO.")
+        _run_pose_detection(
+            session, session_path, capture_id, sync_id, start, end, detector, pose_model, conf,
+            trial_id=trial_id, segmentation=segmentation, refine_hands=refine_hands,
+        )
         return
 
     reject(_POSE_OPTIONS, "only for --type pose.")
@@ -209,7 +251,6 @@ def cmd_run(
 
     try:
         object_id = _resolve_capture_object(session, capture_id, object_ref) if object_ref else None
-        trial_id = resolve_id_prefix(session, "trials", trial) if trial else None
         ids = [m.strip() for m in marker_ids.split(",") if m.strip()] if marker_ids else []
         if run_type == "aruco" and object_id is None and not ids:
             raise ValueError("--type aruco needs --object, or --marker-ids for a run bound to no object.")
@@ -277,15 +318,31 @@ def cmd_run(
 
 
 def _run_pose_detection(
-    session, capture_id: str, sync_id: str, start: float, end: float,
+    session, session_path: str, capture_id: str, sync_id: str, start: float, end: float,
     detector: str, pose_model: str, conf: float,
+    trial_id: str | None, segmentation: str | None, refine_hands: bool,
 ) -> None:
     """Run person detection and pose estimation; print the run ID to stdout."""
     click.echo(f"Capture:     {capture_id}", err=True)
     click.echo(f"Sync config: {sync_id}", err=True)
     click.echo(f"Time range:  {start:.2f} – {end:.2f} s", err=True)
-    click.echo(f"Detector:    {detector}  (conf={conf})", err=True)
     click.echo(f"Pose model:  {pose_model}", err=True)
+
+    if segmentation is not None:
+        try:
+            seg_run_id = resolve_id_prefix(session, "seg_quality_runs", segmentation)
+        except ValueError as exc:
+            fail(str(exc))
+        click.echo(f"Bbox source: segmentation {seg_run_id}", err=True)
+        click.echo("", err=True)
+        run_id = _run_pose_from_segmentation(
+            session, session_path, capture_id, sync_id, start, end,
+            seg_run_id, pose_model, refine_hands, trial_id,
+        )
+        click.echo(run_id)
+        return
+
+    click.echo(f"Detector:    {detector}  (conf={conf})", err=True)
     click.echo("", err=True)
 
     det = YOLOXDetector(
@@ -314,8 +371,121 @@ def _run_pose_detection(
     result = pipeline.run(on_progress=on_progress)
     click.echo("", err=True)  # newline after progress
 
+    if trial_id is not None:
+        session.execute(
+            "UPDATE detection_runs SET trial_id = ? WHERE id = ?",
+            (trial_id, result.detection_run_id),
+        )
+        session.commit()
+
     # Print the run ID to stdout (bare, machine-readable)
     click.echo(result.detection_run_id)
+
+
+def _run_pose_from_segmentation(
+    session, session_path: str, capture_id: str, sync_id: str, start: float, end: float,
+    seg_run_id: str, pose_model: str, refine_hands: bool, trial_id: str | None,
+) -> str:
+    """Source person bboxes from an existing Cutie segmentation instead of YOLO.
+
+    Reuses the exact PoseWorker/PoseExtractionJob machinery the GUI's
+    CutieInitPanel/RunDetectionDialog already use for this (gap 2,
+    docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md),
+    just driven by a plain per-camera loop instead of JobQueueRunner's
+    QThread-based concurrency -- a CLI run has no progress bar to keep
+    responsive, so the concurrency has nothing to buy here.
+    """
+    from PySide6.QtCore import QCoreApplication
+
+    from app.pose.db_cache import create_detection_run
+    from app.pose.finalise import auto_assign_and_finalise, conf_scale_for_model
+    from app.pose.pose_worker import PoseExtractionJob, PoseWorker
+    from app.setup.db_context import SyncPoint, SyncTable
+    from posetrak.db.manage_person import persons_ordered_for_seg_run
+    from posetrak.detection.backends_rtmpose import _auto_device
+
+    # PoseWorker is a QThread/QObject with Signals -- needs a Qt core loaded
+    # even though .run() below is called directly (synchronously, no actual
+    # thread), same prerequisite the qapp-fixtured unit tests rely on.
+    if QCoreApplication.instance() is None:
+        QCoreApplication([])
+
+    persons_ordered = persons_ordered_for_seg_run(session, seg_run_id)
+
+    run_id = create_detection_run(
+        session, capture_id, sync_id, start, end,
+        detector_model="segmentation", pose_model=pose_model, trial_id=trial_id,
+    )
+
+    # Same global-time -> per-camera-frame conversion DetectionPipeline uses,
+    # so both bbox sources cover identical frames for a given time range.
+    sync_rows = session.execute(
+        "SELECT sp.shot_video_id, sp.video_frame, sp.timestamp_s, sv.actual_fps "
+        "FROM sync_points sp JOIN capture_videos sv ON sv.id = sp.shot_video_id "
+        "WHERE sp.sync_config_id = ? AND sv.shot_id = ?",
+        (sync_id, capture_id),
+    ).fetchall()
+    points = [
+        SyncPoint(camera_instance_id="", shot_video_id=r["shot_video_id"],
+                  video_frame=r["video_frame"], timestamp_s=r["timestamp_s"])
+        for r in sync_rows
+    ]
+    fps_by_video = {r["shot_video_id"]: float(r["actual_fps"]) for r in sync_rows}
+    sync_table = SyncTable(points, fps_by_video)
+
+    cam_rows = session.execute(
+        "SELECT cv.id, cv.file_path, COALESCE(ci.label, cv.camera_instance_id) AS label "
+        "FROM capture_videos cv LEFT JOIN camera_instances ci ON ci.id = cv.camera_instance_id "
+        "WHERE cv.shot_id = ?",
+        (capture_id,),
+    ).fetchall()
+
+    device = _auto_device()
+    n_cams = 0
+    for cam in cam_rows:
+        first = sync_table.lookup(start, cam["id"])
+        last = sync_table.lookup(end, cam["id"])
+        if first is None or last is None:
+            continue
+        job = PoseExtractionJob(
+            job_id=cam["id"][:8],
+            camera_label=cam["label"],
+            shot_video_id=cam["id"],
+            video_path=cam["file_path"],
+            detection_run_id=run_id,
+            seg_quality_run_id=seg_run_id,
+            persons_ordered=persons_ordered,
+            first_frame=max(0, first),
+            last_frame=last,
+            pose_model=pose_model,
+            refine_hands=refine_hands,
+        )
+
+        def on_progress(done: int, total: int, label: str = cam["label"]) -> None:
+            click.echo(f"\r  {label}  {done}/{total} frames", nl=False, err=True)
+
+        worker = PoseWorker(job, db_path=session_path, device=device)
+        worker.progress.connect(on_progress)
+        worker.run()  # direct call, not .start(): synchronous, no real thread needed here
+        click.echo("", err=True)
+        n_cams += 1
+
+    if n_cams == 0:
+        fail("No cameras with sync data for this time range.")
+
+    run_row = session.execute(
+        "SELECT shot_id, sync_config_id, pose_model FROM detection_runs WHERE id=?", (run_id,)
+    ).fetchone()
+    auto_assign_and_finalise(
+        session=session,
+        detection_run_id=run_id,
+        shot_id=run_row["shot_id"],
+        sync_config_id=run_row["sync_config_id"],
+        persons_ordered=persons_ordered,
+        pose_model=run_row["pose_model"],
+        confidence_scale=conf_scale_for_model(run_row["pose_model"]),
+    )
+    return run_id
 
 
 @detect_group.command("import-2d")

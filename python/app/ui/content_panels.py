@@ -2607,6 +2607,10 @@ class _ImageCanvas(QWidget):
         self._joint_xy: dict | None = None    # joint_name → [u, v] full-frame
         self._bone_pairs: list = []
         self._marker_xy = None                 # (N, 2) float32 full-frame
+        self._dot_xy = None                    # (N, 2) float32 full-frame -- raw detected
+                                                # reflective-dot candidates (distinct from
+                                                # marker_xy, which is a tracked/predicted
+                                                # projection, not a raw detection)
         # Visibility flags
         self._show_detected: bool = True
         self._show_tracked: bool = True
@@ -2661,6 +2665,7 @@ class _ImageCanvas(QWidget):
         self._outlier_kp_mask = None
         self._joint_xy = None
         self._marker_xy = None
+        self._dot_xy = None
         self._debug_label = None
         self.update()
 
@@ -2672,6 +2677,7 @@ class _ImageCanvas(QWidget):
         self._outlier_kp_mask = None
         self._joint_xy = None
         self._marker_xy = None
+        self._dot_xy = None
         self._debug_label = None
         self.update()
 
@@ -2692,11 +2698,13 @@ class _ImageCanvas(QWidget):
         show_detected: bool,
         show_tracked: bool,
         outlier_mask=None,
+        dot_xy=None,
     ) -> None:
         self._obs_kp = obs_kp
         self._joint_xy = joint_xy
         self._bone_pairs = bone_pairs
         self._marker_xy = marker_xy
+        self._dot_xy = dot_xy
         self._show_detected = show_detected
         self._show_tracked = show_tracked
         self._outlier_kp_mask = outlier_mask
@@ -3156,6 +3164,23 @@ class _ImageCanvas(QWidget):
                         continue
                     painter.drawEllipse(to_pt(mu, mv), 5.0, 5.0)
 
+            if self._dot_xy is not None:
+                # Raw detected reflective-dot candidates -- small unfilled
+                # cyan circles, distinct from marker_xy's filled yellow
+                # (a tracked/predicted projection, not a raw detection) and
+                # from obs_kp's own detected-keypoint colour, so a candidate
+                # the mask filter or assignment later drops is still visible
+                # here for evaluating detection quality specifically.
+                pen = QPen(QColor(0, 220, 220))
+                pen.setWidthF(1.5)
+                painter.setPen(pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                for i in range(self._dot_xy.shape[0]):
+                    du, dv = float(self._dot_xy[i, 0]), float(self._dot_xy[i, 1])
+                    if isnan(du) or isnan(dv):
+                        continue
+                    painter.drawEllipse(to_pt(du, dv), 4.0, 4.0)
+
         # ---- Edit mode: trail overlay ----
         if self._edit_mode and self._trail is not None:
             trail = self._trail
@@ -3303,10 +3328,11 @@ class _CropCell(QWidget):
         show_detected: bool,
         show_tracked: bool,
         outlier_mask=None,
+        dot_xy=None,
     ) -> None:
         self._canvas.set_overlay(
             obs_kp, joint_xy, bone_pairs, marker_xy, show_detected, show_tracked,
-            outlier_mask=outlier_mask,
+            outlier_mask=outlier_mask, dot_xy=dot_xy,
         )
 
     def set_edit_mode(self, enabled: bool) -> None:
@@ -6665,6 +6691,7 @@ class ObjectCropGridWidget(QWidget):
         self._readers: list = []
         self._cameras: list[dict] = []
         self._obs_kp: dict[str, dict[int, "object"]] = {}
+        self._obs_dots: dict[str, dict[int, "object"]] = {}
         self._current_frame_by_cam: dict[str, int | None] = {}
         self._sync_table: SyncTable | None = None
         self._time_start_s = 0.0
@@ -6760,12 +6787,25 @@ class ObjectCropGridWidget(QWidget):
         self._on_slider_changed(0)
 
     def _load_observations(self) -> None:
-        from app.pose.db_cache import read_observations_with_edits
+        from app.pose.db_cache import decode_dot_candidates, read_observations_with_edits
         for cam in self._cameras:
             cid = cam["camera_instance_id"]
             self._obs_kp[cid] = read_observations_with_edits(
                 self._conn, self._sequence_id, cid, primary_source="markers"
             )
+            # Raw detected reflective-dot candidates, for visual evaluation
+            # of detection quality -- not part of read_observations_with_edits
+            # (dots are anonymous, not named/editable keypoints, and use a
+            # different blob layout; see that function's own docstring).
+            dot_rows = self._conn.execute(
+                "SELECT video_frame, kp_blob FROM pose_observations "
+                "WHERE sequence_id = ? AND camera_instance_id = ? AND source = 'dots'",
+                (self._sequence_id, cid),
+            ).fetchall()
+            self._obs_dots[cid] = {
+                r["video_frame"]: decode_dot_candidates(bytes(r["kp_blob"]))[:, :2]
+                for r in dot_rows
+            }
 
     def _current_time(self) -> float:
         frac = self._slider.value() / max(self._slider.maximum(), 1)
@@ -6786,7 +6826,8 @@ class ObjectCropGridWidget(QWidget):
                 continue
             reader.request(frame_idx)
             kp = self._obs_kp.get(cid, {}).get(frame_idx)
-            cell.set_overlay(kp, None, [], None, True, False)
+            dot_xy = self._obs_dots.get(cid, {}).get(frame_idx)
+            cell.set_overlay(kp, None, [], None, True, False, dot_xy=dot_xy)
 
     def _on_frame_ready(self, cam_id: str, frame_idx: int, frame) -> None:
         import cv2
@@ -6816,7 +6857,8 @@ class ObjectCropGridWidget(QWidget):
             self._conn, self._sequence_id, cam_id, primary_source="markers"
         )
         self._cells[self._cell_index(cam_id)].set_overlay(
-            self._obs_kp[cam_id].get(frame_idx), None, [], None, True, False
+            self._obs_kp[cam_id].get(frame_idx), None, [], None, True, False,
+            dot_xy=self._obs_dots.get(cam_id, {}).get(frame_idx),
         )
 
     def shutdown(self) -> None:

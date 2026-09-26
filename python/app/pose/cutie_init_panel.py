@@ -273,6 +273,13 @@ class CutieInitPanel(QWidget):
         # Populated by _load_run()
         self._cameras: list[dict] = []
         self._seg_run_id: str | None = None
+        # (start_s, end_s) of the existing segmentation self._seg_run_id
+        # names, if any -- like _trial_range_s below, widens the scrubber's
+        # own min/max (see _setup_scrubber_range) so a segmentation being
+        # reopened for review/editing is always fully reachable, even past
+        # whatever narrower range track_first/track_last would otherwise
+        # suggest.
+        self._seg_range_s: tuple[float, float] | None = None
         self._persons: list[str] = []       # person names, index+1 = SAM label
         # Global-time scrubbing (see _local_frame_for docstring): None
         # means no sync config for this capture, falling back to the
@@ -814,12 +821,15 @@ class CutieInitPanel(QWidget):
         ]
 
         seg_row = self._conn.execute(
-            "SELECT id FROM seg_quality_runs "
+            "SELECT id, time_start_s, time_end_s FROM seg_quality_runs "
             "WHERE shot_id = ? ORDER BY created_at DESC LIMIT 1",
             (shot_id,),
         ).fetchone()
+        self._seg_range_s = None
         if seg_row:
             self._seg_run_id = seg_row["id"]
+            if seg_row["time_start_s"] is not None and seg_row["time_end_s"] is not None:
+                self._seg_range_s = (float(seg_row["time_start_s"]), float(seg_row["time_end_s"]))
 
         # Subjects: capture-level performer definitions (can exist before any
         # detection has run -- the real prerequisite for segmentation, not
@@ -939,6 +949,38 @@ class CutieInitPanel(QWidget):
             # fall back to the legacy per-camera domain.
             self._sync_table = None
             return
+
+        # track_first/track_last (above) is only a heuristic default from
+        # whatever pose data happens to already exist for this capture --
+        # it can be narrower than the trial being opened (e.g. a trial's
+        # time range was corrected after detection already ran over the
+        # old range) or than an existing segmentation's own persisted
+        # range. Either one being unreachable on the scrubber makes it
+        # impossible to review or edit the far end of the segmentation, so
+        # widen (never narrow) to cover both -- clamped to the cameras' own
+        # full footage range first, since a segmentation created before
+        # sync was solved carries the 0.0/1e9 "covers everything" sentinel
+        # (see _ensure_seg_run) rather than a real bound.
+        foot_min: float | None = None
+        foot_max: float | None = None
+        for cam in self._cameras:
+            f0 = self._sync_table.frame_to_global_time(cam["first"], cam["id"])
+            f1 = self._sync_table.frame_to_global_time(cam["last"], cam["id"])
+            if f0 is None or f1 is None:
+                continue
+            foot_min = f0 if foot_min is None else min(foot_min, f0)
+            foot_max = f1 if foot_max is None else max(foot_max, f1)
+
+        for extra_range in (self._trial_range_s, self._seg_range_s):
+            if extra_range is None:
+                continue
+            e0, e1 = extra_range
+            if foot_min is not None:
+                e0 = max(e0, foot_min)
+            if foot_max is not None:
+                e1 = min(e1, foot_max)
+            t_min = min(t_min, e0)
+            t_max = max(t_max, e1)
 
         g_min, g_max = self._to_units(t_min), self._to_units(t_max)
         self._scrubber.blockSignals(True)

@@ -28,3 +28,4 @@ markers:
   - {name: ankle_med_R, parent_joint: shin.R, mirror: true}
   - {name: heel_R, parent_joint: foot.R, mirror: true}
   - {name: toe_R, parent_joint: foot.R, mirror: true}
+  - {name: toe_pinky_R, parent_joint: foot.R, mirror: true}

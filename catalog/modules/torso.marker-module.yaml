@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Reflective markers worn on the torso: the slot names, their order and the
+# joint each rides on. Matches the operator's real 2026-09-25 capture marker
+# set (verbal description, not yet cross-checked against detected footage).
+#
+# Back: sacrum on the pelvis, one midline marker on each of spine1 and
+# spine2 (both were bare in the original leg-module-style draft; the real
+# marker set instruments both), and one on the neck (neck_back -- placed on
+# neck1, the segment right after spine2; the operator noted this one is
+# poorly visible on camera, so it may need re-placing or dropping once real
+# detections are checked).
+# Front: ASIS pair on the pelvis, a chest pair on spine2, and a clavicle
+# pair on the shoulder joint (this skeleton's clavicle-equivalent bone,
+# distinct from upper_arm -- see arm.marker-module.yaml's own shoulder_R/L,
+# which rides the upper arm itself and is a different physical marker).
+#
+# Bilateral pairs on hips/spine1/spine2/neck1 are written as two explicit
+# entries rather than `mirror: true`, since that shorthand requires a
+# .R/.L-suffixed parent joint (posetrak/markers/catalog.py) and those joints
+# have none in this skeleton -- only the marker name differs between the two
+# sides, not the joint. The clavicle pair does use `mirror: true`: its own
+# parent joint (shoulder.R/shoulder.L) is properly suffixed.
+module: torso
+requires_topology: reallusion-no-waist
+requires_topology_hash: c962335e1aa10ef711c13f4a082ba1c188f726e9ce20afc0c542ef70a69922fe
+requires_joints: [hips, spine1, spine2, neck1, shoulder]
+
+markers:
+  # Pelvis: front-left, front-right and a back midline marker.
+  - {name: asis_R, parent_joint: hips}
+  - {name: asis_L, parent_joint: hips}
+  - {name: sacrum, parent_joint: hips}
+  # Spine: one back midline marker per segment, plus a front chest pair on
+  # spine2 (spine1 has no front marker -- unreachable/not worn there).
+  - {name: spine1_back, parent_joint: spine1}
+  - {name: spine2_back, parent_joint: spine2}
+  - {name: chest_R, parent_joint: spine2}
+  - {name: chest_L, parent_joint: spine2}
+  # Neck: single back marker.
+  - {name: neck_back, parent_joint: neck1}
+  # Shoulder girdle (clavicle attachment), front.
+  - {name: clavicle_R, parent_joint: shoulder.R, mirror: true}

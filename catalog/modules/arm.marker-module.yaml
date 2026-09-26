@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Reflective markers worn on the arms: the slot names, their order and the
+# joint each rides on. Matches the operator's real 2026-09-25 capture marker
+# set (verbal description, not yet cross-checked against detected footage).
+#
+# Every marker is written for the right side and mirrored to the left
+# (posetrak/markers/catalog.py). shoulder_R is the single marker on top of
+# the shoulder joint itself -- it rides upper_arm (matching the leg module's
+# own hip_R:thigh.R pattern: one marker on an otherwise-bare segment,
+# resolved together with the rest by chain calibration), not the skeleton's
+# separate `shoulder` joint (the clavicle-equivalent bone, instrumented by
+# torso.marker-module.yaml's own clavicle_R/L instead -- a different
+# physical marker near a different bone). The forearm still carries its own
+# well-conditioned rigid cluster (elbow x2 + wrist x2). index_R/pinky_R ride
+# each finger's own first (proximal phalanx) segment -- "first joint" is the
+# MCP joint at its base.
+module: arm
+requires_topology: reallusion-no-waist
+requires_topology_hash: c962335e1aa10ef711c13f4a082ba1c188f726e9ce20afc0c542ef70a69922fe
+requires_joints: [upper_arm, forearm, f_index.01, f_pinky.01]
+
+markers:
+  - {name: shoulder_R, parent_joint: upper_arm.R, mirror: true}
+  - {name: elbow_lat_R, parent_joint: forearm.R, mirror: true}
+  - {name: elbow_med_R, parent_joint: forearm.R, mirror: true}
+  - {name: wrist_rad_R, parent_joint: forearm.R, mirror: true}
+  - {name: wrist_uln_R, parent_joint: forearm.R, mirror: true}
+  - {name: index_R, parent_joint: f_index.01.R, mirror: true}
+  - {name: pinky_R, parent_joint: f_pinky.01.R, mirror: true}

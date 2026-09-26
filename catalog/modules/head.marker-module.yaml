@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Reflective markers worn on the head: the slot names, their order and the
+# joint each rides on. Matches the operator's real 2026-09-25 capture marker
+# set (verbal description, not yet cross-checked against detected footage).
+#
+# One marker at the center of the forehead and one on each temple -- a
+# non-collinear triangle on the single `head` rigid body, same shape as the
+# leg module's foot cluster (heel + toe x2). Written as explicit left/right
+# entries rather than `mirror: true`, since that shorthand requires a
+# .R/.L-suffixed parent joint (posetrak/markers/catalog.py) and `head` has
+# none in this skeleton -- only the marker name differs between the two
+# sides, not the joint.
+module: head
+requires_topology: reallusion-no-waist
+requires_topology_hash: c962335e1aa10ef711c13f4a082ba1c188f726e9ce20afc0c542ef70a69922fe
+requires_joints: [head]
+
+markers:
+  - {name: forehead, parent_joint: head}
+  - {name: temple_R, parent_joint: head}
+  - {name: temple_L, parent_joint: head}

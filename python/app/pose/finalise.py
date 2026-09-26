@@ -6,11 +6,14 @@
 from __future__ import annotations
 
 import sqlite3
+import struct
 from collections import defaultdict
 from dataclasses import dataclass
+from typing import Callable
 
 import json
 
+import cv2
 import numpy as np
 
 from posetrak.db.db import generate_id
@@ -316,10 +319,86 @@ def auto_assign_and_finalise(
     )
 
 
+def _make_dot_mask_filter(
+    session: sqlite3.Connection, seg_run_id: str, dilate_px: float,
+) -> Callable[[str, int, bytes], bytes]:
+    """Build a `_copy_region` blob filter that drops dot candidates falling
+    outside a dilated version of *seg_run_id*'s person silhouette mask for
+    that (camera, frame) -- see `finalise_object_to_db`'s own docstring for
+    the rationale and caveats.
+
+    Coordinates are mapped into the mask's own (possibly downscaled, see
+    `app.pose.pose_worker._load_mask`) resolution rather than resizing the
+    mask up to native resolution per frame -- cheaper, and exact up to the
+    same nearest-neighbor rounding `cv2.resize(..., INTER_NEAREST)` would
+    give, since a dilated label mask is binary either way.
+    """
+    from app.pose.pose_worker import _load_mask
+
+    native_size_cache: dict[str, tuple[int, int] | None] = {}
+    dilated_mask_cache: dict[tuple[str, int], np.ndarray | None] = {}
+
+    def native_size(svid: str) -> tuple[int, int] | None:
+        if svid not in native_size_cache:
+            row = session.execute(
+                "SELECT file_path FROM capture_videos WHERE id = ?", (svid,)
+            ).fetchone()
+            size = None
+            if row is not None:
+                cap = cv2.VideoCapture(row["file_path"])
+                try:
+                    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                finally:
+                    cap.release()
+                if w > 0 and h > 0:
+                    size = (w, h)
+            native_size_cache[svid] = size
+        return native_size_cache[svid]
+
+    def dilated_mask(svid: str, frame_idx: int) -> np.ndarray | None:
+        """Boolean mask, in its own (mask-resolution) shape, or None if no
+        mask or native size is available for this (camera, frame)."""
+        key = (svid, frame_idx)
+        if key not in dilated_mask_cache:
+            result = None
+            mask = _load_mask(session, seg_run_id, svid, frame_idx)
+            size = native_size(svid)
+            if mask is not None and size is not None:
+                fw, _fh = size
+                mh, mw = mask.shape
+                radius = max(1, round(dilate_px * mw / fw))
+                kernel = np.ones((2 * radius + 1, 2 * radius + 1), dtype=np.uint8)
+                result = cv2.dilate((mask > 0).astype(np.uint8), kernel) > 0
+            dilated_mask_cache[key] = result
+        return dilated_mask_cache[key]
+
+    def blob_filter(svid: str, frame_idx: int, blob: bytes) -> bytes:
+        from app.pose.db_cache import decode_dot_candidates
+
+        arr = decode_dot_candidates(blob)
+        if len(arr) == 0:
+            return blob
+        mask = dilated_mask(svid, frame_idx)
+        size = native_size(svid)
+        if mask is None or size is None:
+            return blob  # no mask for this instant -- a "don't know", keep everything
+        fw, fh = size
+        mh, mw = mask.shape
+        mx = np.clip((arr[:, 0] * (mw / fw)).astype(np.int64), 0, mw - 1)
+        my = np.clip((arr[:, 1] * (mh / fh)).astype(np.int64), 0, mh - 1)
+        kept = arr[mask[my, mx]]
+        return struct.pack("<i", len(kept)) + kept.tobytes()
+
+    return blob_filter
+
+
 def finalise_object_to_db(
     session: sqlite3.Connection,
     detection_run_id: str,
     notes: str = "",
+    dot_mask_seg_run_id: str | None = None,
+    dot_mask_dilate_px: float = 150.0,
 ) -> str:
     """Finalise a marker detection run into one `pose_observation_sequence`
     for its tracked object (marker-based-mocap design doc §4.3, §7.1).
@@ -337,6 +416,23 @@ def finalise_object_to_db(
     (`marker_ids`, and the marker body definition's own marker names when
     known) — so the sequence is self-describing without needing to
     re-resolve the marker body definition later.
+
+    Parameters
+    ----------
+    dot_mask_seg_run_id:
+        When given, a `seg_quality_runs` id whose person silhouette masks
+        are used to drop dot candidates that fall well outside a dilated
+        version of it before they are copied into `pose_observations`
+        (see `_make_dot_mask_filter`) — a heuristic aid for a prop held in
+        hand, not a hard geometric constraint. `resolve_dot_assignment()`'s
+        own Mahalanobis gating downstream is still what decides real
+        correctness; this only reduces the background-noise candidate
+        count it has to gate against. A frame with no stored mask for that
+        instant keeps its candidates unfiltered.
+    dot_mask_dilate_px:
+        Dilation radius, in the *native* frame's own pixels, applied to
+        the person silhouette before testing candidates against it — a
+        handheld prop (e.g. a sword) extends well beyond the hand itself.
 
     Raises
     ------
@@ -485,12 +581,17 @@ def finalise_object_to_db(
     ).fetchall()
     camera_by_svid = {r["id"]: r["camera_instance_id"] for r in sv_rows}
 
-    def _copy_region(track_id: int, region_type: str, source: str) -> None:
+    def _copy_region(
+        track_id: int, region_type: str, source: str,
+        blob_filter: Callable[[str, int, bytes], bytes] | None = None,
+    ) -> None:
         """Copy every detection_keypoints row for one (track_id, region_type)
         into pose_observations under the given source -- same call shape
         for 'markers' and 'dots' (dot-assignment-architecture-design.md §3:
         the finalisation copy loop needs no dots-specific code path, just
-        another region_type/source value)."""
+        another region_type/source value). *blob_filter*, when given, gets
+        a chance to replace each row's raw blob before it is copied (used
+        by the dots region's optional mask-based candidate filter)."""
         kp_rows = session.execute(
             "SELECT shot_video_id, video_frame, keypoints, noise_scale FROM detection_keypoints "
             "WHERE detection_run_id = ? AND track_id = ? AND region_type = ? "
@@ -507,12 +608,15 @@ def finalise_object_to_db(
             timestamp_s = sync_table.frame_to_global_time(frame_idx, kp_row["shot_video_id"])
             if timestamp_s is None:
                 continue
+            blob = bytes(kp_row["keypoints"])
+            if blob_filter is not None:
+                blob = blob_filter(kp_row["shot_video_id"], frame_idx, blob)
             obs_rows.append((
                 seq_id, camera_instance_id, frame_idx, timestamp_s,
                 0,  # person_id column, repurposed as "the object" -- always 0, one
                     # subject per sequence (or, for dots, the scene-wide placeholder
                     # SessionReader::load_unlabeled_candidates() ignores anyway)
-                source, detection_run_id, bytes(kp_row["keypoints"]), kp_row["noise_scale"],
+                source, detection_run_id, blob, kp_row["noise_scale"],
             ))
         if obs_rows:
             session.executemany(
@@ -528,7 +632,11 @@ def finalise_object_to_db(
     # present only for a run that had detect_dots_for_cameras enabled for at
     # least one camera (MarkerDetectionPipeline) -- a no-op copy otherwise, since
     # _copy_region's own query simply finds no rows.
-    _copy_region(DOT_TRACK_ID, DOT_REGION_TYPE, "dots")
+    dot_filter = (
+        _make_dot_mask_filter(session, dot_mask_seg_run_id, dot_mask_dilate_px)
+        if dot_mask_seg_run_id is not None else None
+    )
+    _copy_region(DOT_TRACK_ID, DOT_REGION_TYPE, "dots", blob_filter=dot_filter)
 
     session.commit()
     return seq_id

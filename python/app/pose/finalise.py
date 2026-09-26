@@ -336,7 +336,6 @@ def _make_dot_mask_filter(
     from app.pose.pose_worker import _load_mask
 
     native_size_cache: dict[str, tuple[int, int] | None] = {}
-    dilated_mask_cache: dict[tuple[str, int], np.ndarray | None] = {}
 
     def native_size(svid: str) -> tuple[int, int] | None:
         if svid not in native_size_cache:
@@ -358,20 +357,25 @@ def _make_dot_mask_filter(
 
     def dilated_mask(svid: str, frame_idx: int) -> np.ndarray | None:
         """Boolean mask, in its own (mask-resolution) shape, or None if no
-        mask or native size is available for this (camera, frame)."""
-        key = (svid, frame_idx)
-        if key not in dilated_mask_cache:
-            result = None
-            mask = _load_mask(session, seg_run_id, svid, frame_idx)
-            size = native_size(svid)
-            if mask is not None and size is not None:
-                fw, _fh = size
-                mh, mw = mask.shape
-                radius = max(1, round(dilate_px * mw / fw))
-                kernel = np.ones((2 * radius + 1, 2 * radius + 1), dtype=np.uint8)
-                result = cv2.dilate((mask > 0).astype(np.uint8), kernel) > 0
-            dilated_mask_cache[key] = result
-        return dilated_mask_cache[key]
+        mask or native size is available for this (camera, frame).
+
+        Not cached: _copy_region calls this at most once per (svid,
+        frame_idx) already (one detection_keypoints row per key), so a
+        cache would only ever store, never reuse -- pure memory growth,
+        one full mask array retained per frame for the whole finalise call.
+        A long multi-camera run (the sword's ~56s trial, ~27,500 dot rows)
+        is exactly the case where that turned into real gigabytes and got
+        the whole process killed for memory pressure.
+        """
+        mask = _load_mask(session, seg_run_id, svid, frame_idx)
+        size = native_size(svid)
+        if mask is None or size is None:
+            return None
+        fw, _fh = size
+        mh, mw = mask.shape
+        radius = max(1, round(dilate_px * mw / fw))
+        kernel = np.ones((2 * radius + 1, 2 * radius + 1), dtype=np.uint8)
+        return cv2.dilate((mask > 0).astype(np.uint8), kernel) > 0
 
     def blob_filter(svid: str, frame_idx: int, blob: bytes) -> bytes:
         from app.pose.db_cache import decode_dot_candidates

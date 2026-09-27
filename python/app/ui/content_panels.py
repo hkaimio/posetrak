@@ -3138,6 +3138,26 @@ class _ImageCanvas(QWidget):
                     painter.setBrush(QColor(220, 40, 40))   # red
                 painter.drawEllipse(to_pt(kp_x, kp_y), 5.0, 5.0)
 
+        if self._show_detected and self._dot_xy is not None:
+            # Raw detected reflective-dot candidates -- small unfilled
+            # magenta circles. Gated with the other *detected* overlays
+            # (show_detected), not show_tracked: a candidate is a raw
+            # detection, not a tracked/predicted result, and a widget with
+            # no "tracked" concept at all (ObjectCropGridWidget always
+            # passes show_tracked=False) must still be able to show it.
+            # Colour kept distinct from marker_xy's filled yellow below (a
+            # tracked/predicted projection, not a raw detection) and from
+            # the tracked skeleton's own cyan bone lines.
+            pen = QPen(QColor(230, 0, 230))
+            pen.setWidthF(1.5)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for i in range(self._dot_xy.shape[0]):
+                du, dv = float(self._dot_xy[i, 0]), float(self._dot_xy[i, 1])
+                if isnan(du) or isnan(dv):
+                    continue
+                painter.drawEllipse(to_pt(du, dv), 4.0, 4.0)
+
         # ---- Tracked skeleton (cyan lines + yellow dots) ----
         if self._show_tracked:
             if self._joint_xy is not None and self._bone_pairs:
@@ -3163,23 +3183,6 @@ class _ImageCanvas(QWidget):
                     if isnan(mu) or isnan(mv):
                         continue
                     painter.drawEllipse(to_pt(mu, mv), 5.0, 5.0)
-
-            if self._dot_xy is not None:
-                # Raw detected reflective-dot candidates -- small unfilled
-                # cyan circles, distinct from marker_xy's filled yellow
-                # (a tracked/predicted projection, not a raw detection) and
-                # from obs_kp's own detected-keypoint colour, so a candidate
-                # the mask filter or assignment later drops is still visible
-                # here for evaluating detection quality specifically.
-                pen = QPen(QColor(0, 220, 220))
-                pen.setWidthF(1.5)
-                painter.setPen(pen)
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                for i in range(self._dot_xy.shape[0]):
-                    du, dv = float(self._dot_xy[i, 0]), float(self._dot_xy[i, 1])
-                    if isnan(du) or isnan(dv):
-                        continue
-                    painter.drawEllipse(to_pt(du, dv), 4.0, 4.0)
 
         # ---- Edit mode: trail overlay ----
         if self._edit_mode and self._trail is not None:
@@ -3552,14 +3555,31 @@ class _TrackingRunLoader(QThread):
                     outlier_masks.setdefault(cam_id, {})[step] = mask
 
         # State blobs → joint + marker projections via FK, both from the same
-        # posterior (corrected) state.
+        # posterior (corrected) state. Prefer the RTS-smoothed state (uses
+        # future information too, strictly the better final estimate) over
+        # the forward-pass-only one -- falling back to unsmoothed only for a
+        # run made with --no-smooth, which never gets is_smoothed=1 rows at
+        # all. This is the tracked overlay a person reviews to judge fit
+        # quality; showing them the pre-smoothing estimate instead of the
+        # tracker's own final answer was never intentional (nothing here
+        # ever meant "unsmoothed" specifically -- see the diagnostic-metric
+        # queries elsewhere in this file, which correctly stay on
+        # is_smoothed=0 since NIS/inlier-count/condition-number describe the
+        # forward filter's own per-step update and aren't recomputed by
+        # smoothing at all).
         joint_proj: dict[str, dict[int, dict]] = {}
         marker_proj: dict[str, dict[int, object]] = {}
         state_rows = conn.execute(
             "SELECT tracker_step, state FROM tracking_results "
-            "WHERE run_id=? AND person_id=0 AND is_smoothed=0 ORDER BY tracker_step",
+            "WHERE run_id=? AND person_id=0 AND is_smoothed=1 ORDER BY tracker_step",
             (run_id,),
         ).fetchall()
+        if not state_rows:
+            state_rows = conn.execute(
+                "SELECT tracker_step, state FROM tracking_results "
+                "WHERE run_id=? AND person_id=0 AND is_smoothed=0 ORDER BY tracker_step",
+                (run_id,),
+            ).fetchall()
         for state_row in state_rows:
             step = state_row["tracker_step"]
             try:

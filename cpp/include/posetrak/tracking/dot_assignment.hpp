@@ -35,6 +35,7 @@
 #include "posetrak/core/observation.hpp"
 #include "posetrak/db/session_reader.hpp"
 #include "posetrak/tracking/marker_prediction.hpp"
+#include "posetrak/tracking/seg_mask.hpp"
 #include "posetrak/tracking/streak_k_accumulator.hpp"
 #include "posetrak/tracking/tracker.hpp"
 #include <cstdint>
@@ -113,6 +114,35 @@ using SlotEvidence = std::unordered_map<
 /// from the calibrated cameras (the pure core never touches a Camera object) --
 /// see build_camera_fundamentals(). Empty when corroboration is off.
 using CameraPairFundamental = std::unordered_map<std::int64_t, Eigen::Matrix3d>;
+
+/// @brief One dot-bearing subject's segmentation identity -- see
+/// segmentation-mask-dot-assignment-design.md §6. seg_run_id and mask_label
+/// are per-subject and supplied at track-invocation time (never persisted in
+/// tracker_configs, unlike the shared tunables on TrackerConfig below): which
+/// segmentation applies to a subject, and which of its labels is that
+/// subject's own, are not settings every subject sharing a solve must agree
+/// on the way dot_tracklet_gate_multiplier must (find_dot_config_disagreement()).
+/// A default-constructed value (mask_label=0) disables segmentation masking
+/// for that subject entirely -- the modifier treats label<=0 as "no
+/// segmentation configured", the same convention seg_masks.mask_blob itself
+/// uses for background.
+struct SegMaskSubjectConfig {
+    std::string seg_run_id;  ///< seg_quality_runs.id; informational/provenance only in C++.
+    int mask_label = 0;      ///< This subject's own label (1..N) within that seg_run's masks.
+};
+
+/// @brief Per (subject_id, camera_id, tracklet_id), a running in-mask-fraction
+/// estimate -- see TrackletMaskAccumulator (seg_mask.hpp). Subject-scoped
+/// (not just camera/tracklet) because "in-mask fraction" is only meaningful
+/// relative to one particular subject's own label: a tracklet correctly on
+/// subject A but briefly considered for subject B's slot must not have its
+/// A-relative trust history contaminated by a B-relative score (design doc
+/// §5.1). Owned by the caller across steps (mirrors StreakKAccumulator's own
+/// caller-owned-state precedent) -- resolve_dot_assignment() only reads and
+/// updates it through the pointer in DotAssignmentContext.
+using TrackletMaskState =
+    std::unordered_map<int,
+                       std::unordered_map<int, std::unordered_map<int, TrackletMaskAccumulator>>>;
 
 /// @brief One subject's resolved dot observations for this frame -- the
 /// per-subject share of resolve_dot_assignment()'s / resolve_shared_dot_assignment()'s
@@ -208,6 +238,51 @@ struct DotAssignmentContext {
     /// differently once assigned). A camera absent from the map, or the map being
     /// empty, is a 1.0 no-op.
     std::unordered_map<int, double> dot_camera_noise_scale;
+
+    /// @brief Segmentation-mask-based trust for the shared dot-assignment
+    /// phase (segmentation-mask-dot-assignment-design.md). Shared tunables
+    /// (must agree across subjects, same convention as
+    /// dot_tracklet_gate_multiplier); per-subject identity
+    /// (seg_mask_subject) and per-frame decoded masks (seg_masks_by_camera)
+    /// do not have to agree and are not TrackerConfig fields -- see
+    /// SegMaskSubjectConfig's own doc comment.
+    bool dot_seg_mask_enabled = false;
+    /// Search radius, in native pixels, for SegmentationMaskModifier's
+    /// current-frame membership test (mask_label_present_near's dilate_px).
+    double dot_seg_mask_dilate_px = 20.0;
+    /// Rolling per-tracklet window (TrackletMaskAccumulator), in frames.
+    int dot_seg_mask_tracklet_window = 60;
+    /// Below this in-mask fraction, a tracklet that also fails the current-frame
+    /// test is excluded outright (both signs must agree -- see
+    /// SegmentationMaskModifier's own doc comment).
+    double dot_seg_mask_min_tracklet_fraction = 0.3;
+    /// Soft-penalty ceiling: a tracklet with a zero in-mask fraction (but not
+    /// hard-excluded) has its cost multiplied by up to this factor; a
+    /// tracklet with fraction 1.0 is never penalised (factor 1.0). 1.0 is a
+    /// no-op (matches every other cost-modifier multiplier's convention).
+    double dot_seg_mask_cost_scale_at_zero_fraction = 4.0;
+
+    /// Per-subject segmentation identity -- see SegMaskSubjectConfig. A
+    /// subject absent from the map (or present with mask_label<=0) has
+    /// segmentation masking disabled regardless of dot_seg_mask_enabled.
+    std::unordered_map<int, SegMaskSubjectConfig> seg_mask_subject;
+    /// This frame's already-decoded masks, keyed by camera_id. A camera
+    /// absent from the map means "no mask for this (camera, frame)" -- the
+    /// same "don't know, keep everything" no-penalty treatment
+    /// _make_dot_mask_filter already gives a missing seg_masks row.
+    std::unordered_map<int, DecodedSegMask> seg_masks_by_camera;
+    /// Caller-owned running per-tracklet trust state (TrackletMaskState),
+    /// updated in place by resolve_dot_assignment() as candidates resolve.
+    /// nullptr (the default) disables SegmentationMaskModifier entirely: with
+    /// no history to check, every candidate is treated as fully trusted
+    /// (fraction 1.0), and the hard-exclude condition requires *both* the
+    /// current-frame test to fail *and* a low tracklet fraction, so a
+    /// history-less candidate can never be excluded or penalised on the
+    /// current-frame test alone -- see SegmentationMaskModifier's own doc
+    /// comment for why (the same "don't punish a brand-new tracklet before
+    /// it has a track record" reasoning that keeps a single bad frame from
+    /// excluding an established one).
+    TrackletMaskState* tracklet_mask_state = nullptr;
 };
 
 /// @brief One (subject, camera, marker) slot as a cost modifier sees it.
@@ -345,6 +420,49 @@ class CrossViewCorroborationModifier final : public CostModifier {
     const char* name() const override { return "cross_view_corroboration"; }
 };
 
+/// @brief Penalises a (candidate, slot) pair whose candidate's current-frame
+/// position or recent tracklet history falls outside *the slot's own
+/// subject's* label in the segmentation mask -- see
+/// segmentation-mask-dot-assignment-design.md §3/§5.1.
+///
+/// Two independent checks, both against
+/// context.seg_mask_subject[slot.subject_id]:
+///  - this frame's candidate position (context.seg_masks_by_camera[slot.camera_id],
+///    mask_label_present_near() with context.dot_seg_mask_dilate_px) -- a
+///    "hard now" signal, and, because it is tested against *this slot's*
+///    subject label specifically rather than "any subject's" label, the
+///    thing that lets this modifier arbitrate between two subjects
+///    competing for the same shared candidate pool, not only between "the
+///    scene" and "off-scene";
+///  - the candidate's tracklet's running in-mask fraction *for this subject*
+///    (context.tracklet_mask_state) -- a "soft, over time" signal, built for
+///    the case a single frame's segmentation is wrong or a reflective dot is
+///    briefly outside a strict silhouette during fast motion, where the
+///    current-frame test alone would wrongly reject a real detection.
+///
+/// A pair is excluded outright only when a mask exists for this (camera,
+/// frame), the current-frame test fails, AND the tracklet's own fraction is
+/// below dot_seg_mask_min_tracklet_fraction -- both signs must agree.
+/// Otherwise the pair's cost is scaled by a factor derived from the tracklet
+/// fraction alone (1.0, no penalty, at fraction 1.0; up to
+/// dot_seg_mask_cost_scale_at_zero_fraction at fraction 0.0) -- a soft push
+/// away from a since-questionable tracklet that never makes a good candidate
+/// mathematically unreachable on one bad frame. A candidate with no tracklet
+/// history yet (new, or tracklet_mask_state is nullptr) defaults to fraction
+/// 1.0 (fully trusted) -- it can never be hard-excluded on the current-frame
+/// test alone, matching this modifier's whole "sustained bad history, not
+/// one bad frame" design intent.
+///
+/// A no-op for a subject absent from context.seg_mask_subject (or present
+/// with mask_label<=0) -- every existing single-subject caller with no
+/// segmentation configured is unaffected.
+class SegmentationMaskModifier final : public CostModifier {
+   public:
+    CostSupport apply(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
+                      DotAssignmentContext const& context) const override;
+    const char* name() const override { return "segmentation_mask"; }
+};
+
 /// @brief The modifiers a context asks for, in the order they apply: tracklet
 /// continuity (only when its multiplier is above 1 and there are previous
 /// tracklet ids), then candidate ownership, then cross-view corroboration
@@ -452,6 +570,10 @@ struct DotAssignmentSubject {
     /// (design doc §5.2: every subject predicts first, in a separate pass
     /// the caller drives, before this function runs).
     Tracker* tracker;
+    /// This subject's segmentation identity (SegMaskSubjectConfig), if any --
+    /// default-constructed (mask_label=0) means segmentation masking is
+    /// disabled for this subject regardless of config.dot_seg_mask_enabled.
+    SegMaskSubjectConfig seg_mask;
 };
 
 /// @brief Merges one subject's candidates into the shared pool of a camera.
@@ -524,9 +646,21 @@ std::string find_dot_config_disagreement(std::vector<TrackerConfig const*> const
 ///       itself (not a case this round's real captures produce).
 /// @param trace Optional decision-trace sink, forwarded unchanged to
 ///        resolve_dot_assignment() -- see that function and AssignmentTrace.
+/// @param seg_masks_by_camera This frame's already-decoded segmentation
+///        masks, forwarded unchanged into DotAssignmentContext::seg_masks_by_camera
+///        -- reading and decoding the raw seg_masks row is DB work the caller
+///        (cpp/cli/track.cpp) does, same division of labour as candidates_by_camera
+///        itself. Empty (the default) is the correct value for a caller with
+///        no segmentation configured, or on a step no mask was decoded for.
+/// @param tracklet_mask_state Caller-owned running per-tracklet trust state,
+///        forwarded unchanged to DotAssignmentContext::tracklet_mask_state.
+///        nullptr (the default) disables the tracklet-history signal -- see
+///        that field's own doc comment.
 std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     std::vector<DotAssignmentSubject> const& subjects,
     std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
-    TrackerConfig const& config, int frame_idx, double timestamp, AssignmentTrace* trace = nullptr);
+    TrackerConfig const& config, int frame_idx, double timestamp, AssignmentTrace* trace = nullptr,
+    std::unordered_map<int, DecodedSegMask> const& seg_masks_by_camera = {},
+    TrackletMaskState* tracklet_mask_state = nullptr);
 
 }  // namespace posetrak

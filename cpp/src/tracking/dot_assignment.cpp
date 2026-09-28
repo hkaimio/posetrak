@@ -128,6 +128,53 @@ CostSupport CrossViewCorroborationModifier::apply(DotSlotRef const& slot,
     return {context.dot_corroboration_gate_multiplier, false};
 }
 
+namespace {
+// Shared by SegmentationMaskModifier::apply() and the winning-pair accumulator
+// update below: this candidate's running in-mask fraction for *slot*'s
+// subject, or 1.0 (fully trusted) if there's no history yet -- see
+// SegmentationMaskModifier's own doc comment for why "no history" must not
+// read as "untrusted".
+double tracklet_mask_fraction(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
+                              DotAssignmentContext const& context) {
+    if (candidate.tracklet_id < 0 || context.tracklet_mask_state == nullptr)
+        return 1.0;
+    auto const subject_it = context.tracklet_mask_state->find(slot.subject_id);
+    if (subject_it == context.tracklet_mask_state->end())
+        return 1.0;
+    auto const camera_it = subject_it->second.find(slot.camera_id);
+    if (camera_it == subject_it->second.end())
+        return 1.0;
+    auto const tracklet_it = camera_it->second.find(candidate.tracklet_id);
+    if (tracklet_it == camera_it->second.end())
+        return 1.0;
+    auto const frac = tracklet_it->second.fraction(1);
+    return frac.value_or(1.0);
+}
+}  // namespace
+
+CostSupport SegmentationMaskModifier::apply(DotSlotRef const& slot,
+                                            UnlabeledCandidate const& candidate,
+                                            DotAssignmentContext const& context) const {
+    auto const subject_it = context.seg_mask_subject.find(slot.subject_id);
+    if (subject_it == context.seg_mask_subject.end() || subject_it->second.mask_label <= 0)
+        return {};
+
+    double const fraction = tracklet_mask_fraction(slot, candidate, context);
+
+    auto const mask_it = context.seg_masks_by_camera.find(slot.camera_id);
+    if (mask_it != context.seg_masks_by_camera.end()) {
+        bool const in_mask_now =
+            mask_label_present_near(mask_it->second, candidate.position_distorted,
+                                    subject_it->second.mask_label, context.dot_seg_mask_dilate_px);
+        if (!in_mask_now && fraction < context.dot_seg_mask_min_tracklet_fraction)
+            return {1.0, true};
+    }
+
+    double const scale = context.dot_seg_mask_cost_scale_at_zero_fraction;
+    double const factor = 1.0 / (1.0 + (scale - 1.0) * (1.0 - fraction));
+    return {factor, false};
+}
+
 std::vector<std::unique_ptr<CostModifier>>
 default_cost_modifiers(DotAssignmentContext const& context) {
     std::vector<std::unique_ptr<CostModifier>> modifiers;
@@ -139,6 +186,9 @@ default_cost_modifiers(DotAssignmentContext const& context) {
         modifiers.push_back(std::make_unique<CrossViewCorroborationModifier>());
     if (context.dot_reacquire_gap_frames > 0)
         modifiers.push_back(std::make_unique<ReacquisitionGateModifier>());
+    if (context.dot_seg_mask_enabled && !context.seg_mask_subject.empty() &&
+        context.tracklet_mask_state != nullptr)
+        modifiers.push_back(std::make_unique<SegmentationMaskModifier>());
     return modifiers;
 }
 
@@ -371,6 +421,30 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
             obs.position_distorted = cand.position_distorted;
             obs.confidence = cand.confidence;
             obs.tracklet_id = cand.tracklet_id;
+
+            // Segmentation-mask trust bookkeeping (segmentation-mask-dot-assignment-
+            // design.md §3): record whether the candidate that actually won this
+            // slot was inside its subject's own mask label this frame, so a later
+            // step's SegmentationMaskModifier can read this tracklet's *recent*
+            // trustworthiness. Updated for the winning pair only -- a losing
+            // candidate's position says nothing about which subject, if any, it
+            // truly belongs to. Silently skipped (not a std::optional early-return)
+            // when segmentation isn't configured, no mask decoded this frame, or the
+            // candidate has no tracklet id to key the accumulator by.
+            if (context.tracklet_mask_state != nullptr && cand.tracklet_id >= 0) {
+                auto const seg_it = context.seg_mask_subject.find(col.subject_id);
+                if (seg_it != context.seg_mask_subject.end() && seg_it->second.mask_label > 0) {
+                    auto const mask_it = context.seg_masks_by_camera.find(camera_id);
+                    if (mask_it != context.seg_masks_by_camera.end()) {
+                        bool const in_mask = mask_label_present_near(
+                            mask_it->second, cand.position_distorted, seg_it->second.mask_label,
+                            context.dot_seg_mask_dilate_px);
+                        (*context.tracklet_mask_state)[col.subject_id][camera_id][cand.tracklet_id]
+                            .add(in_mask, context.dot_seg_mask_tracklet_window);
+                    }
+                }
+            }
+
             // Same reasoning as the ArUco corner and dot-detector write paths'
             // own noise_scale=0.0 convention: a dot candidate's centroid comes
             // from thresholding the full-resolution frame directly, not a
@@ -521,6 +595,11 @@ std::string find_dot_config_disagreement(std::vector<TrackerConfig const*> const
         POSETRAK_CHECK_DOT_FIELD(dot_cross_view_corroboration_px)
         POSETRAK_CHECK_DOT_FIELD(dot_corroboration_gate_multiplier)
         POSETRAK_CHECK_DOT_FIELD(dot_camera_noise_scale)
+        POSETRAK_CHECK_DOT_FIELD(dot_seg_mask_enabled)
+        POSETRAK_CHECK_DOT_FIELD(dot_seg_mask_dilate_px)
+        POSETRAK_CHECK_DOT_FIELD(dot_seg_mask_tracklet_window)
+        POSETRAK_CHECK_DOT_FIELD(dot_seg_mask_min_tracklet_fraction)
+        POSETRAK_CHECK_DOT_FIELD(dot_seg_mask_cost_scale_at_zero_fraction)
 #undef POSETRAK_CHECK_DOT_FIELD
     }
     return {};
@@ -529,12 +608,19 @@ std::string find_dot_config_disagreement(std::vector<TrackerConfig const*> const
 std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     std::vector<DotAssignmentSubject> const& subjects,
     std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
-    TrackerConfig const& config, int frame_idx, double timestamp, AssignmentTrace* trace) {
+    TrackerConfig const& config, int frame_idx, double timestamp, AssignmentTrace* trace,
+    std::unordered_map<int, DecodedSegMask> const& seg_masks_by_camera,
+    TrackletMaskState* tracklet_mask_state) {
     std::vector<SubjectDotPredictions> predictions;
     predictions.reserve(subjects.size());
     PrevDotPositions prev_positions;
     PrevDotTrackletIds prev_tracklet_ids;
     PrevDotResolvedFrame prev_resolved_frame;
+    std::unordered_map<int, SegMaskSubjectConfig> seg_mask_subject;
+    for (auto const& subject : subjects) {
+        if (subject.seg_mask.mask_label > 0)
+            seg_mask_subject[subject.subject_id] = subject.seg_mask;
+    }
     // Cameras with at least one candidate this step -- computed once, shared
     // by every subject, rather than re-filtered inside each subject's own
     // loop.
@@ -590,6 +676,15 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     context.dot_cross_view_corroboration_px = config.dot_cross_view_corroboration_px;
     context.dot_corroboration_gate_multiplier = config.dot_corroboration_gate_multiplier;
     context.dot_camera_noise_scale = config.dot_camera_noise_scale;
+    context.dot_seg_mask_enabled = config.dot_seg_mask_enabled;
+    context.dot_seg_mask_dilate_px = config.dot_seg_mask_dilate_px;
+    context.dot_seg_mask_tracklet_window = config.dot_seg_mask_tracklet_window;
+    context.dot_seg_mask_min_tracklet_fraction = config.dot_seg_mask_min_tracklet_fraction;
+    context.dot_seg_mask_cost_scale_at_zero_fraction =
+        config.dot_seg_mask_cost_scale_at_zero_fraction;
+    context.seg_mask_subject = std::move(seg_mask_subject);
+    context.seg_masks_by_camera = seg_masks_by_camera;
+    context.tracklet_mask_state = tracklet_mask_state;
     // Fundamental matrices are pure geometry from the calibrated cameras, so any
     // subject's own Tracker gives the same answer -- same "first subject" precedent
     // as streak_k_state above (every dot-bearing subject here is assumed built

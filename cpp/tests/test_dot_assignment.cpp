@@ -878,6 +878,15 @@ TEST_CASE("find_dot_config_disagreement: names the first setting that differs",
     b = a;
     b.outlier_threshold = a.outlier_threshold + 1.0;
     REQUIRE(find_dot_config_disagreement({&a, &b}).empty());
+
+    b = a;
+    b.dot_seg_mask_enabled = !a.dot_seg_mask_enabled;
+    REQUIRE(find_dot_config_disagreement({&a, &b}) == "dot_seg_mask_enabled");
+
+    // Per-subject identity (which seg_run, which label) is NOT a TrackerConfig
+    // field -- it legitimately differs between subjects sharing one solve
+    // (segmentation-mask-dot-assignment-design.md §5.1), unlike every field
+    // checked above.
 }
 
 TEST_CASE("resolve_shared_dot_assignment: a subject cannot claim a candidate it does not own",
@@ -1402,4 +1411,227 @@ TEST_CASE("resolve_dot_assignment: a null trace pointer behaves exactly like no 
     auto result = resolve_dot_assignment({subject}, candidates, make_context());
 
     REQUIRE(result.at(0).resolved.size() == 1);
+}
+
+// ---------------------------------------------------------------------------
+// SegmentationMaskModifier (segmentation-mask-dot-assignment-design.md)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// A tiny hand-built mask: every pixel *outside* [x0,x1]x[y0,y1] is
+/// background (0), every pixel inside is *label*. native == mask resolution
+/// (no downscale), which keeps dilate_px arithmetic trivial in these tests.
+DecodedSegMask make_mask(int w, int h, int x0, int y0, int x1, int y1, int label) {
+    DecodedSegMask mask;
+    mask.mask_w = w;
+    mask.mask_h = h;
+    mask.native_w = w;
+    mask.native_h = h;
+    mask.labels.assign(static_cast<size_t>(w) * h, 0);
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            mask.labels[static_cast<size_t>(y) * w + x] = static_cast<std::uint8_t>(label);
+        }
+    }
+    return mask;
+}
+
+DotSlotRef make_slot(int subject_id, int camera_id, int marker_id, MarkerPrediction const& pred) {
+    return DotSlotRef{subject_id, camera_id, marker_id, &pred};
+}
+
+}  // namespace
+
+TEST_CASE("SegmentationMaskModifier: no-op when the subject has no segmentation configured",
+          "[dot_assignment][seg_mask]") {
+    DotAssignmentContext context = make_context();
+    context.dot_seg_mask_min_tracklet_fraction = 0.3;
+    // seg_mask_subject deliberately left empty.
+    auto pred = make_prediction(0.0, 0.0);
+    UnlabeledCandidate cand = make_candidate(0, 500.0, 500.0);  // wildly off any real mask
+    cand.tracklet_id = 1;
+
+    SegmentationMaskModifier modifier;
+    CostSupport support = modifier.apply(make_slot(0, 0, 7, pred), cand, context);
+    REQUIRE_FALSE(support.exclude);
+    REQUIRE(support.factor == Catch::Approx(1.0));
+}
+
+TEST_CASE("SegmentationMaskModifier: mask_label<=0 for a configured subject is also a no-op",
+          "[dot_assignment][seg_mask]") {
+    DotAssignmentContext context = make_context();
+    context.seg_mask_subject[0] = SegMaskSubjectConfig{"seg-run", 0};  // label 0 = disabled
+    auto pred = make_prediction(0.0, 0.0);
+    UnlabeledCandidate cand = make_candidate(0, 500.0, 500.0);
+
+    SegmentationMaskModifier modifier;
+    CostSupport support = modifier.apply(make_slot(0, 0, 7, pred), cand, context);
+    REQUIRE_FALSE(support.exclude);
+    REQUIRE(support.factor == Catch::Approx(1.0));
+}
+
+TEST_CASE(
+    "SegmentationMaskModifier: a brand-new candidate (no tracklet history) is never "
+    "excluded, even off-mask",
+    "[dot_assignment][seg_mask]") {
+    DotAssignmentContext context = make_context();
+    context.seg_mask_subject[0] = SegMaskSubjectConfig{"seg-run", 1};
+    context.dot_seg_mask_min_tracklet_fraction = 0.9;  // strict -- would exclude if it applied
+    context.seg_masks_by_camera[0] = make_mask(100, 100, 10, 10, 20, 20, /*label=*/1);
+    TrackletMaskState state;  // empty: no history for any tracklet yet
+    context.tracklet_mask_state = &state;
+
+    // Well outside the label-1 region above.
+    UnlabeledCandidate cand = make_candidate(0, 90.0, 90.0);
+    cand.tracklet_id = 7;
+    auto pred = make_prediction(0.0, 0.0);
+
+    SegmentationMaskModifier modifier;
+    CostSupport support = modifier.apply(make_slot(0, 0, 7, pred), cand, context);
+    REQUIRE_FALSE(support.exclude);
+    REQUIRE(support.factor == Catch::Approx(1.0));
+}
+
+TEST_CASE("SegmentationMaskModifier: excludes only when off-mask now AND tracklet fraction is low",
+          "[dot_assignment][seg_mask]") {
+    DotAssignmentContext context = make_context();
+    context.seg_mask_subject[0] = SegMaskSubjectConfig{"seg-run", 1};
+    context.dot_seg_mask_min_tracklet_fraction = 0.3;
+    context.dot_seg_mask_dilate_px = 0.0;
+    context.seg_masks_by_camera[0] = make_mask(100, 100, 10, 10, 20, 20, /*label=*/1);
+
+    TrackletMaskState state;
+    // Tracklet 7's history: mostly out of mask (fraction well below 0.3).
+    for (int i = 0; i < 10; ++i)
+        state[0][0][7].add(false, 60);
+    context.tracklet_mask_state = &state;
+
+    auto pred = make_prediction(0.0, 0.0);
+    SegmentationMaskModifier modifier;
+
+    // Off-mask now AND bad history -> excluded.
+    UnlabeledCandidate off_mask_cand = make_candidate(0, 90.0, 90.0);
+    off_mask_cand.tracklet_id = 7;
+    CostSupport off_support = modifier.apply(make_slot(0, 0, 7, pred), off_mask_cand, context);
+    REQUIRE(off_support.exclude);
+
+    // Same bad-history tracklet, but this particular candidate IS in-mask now --
+    // signs disagree, so not excluded (still soft-penalised, see next test).
+    UnlabeledCandidate in_mask_cand = make_candidate(0, 15.0, 15.0);
+    in_mask_cand.tracklet_id = 7;
+    CostSupport in_support = modifier.apply(make_slot(0, 0, 7, pred), in_mask_cand, context);
+    REQUIRE_FALSE(in_support.exclude);
+}
+
+TEST_CASE(
+    "SegmentationMaskModifier: soft-scales cost by the tracklet fraction, up to the "
+    "configured ceiling",
+    "[dot_assignment][seg_mask]") {
+    DotAssignmentContext context = make_context();
+    context.seg_mask_subject[0] = SegMaskSubjectConfig{"seg-run", 1};
+    context.dot_seg_mask_cost_scale_at_zero_fraction = 4.0;
+    // No mask decoded this frame -- only the soft signal is exercised.
+    TrackletMaskState state;
+    for (int i = 0; i < 10; ++i)
+        state[0][0][7].add(false, 60);  // fraction 0.0
+    context.tracklet_mask_state = &state;
+
+    UnlabeledCandidate cand = make_candidate(0, 1.0, 1.0);
+    cand.tracklet_id = 7;
+    auto pred = make_prediction(0.0, 0.0);
+
+    SegmentationMaskModifier modifier;
+    CostSupport support = modifier.apply(make_slot(0, 0, 7, pred), cand, context);
+    REQUIRE_FALSE(support.exclude);  // no mask this frame -> hard-exclude never triggers
+    // factor = 1 / (1 + (scale-1)*(1-fraction)) = 1/(1 + 3*1) = 0.25 -> cost *= 4.
+    REQUIRE(support.factor == Catch::Approx(0.25));
+}
+
+TEST_CASE("SegmentationMaskModifier: a fully-trusted tracklet (fraction 1.0) is never penalised",
+          "[dot_assignment][seg_mask]") {
+    DotAssignmentContext context = make_context();
+    context.seg_mask_subject[0] = SegMaskSubjectConfig{"seg-run", 1};
+    TrackletMaskState state;
+    for (int i = 0; i < 10; ++i)
+        state[0][0][7].add(true, 60);  // fraction 1.0
+    context.tracklet_mask_state = &state;
+
+    UnlabeledCandidate cand = make_candidate(0, 1.0, 1.0);
+    cand.tracklet_id = 7;
+    auto pred = make_prediction(0.0, 0.0);
+
+    SegmentationMaskModifier modifier;
+    CostSupport support = modifier.apply(make_slot(0, 0, 7, pred), cand, context);
+    REQUIRE_FALSE(support.exclude);
+    REQUIRE(support.factor == Catch::Approx(1.0));
+}
+
+TEST_CASE(
+    "resolve_dot_assignment: an established bad tracklet loses to a fresh candidate "
+    "outside its mask",
+    "[dot_assignment][seg_mask]") {
+    // End-to-end: a wrong-lock tracklet (7) with a degraded in-mask history competes
+    // against a fresh candidate for the same slot; both are within the assignment
+    // gate of the prediction, but only the wrong-lock one is off-mask with a bad
+    // history, so the solver should still pick it *unless* SegmentationMaskModifier's
+    // exclusion removes it from contention -- this is the actual sword-swing failure
+    // mode (segmentation-mask-dot-assignment-design.md, intro) reproduced minimally.
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 100.0, /*std=*/20.0);
+
+    UnlabeledCandidate wrong_lock = make_candidate(0, 90.0, 90.0);  // closer to the prediction
+    wrong_lock.tracklet_id = 7;
+    UnlabeledCandidate fresh = make_candidate(0, 115.0, 100.0);  // farther, but well inside mask
+    fresh.tracklet_id = 8;
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {wrong_lock, fresh};
+
+    DotAssignmentContext context = make_context();
+    context.dot_seg_mask_enabled = true;
+    context.seg_mask_subject[0] = SegMaskSubjectConfig{"seg-run", 1};
+    context.dot_seg_mask_min_tracklet_fraction = 0.3;
+    context.dot_seg_mask_dilate_px = 0.0;
+    // Mask covers the region around (115,100) but not (90,90).
+    context.seg_masks_by_camera[0] = make_mask(200, 200, 105, 90, 125, 110, /*label=*/1);
+
+    TrackletMaskState state;
+    for (int i = 0; i < 10; ++i)
+        state[0][0][7].add(false, 60);  // tracklet 7's bad history
+    context.tracklet_mask_state = &state;
+
+    auto result = resolve_dot_assignment({subject}, candidates, context);
+
+    REQUIRE(result.count(0) == 1);
+    REQUIRE(result.at(0).resolved.size() == 1);
+    REQUIRE(result.at(0).resolved[0].tracklet_id == 8);
+}
+
+TEST_CASE("resolve_dot_assignment: updates the winning candidate's tracklet mask history",
+          "[dot_assignment][seg_mask]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(15.0, 15.0);
+
+    UnlabeledCandidate cand = make_candidate(0, 15.0, 15.0);  // inside the mask below
+    cand.tracklet_id = 42;
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {cand};
+
+    DotAssignmentContext context = make_context();
+    context.dot_seg_mask_enabled = true;
+    context.seg_mask_subject[0] = SegMaskSubjectConfig{"seg-run", 1};
+    context.seg_masks_by_camera[0] = make_mask(100, 100, 10, 10, 20, 20, /*label=*/1);
+    TrackletMaskState state;
+    context.tracklet_mask_state = &state;
+
+    auto result = resolve_dot_assignment({subject}, candidates, context);
+    REQUIRE(result.at(0).resolved.size() == 1);
+
+    auto frac = state[0][0][42].fraction(1);
+    REQUIRE(frac.has_value());
+    REQUIRE(*frac == Catch::Approx(1.0));  // the winning candidate was inside the mask
 }

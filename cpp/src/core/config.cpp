@@ -91,6 +91,13 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
                     result.dot_camera_noise_scale[std::stoi(std::string(key.str()))] = *v;
             }
         }
+        result.dot_seg_mask_enabled = tracking["dot_seg_mask_enabled"].value_or(false);
+        result.dot_seg_mask_dilate_px = tracking["dot_seg_mask_dilate_px"].value_or(20.0);
+        result.dot_seg_mask_tracklet_window = tracking["dot_seg_mask_tracklet_window"].value_or(60);
+        result.dot_seg_mask_min_tracklet_fraction =
+            tracking["dot_seg_mask_min_tracklet_fraction"].value_or(0.3);
+        result.dot_seg_mask_cost_scale_at_zero_fraction =
+            tracking["dot_seg_mask_cost_scale_at_zero_fraction"].value_or(4.0);
         if (auto vel_cams = tracking["velocity_mode_camera_ids"].as_array()) {
             for (auto&& elem : *vel_cams) {
                 if (auto v = elem.value<int64_t>())
@@ -351,6 +358,23 @@ void TrackerAppConfig::validate() const {
                             "it scales a measurement noise std)",
                             camera_id, scale));
         }
+    }
+
+    if (dot_seg_mask_dilate_px < 0.0) {
+        throw std::runtime_error(fmt::format("Invalid dot_seg_mask_dilate_px: {} (must be >= 0)",
+                                             dot_seg_mask_dilate_px));
+    }
+    if (dot_seg_mask_min_tracklet_fraction < 0.0 || dot_seg_mask_min_tracklet_fraction > 1.0) {
+        throw std::runtime_error(
+            fmt::format("Invalid dot_seg_mask_min_tracklet_fraction: {} (must be in [0, 1] -- "
+                        "it is compared against TrackletMaskAccumulator::fraction())",
+                        dot_seg_mask_min_tracklet_fraction));
+    }
+    if (dot_seg_mask_cost_scale_at_zero_fraction < 1.0) {
+        throw std::runtime_error(fmt::format(
+            "Invalid dot_seg_mask_cost_scale_at_zero_fraction: {} (must be >= 1.0 -- it "
+            "divides a cost, so anything below 1.0 would make a distrusted tracklet cheaper)",
+            dot_seg_mask_cost_scale_at_zero_fraction));
     }
 
     if (ik_max_iterations <= 0) {

@@ -142,6 +142,18 @@ struct TrackerConfig {
     /// trusted less, better trusted more).
     std::unordered_map<int, double> dot_camera_noise_scale;
 
+    // === Segmentation-mask-based dot-assignment trust ===
+    // See docs/roadmap/features/marker-based-mocap/segmentation-mask-dot-assignment-design.md.
+    // Shared tunables only -- per-subject identity (which seg_run, which label) is
+    // supplied separately per subject (DotAssignmentSubject::seg_mask), not here,
+    // since it legitimately differs between subjects sharing one solve the way
+    // these tunables must not (see SegMaskSubjectConfig's own doc comment).
+    bool dot_seg_mask_enabled = false;
+    double dot_seg_mask_dilate_px = 20.0;
+    int dot_seg_mask_tracklet_window = 60;
+    double dot_seg_mask_min_tracklet_fraction = 0.3;
+    double dot_seg_mask_cost_scale_at_zero_fraction = 4.0;
+
     // === Streak-derived dot velocity ===
     // See docs/roadmap/features/marker-based-mocap/streak-velocity-design.md §3/§4.
     // A motion-blur streak's own length/axis is a real, otherwise-unused frame-internal
@@ -381,6 +393,14 @@ struct TrackerAppConfig {
     std::unordered_map<int, double>
         dot_camera_noise_scale;  ///< See TrackerConfig's own field doc comment.
 
+    // === Segmentation-mask-based dot-assignment trust === (see TrackerConfig's own field doc
+    // comments)
+    bool dot_seg_mask_enabled = false;
+    double dot_seg_mask_dilate_px = 20.0;
+    int dot_seg_mask_tracklet_window = 60;
+    double dot_seg_mask_min_tracklet_fraction = 0.3;
+    double dot_seg_mask_cost_scale_at_zero_fraction = 4.0;
+
     // === Streak-derived dot velocity === (see TrackerConfig's own field doc comments)
     bool dot_streak_velocity_enabled = false;
     int dot_streak_k_window = 200;
@@ -535,6 +555,11 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.dot_cross_view_corroboration_px = dot_cross_view_corroboration_px;
     tc.dot_corroboration_gate_multiplier = dot_corroboration_gate_multiplier;
     tc.dot_camera_noise_scale = dot_camera_noise_scale;
+    tc.dot_seg_mask_enabled = dot_seg_mask_enabled;
+    tc.dot_seg_mask_dilate_px = dot_seg_mask_dilate_px;
+    tc.dot_seg_mask_tracklet_window = dot_seg_mask_tracklet_window;
+    tc.dot_seg_mask_min_tracklet_fraction = dot_seg_mask_min_tracklet_fraction;
+    tc.dot_seg_mask_cost_scale_at_zero_fraction = dot_seg_mask_cost_scale_at_zero_fraction;
     tc.dot_streak_velocity_enabled = dot_streak_velocity_enabled;
     tc.dot_streak_k_window = dot_streak_k_window;
     tc.dot_streak_k_min_samples = dot_streak_k_min_samples;

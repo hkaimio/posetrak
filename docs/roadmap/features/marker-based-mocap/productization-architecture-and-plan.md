@@ -1179,6 +1179,28 @@ and handoff; hand markers vs wrist-seeded markerless hands; UC3 moving
 camera (not started); raw-candidate relabeling UI; the Cutie manual-click
 init path.
 
+**Segmentation-gated prop marker-body calibration UI** (from the ball/sword
+video calibration work, 2026-09-27): run Cutie segmentation over the
+calibration orbit video first (existing segmentation UI, reused as-is); let
+the user tune dot-detection parameters against a live preview of the current
+frame before running detection (new UI: `calibrate-video`'s dot options
+currently only take effect on a full, slow re-run — see the ≥10x dot
+detection speedup item already tracked for why this is currently too slow to
+be interactive); run dot and aruco detection together with Cutie's mask,
+filtering candidates of both kinds to inside the mask; solve the camera
+track from the aruco markers alone (as now); then show detections as
+annotations over the video and let the user right-click a detection to
+create a marker-body slot, which by default claims that detection's whole
+tracklet; solve the slot's 3D position from its claimed detections; when a
+new tracklet starts, auto-assign it to a slot if it stays close to that
+slot's reprojection for its whole lifetime, but always let the user detach
+or reassign a tracklet by hand. Directly motivated by two failure modes hit
+calibrating the sword by hand: a tracklet silently drifting between two
+real, nearby features depending on viewing angle (dot-assignment design
+§9's "same tracklet, different physical point" case does not cover
+calibration time, only tracking time), and no way to see, short of ad-hoc
+scripts, which raw candidates a solved dot's position actually rests on.
+
 ### Sequencing and dependencies
 
 ```

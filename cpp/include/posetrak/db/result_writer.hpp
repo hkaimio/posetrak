@@ -6,6 +6,7 @@
 #include <posetrak/core/camera.hpp>
 #include <posetrak/core/skeleton.hpp>
 #include <posetrak/filters/update_result.hpp>
+#include <posetrak/tracking/dot_assignment.hpp>
 
 #include <Eigen/Core>
 
@@ -139,6 +140,17 @@ class ResultWriter {
     void patch_obs_results(int step, std::vector<ObservationResult> const& observations,
                            std::vector<uint8_t> const& pair_diff_reconstructed,
                            std::vector<std::string> const& parent_owned_markers = {});
+
+    /// @brief Write a batch of assignment-decision trace entries (see
+    /// AssignmentTrace, dot_assignment.hpp) -- the "why was detection N (not)
+    /// assigned to slot X in frame F" instrumentation. Called only when
+    /// tracing was requested for the run (an empty *entries* is a no-op, so a
+    /// caller can pass an AssignmentTrace's own vector unconditionally
+    /// without checking whether the current step was in its traced range).
+    ///
+    /// @param step Tracker step index the entries were captured on
+    /// @param entries One row per (candidate, slot) pair costed this step
+    void write_assignment_trace(int step, std::vector<AssignmentTraceEntry> const& entries);
 
     /// @brief Insert or update a tracking_run_stages row's status (upsert).
     ///

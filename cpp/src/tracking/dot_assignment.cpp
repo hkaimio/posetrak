@@ -218,8 +218,9 @@ CameraPairFundamental build_camera_fundamentals(std::unordered_map<int, Camera> 
 std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
     std::vector<SubjectDotPredictions> const& subjects,
     std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
-    DotAssignmentContext const& context) {
+    DotAssignmentContext const& context, AssignmentTrace* trace) {
     std::unordered_map<int, SubjectDotAssignment> result;
+    bool const tracing = trace != nullptr && trace->wants(context.frame_idx);
 
     double const gate_mahalanobis = context.gate_mahalanobis;
     int const frame_idx = context.frame_idx;
@@ -272,6 +273,7 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
         int const n_rows = static_cast<int>(candidates.size());
         int const n_cols = static_cast<int>(columns.size());
         std::vector<double> cost(static_cast<size_t>(n_rows) * static_cast<size_t>(n_cols));
+        size_t const trace_start = tracing ? trace->entries.size() : 0;
         for (int r = 0; r < n_rows; ++r) {
             UnlabeledCandidate const& row_cand = candidates[static_cast<size_t>(r)];
             Eigen::Vector2d const cand_pos = row_cand.position;
@@ -279,19 +281,59 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
                 Column const& col = columns[static_cast<size_t>(c)];
                 MarkerPrediction const& pred = *col.prediction;
                 Eigen::Vector2d const diff = cand_pos - pred.position;
-                double mahal_sq = diff.transpose() * pred.covariance.inverse() * diff;
+                double const raw_mahal_sq = diff.transpose() * pred.covariance.inverse() * diff;
+                double mahal_sq = raw_mahal_sq;
+                char const* excluded_by = "";
 
                 DotSlotRef const slot{col.subject_id, camera_id, col.marker_id, &pred};
                 for (auto const& modifier : modifiers) {
                     CostSupport const support = modifier->apply(slot, row_cand, effective_context);
                     if (support.exclude) {
                         mahal_sq = kExcludedCost;
+                        excluded_by = modifier->name();
                         break;
                     }
                     if (support.factor != 1.0)
                         mahal_sq /= support.factor;
                 }
 
+                if (tracing) {
+                    trace->entries.push_back(AssignmentTraceEntry{
+                        camera_id,
+                        r,
+                        row_cand.tracklet_id,
+                        cand_pos.x(),
+                        cand_pos.y(),
+                        col.subject_id,
+                        col.marker_id,
+                        raw_mahal_sq,
+                        mahal_sq,
+                        excluded_by,
+                        false,
+                    });
+                }
+
+                // Flatten every hopeless (but not modifier-excluded) pairing to one shared
+                // cost before it reaches the solver. Without this, solve_assignment()'s
+                // padded-square formulation forces every real column (marker slot) to take
+                // *some* real row (candidate) -- there is no dummy-row equivalent of a
+                // dummy column, so a marker with genuinely no valid candidate this frame
+                // (out of view, occluded by the prop's own geometry) still has to be paired
+                // with whichever real candidate is least-bad for it. Minimising total cost
+                // over the whole matrix then lets the solver trade a *different*, perfectly
+                // good (gate-passing) pairing away in exchange for shaving a few points off
+                // that already-doomed pairing -- pure waste, since a pairing above the gate
+                // is dropped by the caller's own filter regardless of its exact cost, but it
+                // can steal the row a nearby marker's real, correct match needed (confirmed
+                // on real data: two markers with candidates matching to within 1e-4 lost
+                // their own slots this way to a third marker that had no valid candidate on
+                // that camera at all). Clamping removes the incentive: every hopeless pairing
+                // now costs the same regardless of which specific row it lands on, so the
+                // solver has nothing left to gain by disturbing a pairing that already beats
+                // the gate on its own merits.
+                if (mahal_sq > gate_mahalanobis && mahal_sq < kExcludedCost) {
+                    mahal_sq = gate_mahalanobis + 1.0;
+                }
                 cost[static_cast<size_t>(r) * static_cast<size_t>(n_cols) +
                      static_cast<size_t>(c)] = mahal_sq;
             }
@@ -305,6 +347,17 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
         }();
 
         auto pairs = solve_assignment(cost, n_rows, n_cols, gate_mahalanobis);
+        if (tracing) {
+            // Entries for this camera sit at [trace_start, trace_start + n_rows*n_cols)
+            // in the same row-major (r, c) order the loop above pushed them in, so a
+            // winning pair's entry is a direct index, no search needed.
+            for (auto const& pair : pairs) {
+                size_t const idx = trace_start +
+                                   static_cast<size_t>(pair.row) * static_cast<size_t>(n_cols) +
+                                   static_cast<size_t>(pair.col);
+                trace->entries[idx].in_final_assignment = true;
+            }
+        }
         for (auto const& pair : pairs) {
             Column const& col = columns[static_cast<size_t>(pair.col)];
             UnlabeledCandidate const& cand = candidates[static_cast<size_t>(pair.row)];
@@ -476,7 +529,7 @@ std::string find_dot_config_disagreement(std::vector<TrackerConfig const*> const
 std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     std::vector<DotAssignmentSubject> const& subjects,
     std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
-    TrackerConfig const& config, int frame_idx, double timestamp) {
+    TrackerConfig const& config, int frame_idx, double timestamp, AssignmentTrace* trace) {
     std::vector<SubjectDotPredictions> predictions;
     predictions.reserve(subjects.size());
     PrevDotPositions prev_positions;
@@ -546,7 +599,7 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
         context.camera_fundamentals =
             build_camera_fundamentals(subjects.front().tracker->cameras());
     }
-    return resolve_dot_assignment(predictions, candidates_by_camera, context);
+    return resolve_dot_assignment(predictions, candidates_by_camera, context, trace);
 }
 
 }  // namespace posetrak

@@ -25,7 +25,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 14
-SESSION_SCHEMA_VERSION: Final[int] = 55
+SESSION_SCHEMA_VERSION: Final[int] = 56
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -1878,6 +1878,21 @@ def _migrate_session_v54_to_v55(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v55_to_v56(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 55 to 56.
+
+    v56 adds tracking_assignment_trace: every (candidate, marker slot) pair
+    the shared dot-assignment phase costed for a frame, not just the winner
+    tracking_obs_results records -- the "why was detection N (not) assigned
+    to slot X in frame F" instrumentation. See dot_assignment.hpp's
+    AssignmentTrace and 027_tracking_assignment_trace.sql.
+    """
+    sql = (_DB_DIR / "migrations" / "027_tracking_assignment_trace.sql").read_text(
+        encoding="utf-8"
+    )
+    conn.executescript(sql)
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -2063,6 +2078,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 54
     if actual == 54:
         _migrate_session_v54_to_v55(conn)
+        actual = 55
+    if actual == 55:
+        _migrate_session_v55_to_v56(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

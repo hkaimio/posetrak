@@ -1277,3 +1277,129 @@ TEST_CASE("resolve_dot_assignment: per-camera noise scale composes with the stre
     double const streak_noise = 5.0 + 2.0 / std::sqrt(12.0);
     REQUIRE(result.at(0).resolved[0].noise_std_override == Catch::Approx(streak_noise * 2.0));
 }
+
+// ---------------------------------------------------------------------------
+// AssignmentTrace: the "why was detection N (not) assigned to slot X in
+// frame F" instrumentation (sword-swing-tracking plan, 2026-09-27).
+// ---------------------------------------------------------------------------
+
+TEST_CASE(
+    "resolve_dot_assignment: trace records the clear winner, the modifier-"
+    "excluded candidate, and the gated-out-by-cost candidate",
+    "[dot_assignment]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0);
+
+    // Row 0: a clean match -- should win.
+    UnlabeledCandidate winner = make_candidate(0, 100.5, 200.5);
+    // Row 1: otherwise just as good a match, but owned by nobody --
+    // CandidateOwnershipModifier (always on by default) must exclude it.
+    UnlabeledCandidate unowned = make_candidate(0, 100.4, 200.4);
+    unowned.subject_mask = 0;
+    // Row 2: nobody excludes it, but it is nowhere near the prediction, so its
+    // own Mahalanobis cost exceeds the gate and solve_assignment() drops it.
+    UnlabeledCandidate far_away = make_candidate(0, 500.0, 900.0);
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {winner, unowned, far_away};
+
+    AssignmentTrace trace;
+    trace.start_frame = 0;
+    trace.end_frame = 0;
+
+    auto result =
+        resolve_dot_assignment({subject}, candidates, make_context(/*frame_idx=*/0), &trace);
+
+    REQUIRE(result.at(0).resolved.size() == 1);
+    REQUIRE(result.at(0).resolved[0].position == Eigen::Vector2d(100.5, 200.5));
+
+    // One column (marker 7) x three rows == three entries, in row order.
+    REQUIRE(trace.entries.size() == 3);
+
+    auto const& winner_entry = trace.entries[0];
+    CHECK(winner_entry.candidate_row == 0);
+    CHECK(winner_entry.marker_id == 7);
+    CHECK(winner_entry.subject_id == 0);
+    CHECK(winner_entry.excluded_by.empty());
+    CHECK(winner_entry.in_final_assignment);
+    CHECK(winner_entry.mahal_cost <= kGate);
+    CHECK(winner_entry.final_cost == winner_entry.mahal_cost);  // no modifier changed it
+
+    auto const& unowned_entry = trace.entries[1];
+    CHECK(unowned_entry.candidate_row == 1);
+    CHECK(unowned_entry.excluded_by == "candidate_ownership");
+    CHECK_FALSE(unowned_entry.in_final_assignment);
+
+    auto const& far_entry = trace.entries[2];
+    CHECK(far_entry.candidate_row == 2);
+    CHECK(far_entry.excluded_by.empty());  // no modifier fired -- cost alone gated it out
+    CHECK(far_entry.mahal_cost > kGate);
+    CHECK_FALSE(far_entry.in_final_assignment);
+}
+
+TEST_CASE("resolve_dot_assignment: trace outside its requested frame range stays empty",
+          "[dot_assignment]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0);
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {make_candidate(0, 100.5, 200.5)};
+
+    AssignmentTrace trace;
+    trace.start_frame = 10;
+    trace.end_frame = 20;
+
+    resolve_dot_assignment({subject}, candidates, make_context(/*frame_idx=*/0), &trace);
+
+    CHECK(trace.entries.empty());
+}
+
+TEST_CASE(
+    "resolve_dot_assignment: a marker with no valid candidate does not disturb a "
+    "different marker's already-good match",
+    "[dot_assignment]") {
+    // Reproduces a real failure found reviewing sword-swing footage: markerZ is
+    // genuinely absent this frame (occluded), but its least-bad candidate happens
+    // to be a row that is also markerY's own best match. Before the hopeless-cost
+    // clamp, the solver would displace markerY onto its own worse (but still
+    // gate-passing) second-choice candidate purely to shave a few points off
+    // markerZ's already-doomed (over-gate, always-dropped) pairing -- confirmed
+    // against scipy's linear_sum_assignment on the exact real cost matrix before
+    // fixing it. markerY must keep its true best match regardless of markerZ's
+    // hopelessness.
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][10] = make_prediction(100.0, 100.0);  // markerY
+    subject.predictions_by_camera[0][11] = make_prediction(100.0, 107.0);  // markerZ
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {
+        make_candidate(0, 100.2, 100.0),    // markerY's true best (cost ~0.01); also
+                                            // markerZ's least-bad option (cost ~12, over gate)
+        make_candidate(0, 104.5, 100.0),    // markerY's own worse-but-valid fallback (~5)
+        make_candidate(0, 1000.0, 1000.0),  // filler, hopeless for everyone
+    };
+
+    auto result = resolve_dot_assignment({subject}, candidates, make_context());
+
+    REQUIRE(result.at(0).resolved.size() == 1);
+    Observation const& obs = result.at(0).resolved[0];
+    CHECK(obs.marker_id == 10);                            // markerY, not markerZ
+    CHECK(obs.position == Eigen::Vector2d(100.2, 100.0));  // its true best, not the fallback
+}
+
+TEST_CASE("resolve_dot_assignment: a null trace pointer behaves exactly like no tracing",
+          "[dot_assignment]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0);
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {make_candidate(0, 100.5, 200.5)};
+
+    auto result = resolve_dot_assignment({subject}, candidates, make_context());
+
+    REQUIRE(result.at(0).resolved.size() == 1);
+}

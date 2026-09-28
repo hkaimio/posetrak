@@ -961,7 +961,8 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                              std::vector<std::string> const& active_joint_groups,
                              double override_start_time = std::numeric_limits<double>::quiet_NaN(),
                              double override_end_time = std::numeric_limits<double>::quiet_NaN(),
-                             std::optional<Eigen::Vector3d> const& seed_position = std::nullopt) {
+                             std::optional<Eigen::Vector3d> const& seed_position = std::nullopt,
+                             int trace_assignment_start = -1, int trace_assignment_end = -1) {
     try {
         PersonSpec spec;
         spec.sequence_id = sequence_id;
@@ -1006,11 +1007,24 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                         DotAssignmentSubject{0, ctx->tracker.get()}};
                     double const t_effective = t_start + ctx->dt / 2.0;
                     auto const t_assign0 = Clock::now();
-                    auto assignment = resolve_shared_dot_assignment(
-                        subjects, candidates_by_camera, ctx->tracker_config, step, t_effective);
+                    // AssignmentTrace::wants() gates on frame_idx (== step here), so this
+                    // costs nothing extra on a step outside [trace_assignment_start,
+                    // trace_assignment_end] -- see resolve_dot_assignment()'s own doc
+                    // comment. A fresh trace per step, not one accumulated across the
+                    // whole run, since write_assignment_trace() below persists and
+                    // clears it every step regardless.
+                    AssignmentTrace trace;
+                    trace.start_frame = trace_assignment_start;
+                    trace.end_frame = trace_assignment_end;
+                    auto assignment = resolve_shared_dot_assignment(subjects, candidates_by_camera,
+                                                                    ctx->tracker_config, step,
+                                                                    t_effective, &trace);
                     frame_step_profile::add_dot_assignment_total_ms(
                         Ms(Clock::now() - t_assign0).count());
                     frame_step_profile::add_step();
+                    if (!trace.entries.empty()) {
+                        ctx->result_writer->write_assignment_trace(step, trace.entries);
+                    }
                     std::vector<Observation> resolved;
                     if (auto it = assignment.find(0); it != assignment.end()) {
                         resolved = it->second.resolved;
@@ -1136,6 +1150,8 @@ int main(int argc, char* argv[]) {
     double db_start_time = std::numeric_limits<double>::quiet_NaN();
     double db_end_time = std::numeric_limits<double>::quiet_NaN();
     std::vector<double> db_seed_position;  // see PersonSpec::seed_position
+    int db_trace_assignment_start = -1;
+    int db_trace_assignment_end = -1;
     // Per-subject seeds for --person mode: repeated 4-value groups (person index, x, y, z).
     std::vector<double> db_subject_seeds;
     // Multi-person mode: repeated 4-value groups (sequence, skeleton, tracker_config,
@@ -1180,6 +1196,17 @@ int main(int argc, char* argv[]) {
                           "first frame where min_cameras_for_init cameras are active)");
     track_cmd->add_option("--end-time", db_end_time,
                           "Override sequence end time in seconds (default: from sequence record)");
+    track_cmd->add_option(
+        "--trace-assignment-start", db_trace_assignment_start,
+        "First tracker step (inclusive) to record a full dot-assignment decision trace for, "
+        "into tracking_assignment_trace -- every candidate considered for a marker slot that "
+        "step, its Mahalanobis cost, which CostModifier (if any) excluded it, and whether it "
+        "won the Hungarian solve. Off by default (no rows written); requires "
+        "--trace-assignment-end too. Single-subject DB mode only.");
+    track_cmd->add_option("--trace-assignment-end", db_trace_assignment_end,
+                          "Last tracker step (inclusive) to trace -- see --trace-assignment-start. "
+                          "Keep the range narrow: this is per-candidate-per-slot detail, not a "
+                          "per-step summary.");
     track_cmd
         ->add_option("--seed-position", db_seed_position,
                      "Externally-supplied initial root position (x y z, meters), bypassing "
@@ -1280,7 +1307,8 @@ int main(int argc, char* argv[]) {
             return run_track_from_db(
                 db_path, db_sequence_id, db_skeleton_id, db_config_id, db_output_dir, verbose,
                 quiet, smooth_output, debug_output, debug_init, db_min_confidence, db_person_id,
-                db_active_joint_groups, db_start_time, db_end_time, seed_position);
+                db_active_joint_groups, db_start_time, db_end_time, seed_position,
+                db_trace_assignment_start, db_trace_assignment_end);
         } else {
             if (track_config.empty()) {
                 fmt::print(stderr, "Error: config file required when not using --session-db\n");

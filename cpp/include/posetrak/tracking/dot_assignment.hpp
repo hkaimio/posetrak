@@ -246,6 +246,12 @@ class CostModifier {
     /// @return The modifier's support for the pair.
     virtual CostSupport apply(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
                               DotAssignmentContext const& context) const = 0;
+
+    /// @brief Short, stable identifier for this modifier, used only by
+    /// resolve_dot_assignment()'s optional AssignmentTrace to record which
+    /// modifier excluded a given (candidate, slot) pair. Not used by the cost
+    /// computation itself.
+    virtual const char* name() const = 0;
 };
 
 /// @brief Makes a pair cheaper when the candidate continues the tracklet that
@@ -261,6 +267,7 @@ class TrackletContinuityModifier final : public CostModifier {
    public:
     CostSupport apply(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
                       DotAssignmentContext const& context) const override;
+    const char* name() const override { return "tracklet_continuity"; }
 };
 
 /// @brief Excludes a pair when the candidate is not in the subject's own sequence
@@ -269,6 +276,7 @@ class CandidateOwnershipModifier final : public CostModifier {
    public:
     CostSupport apply(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
                       DotAssignmentContext const& context) const override;
+    const char* name() const override { return "candidate_ownership"; }
 };
 
 /// @brief Excludes a pair when the slot has gone DotAssignmentContext::
@@ -294,6 +302,7 @@ class ReacquisitionGateModifier final : public CostModifier {
    public:
     CostSupport apply(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
                       DotAssignmentContext const& context) const override;
+    const char* name() const override { return "reacquisition_gate"; }
 };
 
 /// @brief Makes a pair cheaper when the candidate is corroborated by another
@@ -333,6 +342,7 @@ class CrossViewCorroborationModifier final : public CostModifier {
    public:
     CostSupport apply(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
                       DotAssignmentContext const& context) const override;
+    const char* name() const override { return "cross_view_corroboration"; }
 };
 
 /// @brief The modifiers a context asks for, in the order they apply: tracklet
@@ -359,6 +369,43 @@ default_cost_modifiers(DotAssignmentContext const& context);
 /// @return Fundamental matrix for each ordered pair (both directions).
 CameraPairFundamental build_camera_fundamentals(std::unordered_map<int, Camera> const& cameras);
 
+/// @brief One (candidate, slot) cell resolve_dot_assignment()'s per-camera cost
+/// matrix considered, captured only when an AssignmentTrace sink is given and
+/// the frame is in its requested range (see AssignmentTrace::wants()) -- the
+/// "why was detection N (not) assigned to slot X in frame F" instrumentation
+/// (sword-swing-tracking plan, 2026-09-27). Everything here is data the
+/// per-cell loop already computes; capturing it costs nothing when no sink is
+/// given (the normal, untraced path).
+struct AssignmentTraceEntry {
+    int camera_id;
+    int candidate_row;  ///< Index into that camera's *this-frame* candidate list.
+    int tracklet_id;    ///< UnlabeledCandidate::tracklet_id, -1 if the candidate has none.
+    double candidate_x;
+    double candidate_y;
+    int subject_id;
+    int marker_id;      ///< The slot this cell costs the candidate against.
+    double mahal_cost;  ///< Raw squared Mahalanobis distance, before any modifier.
+    double final_cost;  ///< Cost after modifiers; equals kExcludedCost if a modifier excluded it.
+    std::string excluded_by;  ///< The excluding modifier's name(), or "" if none excluded it.
+    bool in_final_assignment =
+        false;  ///< True iff this exact pair won the camera's Hungarian solve.
+};
+
+/// @brief Sink for resolve_dot_assignment()'s optional per-cell trace. A
+/// caller not debugging assignment leaves this out entirely (the parameter
+/// defaults to nullptr); one that wants to see every candidate considered for
+/// a slot in a given frame range constructs one with start_frame/end_frame
+/// and passes it in, then reads back *entries* after the call.
+struct AssignmentTrace {
+    int start_frame = 0;
+    int end_frame = -1;  ///< Inclusive; -1 (the default) means "never wanted".
+    std::vector<AssignmentTraceEntry> entries;
+
+    bool wants(int frame_idx) const {
+        return end_frame >= start_frame && frame_idx >= start_frame && frame_idx <= end_frame;
+    }
+};
+
 /// @brief Pure core of the shared dot-assignment phase (design doc §5.2/§7.1):
 /// one combined Hungarian solve per camera, columns = the union of every
 /// participating subject's dot-slot predictions for that camera, rows = that
@@ -381,6 +428,10 @@ CameraPairFundamental build_camera_fundamentals(std::unordered_map<int, Camera> 
 ///        camera_id: one pool per camera, with the owners of each candidate in its
 ///        subject_mask (see append_unique_candidates()).
 /// @param context The gate, frame stamp and previous-frame state.
+/// @param trace Optional sink for a per-cell decision trace (see
+///        AssignmentTrace). nullptr (the default) traces nothing and costs
+///        nothing beyond the usual work; non-null only records entries for
+///        frames inside its own requested range.
 /// @return subject_id -> SubjectDotAssignment, for every subject that had at
 ///         least one resolved Observation. A subject with nothing resolved this
 ///         frame (no predictions, or every candidate gated out) is absent from
@@ -388,7 +439,7 @@ CameraPairFundamental build_camera_fundamentals(std::unordered_map<int, Camera> 
 std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
     std::vector<SubjectDotPredictions> const& subjects,
     std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
-    DotAssignmentContext const& context);
+    DotAssignmentContext const& context, AssignmentTrace* trace = nullptr);
 
 /// @brief One dot-bearing subject as resolve_shared_dot_assignment() needs
 /// it: an id to key the result map by, plus the Tracker to query
@@ -471,9 +522,11 @@ std::string find_dot_config_disagreement(std::vector<TrackerConfig const*> const
 ///       that throw is not caught here; a real caller spanning subjects
 ///       with genuinely different camera coverage needs to account for that
 ///       itself (not a case this round's real captures produce).
+/// @param trace Optional decision-trace sink, forwarded unchanged to
+///        resolve_dot_assignment() -- see that function and AssignmentTrace.
 std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     std::vector<DotAssignmentSubject> const& subjects,
     std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
-    TrackerConfig const& config, int frame_idx, double timestamp);
+    TrackerConfig const& config, int frame_idx, double timestamp, AssignmentTrace* trace = nullptr);
 
 }  // namespace posetrak

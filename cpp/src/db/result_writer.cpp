@@ -475,6 +475,81 @@ void ResultWriter::write_obs_results(int step, std::vector<ObservationResult> co
 
 // ---------------------------------------------------------------------------
 
+void ResultWriter::write_assignment_trace(int step,
+                                          std::vector<AssignmentTraceEntry> const& entries) {
+    if (entries.empty())
+        return;
+
+    char* errmsg = nullptr;
+    int rc = sqlite3_exec(db_, "BEGIN;", nullptr, nullptr, &errmsg);
+    if (rc != SQLITE_OK) {
+        std::string err = errmsg ? errmsg : "unknown";
+        sqlite3_free(errmsg);
+        throw std::runtime_error("ResultWriter: BEGIN failed: " + err);
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql =
+        "INSERT INTO tracking_assignment_trace"
+        " (run_id, person_id, tracker_step, camera_idx, candidate_row, tracklet_id,"
+        "  candidate_x, candidate_y, marker_idx, mahal_cost, final_cost, excluded_by,"
+        "  in_final_assignment)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+    rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+        throw std::runtime_error(
+            std::string("ResultWriter: prepare INSERT tracking_assignment_trace: ") +
+            sqlite3_errmsg(db_));
+    }
+
+    bool failed = false;
+    std::string fail_msg;
+    for (auto const& e : entries) {
+        sqlite3_bind_text(stmt, 1, run_id_.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 2, person_id_);
+        sqlite3_bind_int(stmt, 3, step);
+        sqlite3_bind_int(stmt, 4, e.camera_id);
+        sqlite3_bind_int(stmt, 5, e.candidate_row);
+        sqlite3_bind_int(stmt, 6, e.tracklet_id);
+        sqlite3_bind_double(stmt, 7, e.candidate_x);
+        sqlite3_bind_double(stmt, 8, e.candidate_y);
+        sqlite3_bind_int(stmt, 9, e.marker_id);
+        sqlite3_bind_double(stmt, 10, e.mahal_cost);
+        sqlite3_bind_double(stmt, 11, e.final_cost);
+        sqlite3_bind_text(stmt, 12, e.excluded_by.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 13, e.in_final_assignment ? 1 : 0);
+
+        int step_rc = sqlite3_step(stmt);
+        sqlite3_reset(stmt);
+        sqlite3_clear_bindings(stmt);
+
+        if (step_rc != SQLITE_DONE) {
+            failed = true;
+            fail_msg = sqlite3_errmsg(db_);
+            break;
+        }
+    }
+
+    sqlite3_finalize(stmt);
+
+    if (failed) {
+        sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+        throw std::runtime_error("ResultWriter: INSERT tracking_assignment_trace failed: " +
+                                 fail_msg);
+    }
+
+    rc = sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, &errmsg);
+    if (rc != SQLITE_OK) {
+        std::string err = errmsg ? errmsg : "unknown";
+        sqlite3_free(errmsg);
+        throw std::runtime_error("ResultWriter: COMMIT failed: " + err);
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 void ResultWriter::patch_obs_results(int step, std::vector<ObservationResult> const& observations,
                                      std::vector<uint8_t> const& pair_diff_reconstructed,
                                      std::vector<std::string> const& parent_owned_markers) {

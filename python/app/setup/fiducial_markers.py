@@ -552,6 +552,17 @@ class MarkerRigConfig:
     mounted on) resolves that reliably.
     Absent (empty) for a dot with no ``same_face_as:`` given, in which
     case the generator falls back to geometric inference as before.
+
+    ``reflective_dot_normals``: dot name -> an explicit outward unit normal,
+    for a ``reflective_dot`` entry that gave its own ``normal: [x, y, z]``
+    directly rather than referencing a tag's. Takes priority over
+    ``reflective_dot_faces``, which itself takes priority over geometric
+    inference -- for a dot on a part of the prop that doesn't actually share
+    either tag's face at all (e.g. a separate, roughly cylindrical shaft like
+    a blade, where "nearest tag plane" is meaningless noise rather than a
+    wrong-but-plausible answer: on the real sword, two blade dots' distances
+    to the two tags' planes differed by under 3mm, effectively a coin flip).
+    Absent (empty) for a dot with no ``normal:`` given.
     """
     rig_id: str
     marker_corners: dict[str, np.ndarray] = field(default_factory=dict)
@@ -560,6 +571,7 @@ class MarkerRigConfig:
     marker_names: dict[str, str] = field(default_factory=dict)
     symmetry_axis: np.ndarray | None = None
     reflective_dot_faces: dict[str, str] = field(default_factory=dict)
+    reflective_dot_normals: dict[str, np.ndarray] = field(default_factory=dict)
 
 
 def load_rig_config(path: str) -> MarkerRigConfig:
@@ -676,6 +688,7 @@ def load_marker_body_yaml(yaml_content: str, *, rig_id: str | None = None) -> Ma
     reflective_dots: dict[str, np.ndarray] = {}
     marker_names: dict[str, str] = {}
     reflective_dot_faces_by_name: dict[str, str] = {}  # dot name -> referenced marker NAME (unresolved)
+    reflective_dot_normals: dict[str, np.ndarray] = {}
 
     for entry in payload.get("markers") or []:
         name = entry.get("name")
@@ -699,8 +712,23 @@ def load_marker_body_yaml(yaml_content: str, *, rig_id: str | None = None) -> Ma
                     f"marker body {resolved_rig_id!r}: reflective_dot {name!r} needs 'center'"
                 )
             reflective_dots[name] = np.array(center, dtype=np.float64)
+            explicit_normal = entry.get("normal")
             same_face_as = entry.get("same_face_as")
-            if same_face_as:
+            if explicit_normal and same_face_as:
+                raise ValueError(
+                    f"marker body {resolved_rig_id!r}: reflective_dot {name!r} gives both "
+                    "'normal' and 'same_face_as' -- give at most one, 'normal' would win"
+                )
+            if explicit_normal:
+                normal_arr = np.array(explicit_normal, dtype=np.float64)
+                norm = np.linalg.norm(normal_arr)
+                if norm < 1e-9:
+                    raise ValueError(
+                        f"marker body {resolved_rig_id!r}: reflective_dot {name!r}'s 'normal' "
+                        "is a zero vector"
+                    )
+                reflective_dot_normals[name] = normal_arr / norm
+            elif same_face_as:
                 reflective_dot_faces_by_name[name] = same_face_as
             continue
 
@@ -777,6 +805,7 @@ def load_marker_body_yaml(yaml_content: str, *, rig_id: str | None = None) -> Ma
         marker_names=marker_names,
         symmetry_axis=symmetry_axis,
         reflective_dot_faces=reflective_dot_faces,
+        reflective_dot_normals=reflective_dot_normals,
     )
 
 

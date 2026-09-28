@@ -206,6 +206,56 @@ markers:
     assert config.reflective_dot_faces == {}
 
 
+def test_reflective_dot_explicit_normal_is_normalized():
+    yaml_content = """
+name: test-body
+markers:
+  - name: dot_a
+    type: reflective_dot
+    center: [0.02, 0.02, 0.0]
+    normal: [2.0, 0.0, 0.0]
+"""
+    config = load_marker_body_yaml(yaml_content)
+    assert set(config.reflective_dot_normals) == {"dot_a"}
+    np.testing.assert_allclose(config.reflective_dot_normals["dot_a"], [1.0, 0.0, 0.0])
+    assert config.reflective_dot_faces == {}
+
+
+def test_reflective_dot_zero_normal_raises():
+    yaml_content = """
+name: test-body
+markers:
+  - name: dot_a
+    type: reflective_dot
+    center: [0.02, 0.02, 0.0]
+    normal: [0.0, 0.0, 0.0]
+"""
+    with pytest.raises(ValueError, match="zero vector"):
+        load_marker_body_yaml(yaml_content)
+
+
+def test_reflective_dot_normal_and_same_face_as_together_raises():
+    yaml_content = """
+name: test-body
+markers:
+  - name: front
+    type: aruco
+    dictionary: DICT_4X4_50
+    id: "7"
+    size: 0.1
+    center: [0.0, 0.0, 0.0]
+    normal: [0.0, 0.0, 1.0]
+    up: [0.0, 1.0, 0.0]
+  - name: dot_a
+    type: reflective_dot
+    center: [0.02, 0.02, 0.0]
+    normal: [1.0, 0.0, 0.0]
+    same_face_as: front
+"""
+    with pytest.raises(ValueError, match="both"):
+        load_marker_body_yaml(yaml_content)
+
+
 # ---------------------------------------------------------------------------
 # multi-dictionary bodies
 # ---------------------------------------------------------------------------

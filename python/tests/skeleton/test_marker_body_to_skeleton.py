@@ -287,6 +287,37 @@ markers:
     assert np.allclose(dot["normal"], [0.0, 0.0, -1.0], atol=1e-6)
 
 
+def test_explicit_normal_overrides_both_inference_and_same_face_as():
+    # A dot on a part of the prop that doesn't share either tag's face at
+    # all (e.g. a separate cylindrical shaft) needs its own explicit
+    # normal: neither tag's plane, nor same_face_as:, is a meaningful
+    # answer for it -- the real motivating case (marker_body_to_skeleton.py's
+    # own comment): two blade dots on the sword sit almost exactly
+    # equidistant between both hilt tags' planes.
+    yaml_body = """\
+name: test-explicit-normal-prop
+units: meters
+markers:
+  - name: near
+    type: aruco
+    dictionary: DICT_4X4_50
+    id: "1"
+    size: 0.05
+    center: [0.0, 0.0, 0.0]
+    normal: [0.0, 0.0, 1.0]
+    up: [0.0, 1.0, 0.0]
+  - name: blade_dot
+    type: reflective_dot
+    center: [0.0, 0.0, 0.5]
+    normal: [0.70710678, 0.0, 0.70710678]
+"""
+    config = load_marker_body_yaml(yaml_body)
+    doc = generate_prop_skeleton(config)
+
+    dot = next(m for m in doc["markers"] if m["name"] == "blade_dot")
+    assert np.allclose(dot["normal"], [0.70710678, 0.0, 0.70710678], atol=1e-6)
+
+
 def test_empty_body_raises():
     config = load_marker_body_yaml(_EMPTY_BODY_YAML)
     with pytest.raises(ValueError, match="no markers"):

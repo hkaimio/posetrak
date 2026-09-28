@@ -164,11 +164,22 @@ def generate_prop_skeleton(
             "track": _DOT_INPUT_TRACK_ID,
             "landmark": dot_name,
         }
+        explicit_normal = config.reflective_dot_normals.get(dot_name)
         explicit_ref_id = config.reflective_dot_faces.get(dot_name)
-        if explicit_ref_id is not None:
+        if explicit_normal is not None:
+            # An author-supplied normal: (fiducial_markers.py's own
+            # MarkerRigConfig.reflective_dot_normals docstring) wins over
+            # everything else -- for a dot that doesn't actually share either
+            # tag's face at all (e.g. a separate roughly-cylindrical part of
+            # the prop like a blade), inheriting *any* tag's plane, even the
+            # "closer" one, is noise rather than a real answer: on the real
+            # sword, two blade dots' distances to the two tags' planes
+            # differed by under 3mm.
+            entry["normal"] = [float(v) for v in explicit_normal]
+        elif explicit_ref_id is not None:
             # An author-supplied same_face_as: (fiducial_markers.py's own
-            # MarkerRigConfig.reflective_dot_faces docstring) always wins
-            # over inference -- confirmed necessary on the real sword body,
+            # MarkerRigConfig.reflective_dot_faces docstring) wins over
+            # inference -- confirmed necessary on the real sword body,
             # where two dots' calibrated positions sit almost exactly on
             # the geometrically "wrong" tag's own plane, most likely
             # because a real prop isn't the flat two-plane shape inference

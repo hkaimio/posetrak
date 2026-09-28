@@ -147,7 +147,11 @@ double tracklet_mask_fraction(DotSlotRef const& slot, UnlabeledCandidate const& 
     auto const tracklet_it = camera_it->second.find(candidate.tracklet_id);
     if (tracklet_it == camera_it->second.end())
         return 1.0;
-    auto const frac = tracklet_it->second.fraction(1);
+    // A handful of samples must back the fraction before it can exclude or
+    // penalise anything: with one sample it would be 0 or 1, letting a single
+    // bad frame (mask lag, blur) condemn an established tracklet.
+    constexpr int kMinTrackletSamples = 5;
+    auto const frac = tracklet_it->second.fraction(kMinTrackletSamples);
     return frac.value_or(1.0);
 }
 }  // namespace

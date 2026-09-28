@@ -10,9 +10,9 @@ the wrong tracklet (one that happens to sit near `dot2`/`dot3`'s prediction),
 and that wrong lock persists — via `TrackletContinuityModifier`'s own
 gate-relaxation — for 25+ steps after the ArUco tags are visible and correctly
 detected again, because the wrong dot lock keeps outscoring the correct
-detection on cost alone. Not yet implemented; this is the note to review before
-any of it is built, per your request ("write a short design note for my review
-before impl").
+detection on cost alone. Implemented and validated against the real capture
+(§9); the mask-based mechanism (§1b) is in, ArUco `force_inlier` (§1a) is
+still open, separate work.
 
 Feature branch: `feature/segmentation-mask-dot-assignment` (branched from
 `detect-segmentation-source-and-scrubber-fix`, which carries today's other,
@@ -330,3 +330,62 @@ aggregate tracked-percentage number.
    in C++ and not via any new column. Which `seg_run_id` applies to a
    subject is supplied at invocation time (TOML/CLI), never persisted,
    mirroring `dot_mask_seg_run_id`'s existing precedent. See §6.
+
+## 9. Real-data validation (2026-09-28)
+
+Re-ran the sword trial (sequence `84d5b140…`, skeleton `b19afc91…`, base
+tracker config `00a21d49…`, full window t=303.5–323.259s) three ways, all
+against the session's existing `seg_quality_runs` row (`db73c8b8…`) — a
+**person**-only segmentation (`persons_json: ["Harri"]`, no separate "sword"
+label). There was no separate sword segmentation to test against; per your
+instruction this run uses the person's own label (`--seg-mask-label 1`) as
+the sword's trust region, since a handheld prop's dots move within/near its
+wielder's own silhouette. This is exactly the case §5.1 anticipated
+(`SegMaskSubjectConfig` doesn't care whose name the label belongs to) but
+hadn't been exercised for real yet.
+
+| run | tracked-% (lost/total) | `gopro-11_mini_01`/`dot2`,`dot3` resolved in the 306.4–308.0s window | mean/max NIS·DOF⁻¹ |
+|---|---|---|---|
+| baseline (no mask) | 99.79% (5/2371) | 103, 103 — resolved and accepted (`used=1`) every step | 0.154 / 3.79 |
+| `dilate_px=20` (default) | **99.92% (2/2370)** | **0, 0** — excluded every step | 0.198 / **2.71** |
+| `dilate_px=150` (matches `_make_dot_mask_filter`'s own prop default) | 99.87% (3/2370) | 97, 93 — barely reduced from baseline | 0.216 / 3.87 |
+
+Confirmed via `tracking_obs_results.obs_blob`, not just the aggregate
+number: at `dilate_px=20`, `gopro-11_mini_01`/`gopro13_02` `dot2`/`dot3` —
+the exact (camera, marker) pairs the original bug report named — go from
+"wrongly resolved and accepted as inlier every step of the failure window"
+to "no candidate resolved at all" (drop, don't guess — the mechanism
+working as designed, coasting on the process model instead of trusting a
+bad lock), while every other marker/camera in the same steps (`dot0`,
+`dot1`, `dot5`, `aruco13:c0`, `gopro13_02/dot0`) kept resolving normally —
+confirming the exclusion is specific to the actual bad candidates, not a
+blanket drop. `tracking_lost` itself was never the right signal for this
+bug in any run (none of the three ever flags lost inside the failure
+window) — the filter was always "tracking", just briefly the wrong thing;
+the real evidence is in `obs_blob`, matching how the bug was originally
+found.
+
+**The looser `dilate_px=150` does *not* fix the bug** — a real, useful
+finding, not just a tuning nuance: `_make_dot_mask_filter`'s own 150px
+default (chosen for "a handheld prop extends well beyond the hand") turns
+out to be *loose enough that the wrong lock-on candidates still fall inside
+it* — they're apparently within 150px of the person's own silhouette, just
+not within 20px of it. So porting that filter's default wholesale would
+have looked reasonable but silently not solved the reported problem;
+**`dilate_px=20` (this feature's own default, chosen independently) is what
+actually discriminates the failure case correctly**, at the cost of also
+excluding some legitimate far-from-body candidates elsewhere in the trial
+(`gopro-11_mini_01/dot2` full-trial resolved count: 808 baseline → 301 at
+`dilate_px=20`) — a cost that measured out net-positive here (fewer lost
+steps, lower worst-case NIS/DOF) but is worth remembering as a real
+trade-off, not a free lunch, the next time this gets tuned against a
+capture with a *real* separate prop segmentation rather than borrowing the
+wielder's own.
+
+Open question 1 above is answered by this data for *this* capture:
+`dilate_px=20`/`min_tracklet_fraction=0.3`/`tracklet_window=60` (all
+defaults, nothing overridden) is not just "a reasonable starting guess" but
+the config that actually fixed the reported failure, and does so without
+regressing overall tracked-% or worst-case filter surprise. Open question 2
+(modifier ordering) remains open — not exercised by this validation, since
+only one seg-mask-affecting modifier fired in the traced window.

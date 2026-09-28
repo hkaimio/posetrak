@@ -190,6 +190,32 @@ class SessionReader {
                                                std::string const& extrinsic_calibration_id,
                                                std::string const& sync_config_id);
 
+    /// @brief Camera integer ID -> capture_videos.id ("shot_video_id" in table
+    /// comments) for every camera in *sync_config_id*'s capture, in the same
+    /// `ORDER BY ci.label ASC` / sequential-assignment order load_cameras()
+    /// itself uses -- so a camera_id from this map always names the same
+    /// physical camera as the matching camera_id in a Camera map built from
+    /// the same sync_config_id. Used to resolve which seg_masks row (keyed by
+    /// shot_video_id, not camera_instance_id) covers a given camera
+    /// (segmentation-mask-dot-assignment-design.md §5).
+    /// @param sync_config_id sync_configs primary key
+    std::unordered_map<int, std::string>
+    load_camera_shot_video_ids(std::string const& sync_config_id);
+
+    /// @brief Raw PNG bytes for one seg_masks row, or std::nullopt if no row
+    /// exists for this (seg_run_id, shot_video_id, frame_idx) -- the same
+    /// "don't know, caller decides what to do" contract
+    /// app.pose.pose_worker._load_mask already uses for a missing mask.
+    /// Decode with posetrak::decode_seg_mask() (seg_mask.hpp); this method
+    /// does no image decoding of its own, matching every other raw-blob
+    /// accessor in this class.
+    /// @param seg_run_id seg_quality_runs primary key
+    /// @param shot_video_id capture_videos primary key (see
+    ///        load_camera_shot_video_ids())
+    /// @param frame_idx Native video frame number (UnlabeledCandidate::frame_idx)
+    std::optional<std::string> load_seg_mask_blob(std::string const& seg_run_id,
+                                                  std::string const& shot_video_id, int frame_idx);
+
     /// @brief Load pose observations for a sequence
     ///
     /// @param sequence_id pose_observation_sequences primary key

@@ -223,7 +223,19 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     -- comment (dot_assignment.hpp / config.hpp).
     dot_cross_view_corroboration_px  REAL,  -- Epipolar tolerance, px; NULL/0.0 = disabled
     dot_corroboration_gate_multiplier REAL, -- Divides cost for a corroborated pairing; NULL/1.0 = disabled
-    dot_camera_noise_scale           TEXT   -- JSON object {camera_id: scale, ...}; NULL/empty = no change
+    dot_camera_noise_scale           TEXT,  -- JSON object {camera_id: scale, ...}; NULL/empty = no change
+    -- Added in schema migration v57 (session)/v15 (registry): segmentation-
+    -- mask-based trust for the shared dot-assignment phase. Shared tunables
+    -- only -- per-subject identity (which seg_run, which label) is supplied
+    -- separately per subject at track-invocation time, never persisted here,
+    -- since it legitimately differs between subjects sharing one solve --
+    -- see SegmentationMaskModifier and TrackerConfig's own dot_seg_mask_*
+    -- field doc comments (dot_assignment.hpp / config.hpp).
+    dot_seg_mask_enabled              INTEGER, -- 0/1 flag; NULL/0 = disabled
+    dot_seg_mask_dilate_px            REAL,    -- Search radius, native px; NULL/20.0 = default
+    dot_seg_mask_tracklet_window      INTEGER, -- Rolling per-tracklet window, frames; NULL/60 = default
+    dot_seg_mask_min_tracklet_fraction REAL,   -- Hard-exclude threshold; NULL/0.3 = default
+    dot_seg_mask_cost_scale_at_zero_fraction REAL -- Soft-penalty ceiling; NULL/4.0 = default
 );
 
 -- Added in schema migration v37: hierarchical body/hand solver -- per-stage

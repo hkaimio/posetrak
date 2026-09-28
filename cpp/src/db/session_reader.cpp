@@ -209,7 +209,14 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
         "       COALESCE(dot_cross_view_corroboration_px, 0.0) AS dot_cross_view_corroboration_px,"
         "       COALESCE(dot_corroboration_gate_multiplier, 1.0) AS "
         "dot_corroboration_gate_multiplier,"
-        "       dot_camera_noise_scale"
+        "       dot_camera_noise_scale,"
+        "       COALESCE(dot_seg_mask_enabled, 0) AS dot_seg_mask_enabled,"
+        "       COALESCE(dot_seg_mask_dilate_px, 20.0) AS dot_seg_mask_dilate_px,"
+        "       COALESCE(dot_seg_mask_tracklet_window, 60) AS dot_seg_mask_tracklet_window,"
+        "       COALESCE(dot_seg_mask_min_tracklet_fraction, 0.3) AS "
+        "dot_seg_mask_min_tracklet_fraction,"
+        "       COALESCE(dot_seg_mask_cost_scale_at_zero_fraction, 4.0) AS "
+        "dot_seg_mask_cost_scale_at_zero_fraction"
         " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -245,7 +252,10 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //         55=dot_tracklet_gate_multiplier, 56=confidence_threshold_marker_names,
     //         57=confidence_threshold_override, 58=dot_reacquire_gap_frames,
     //         59=dot_reacquire_max_px, 60=dot_cross_view_corroboration_px,
-    //         61=dot_corroboration_gate_multiplier, 62=dot_camera_noise_scale
+    //         61=dot_corroboration_gate_multiplier, 62=dot_camera_noise_scale,
+    //         63=dot_seg_mask_enabled, 64=dot_seg_mask_dilate_px,
+    //         65=dot_seg_mask_tracklet_window, 66=dot_seg_mask_min_tracklet_fraction,
+    //         67=dot_seg_mask_cost_scale_at_zero_fraction
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -458,6 +468,12 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     apply_real(59, out.tracker.dot_reacquire_max_px);
     apply_real(60, out.tracker.dot_cross_view_corroboration_px);
     apply_real(61, out.tracker.dot_corroboration_gate_multiplier);
+    if (sqlite3_column_type(stmt.ptr, 63) != SQLITE_NULL)
+        out.tracker.dot_seg_mask_enabled = (sqlite3_column_int(stmt.ptr, 63) != 0);
+    apply_real(64, out.tracker.dot_seg_mask_dilate_px);
+    apply_int(65, out.tracker.dot_seg_mask_tracklet_window);
+    apply_real(66, out.tracker.dot_seg_mask_min_tracklet_fraction);
+    apply_real(67, out.tracker.dot_seg_mask_cost_scale_at_zero_fraction);
 
     // dot_camera_noise_scale: stored as a JSON object of camera_id (as a string
     // key, e.g. "2") -> scale, e.g. {"2": 1.3, "3": 0.7}.
@@ -766,6 +782,51 @@ SessionReader::load_cameras(std::string const& session_id,
     }
 
     return result;
+}
+
+// ---------------------------------------------------------------------------
+
+std::unordered_map<int, std::string>
+SessionReader::load_camera_shot_video_ids(std::string const& sync_config_id) {
+    // Same camera set and ORDER BY ci.label ASC / sequential-assignment
+    // convention as load_cameras() -- see that function's own query -- so a
+    // camera_id here matches the same physical camera as the identical
+    // camera_id in a Camera map built from this sync_config_id.
+    Stmt stmt(db_,
+              "SELECT sv.id"
+              " FROM capture_videos sv"
+              " JOIN captures sh ON sh.id = sv.shot_id"
+              " JOIN sync_configs scfg ON scfg.shot_id = sh.id"
+              " JOIN camera_instances ci ON ci.id = sv.camera_instance_id"
+              " WHERE scfg.id = ?"
+              " ORDER BY ci.label ASC");
+    sqlite3_bind_text(stmt.ptr, 1, sync_config_id.c_str(), -1, SQLITE_STATIC);
+
+    std::unordered_map<int, std::string> result;
+    int camera_id = 0;
+    while (stmt.step()) {
+        auto const* p = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 0));
+        result[camera_id++] = p ? std::string(p) : std::string();
+    }
+    return result;
+}
+
+std::optional<std::string> SessionReader::load_seg_mask_blob(std::string const& seg_run_id,
+                                                             std::string const& shot_video_id,
+                                                             int frame_idx) {
+    Stmt stmt(db_,
+              "SELECT mask_blob FROM seg_masks"
+              " WHERE seg_quality_run_id = ? AND shot_video_id = ? AND frame_idx = ?");
+    sqlite3_bind_text(stmt.ptr, 1, seg_run_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt.ptr, 2, shot_video_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt.ptr, 3, frame_idx);
+    if (!stmt.step())
+        return std::nullopt;
+    void const* blob = sqlite3_column_blob(stmt.ptr, 0);
+    int const nbytes = sqlite3_column_bytes(stmt.ptr, 0);
+    if (blob == nullptr || nbytes <= 0)
+        return std::nullopt;
+    return std::string(reinterpret_cast<char const*>(blob), static_cast<size_t>(nbytes));
 }
 
 // ---------------------------------------------------------------------------

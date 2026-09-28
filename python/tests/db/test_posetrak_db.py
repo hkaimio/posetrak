@@ -1120,6 +1120,47 @@ def test_migrate_session_v54_to_v55_adds_corroboration_and_camera_trust_columns(
     conn.close()
 
 
+_DOT_SEG_MASK_COLUMNS = {
+    "dot_seg_mask_enabled",
+    "dot_seg_mask_dilate_px",
+    "dot_seg_mask_tracklet_window",
+    "dot_seg_mask_min_tracklet_fraction",
+    "dot_seg_mask_cost_scale_at_zero_fraction",
+}
+
+
+def test_migrate_registry_v14_to_v15_adds_seg_mask_columns(tmp_path: Path) -> None:
+    """v14->v15 adds tracker_configs.dot_seg_mask_* -- see db.py's
+    _migrate_registry_v14_to_v15."""
+    db_path = tmp_path / "reg.db"
+    conn = create_registry(db_path)
+    conn.execute("PRAGMA user_version = 14")
+    conn.commit()
+    conn.close()
+
+    conn = open_registry(db_path)
+    assert get_schema_version(conn) == REGISTRY_SCHEMA_VERSION
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(tracker_configs)")}
+    assert _DOT_SEG_MASK_COLUMNS <= cols
+    conn.close()
+
+
+def test_migrate_session_v56_to_v57_adds_seg_mask_columns(tmp_path: Path) -> None:
+    """v56->v57 is the session mirror of registry v14->v15 -- see db.py's
+    _migrate_session_v56_to_v57."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+    conn.execute("PRAGMA user_version = 56")
+    conn.commit()
+    conn.close()
+
+    conn = open_session(db_path)
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(tracker_configs)")}
+    assert _DOT_SEG_MASK_COLUMNS <= cols
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # PRAGMA foreign_keys
 # ---------------------------------------------------------------------------

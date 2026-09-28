@@ -24,8 +24,8 @@ from typing import Final
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 14
-SESSION_SCHEMA_VERSION: Final[int] = 56
+REGISTRY_SCHEMA_VERSION: Final[int] = 15
+SESSION_SCHEMA_VERSION: Final[int] = 57
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -325,6 +325,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 13
     if actual == 13:
         _migrate_registry_v13_to_v14(conn)
+        actual = 14
+    if actual == 14:
+        _migrate_registry_v14_to_v15(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -748,6 +751,32 @@ def _migrate_registry_v13_to_v14(conn: sqlite3.Connection) -> None:
     if "dot_camera_noise_scale" not in existing:
         conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_camera_noise_scale TEXT")
     _set_schema_version(conn, 14)
+    conn.commit()
+
+
+def _migrate_registry_v14_to_v15(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 14 to 15.
+
+    v15 adds segmentation-mask-based dot-assignment trust to tracker_configs,
+    mirroring the session schema v56->v57 change -- see
+    _migrate_session_v56_to_v57's docstring.
+    """
+    existing = _tracker_config_columns(conn)
+    if "dot_seg_mask_enabled" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_enabled INTEGER")
+    if "dot_seg_mask_dilate_px" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_dilate_px REAL")
+    if "dot_seg_mask_tracklet_window" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_tracklet_window INTEGER")
+    if "dot_seg_mask_min_tracklet_fraction" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_min_tracklet_fraction REAL"
+        )
+    if "dot_seg_mask_cost_scale_at_zero_fraction" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_cost_scale_at_zero_fraction REAL"
+        )
+    _set_schema_version(conn, 15)
     conn.commit()
 
 
@@ -1893,6 +1922,35 @@ def _migrate_session_v55_to_v56(conn: sqlite3.Connection) -> None:
     conn.executescript(sql)
 
 
+def _migrate_session_v56_to_v57(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 56 to 57.
+
+    v57 adds segmentation-mask-based dot-assignment trust to tracker_configs.
+    Every session database embeds its own full copy of the registry tables,
+    including tracker_configs, so it needs this same column addition kept in
+    sync -- see create_session()'s own docstring. Mirrors the registry schema
+    v14->v15 change -- see SegMaskSubjectConfig and TrackerConfig's own
+    dot_seg_mask_* field doc comments (dot_assignment.hpp / config.hpp).
+    """
+    existing = _tracker_config_columns(conn)
+    if "dot_seg_mask_enabled" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_enabled INTEGER")
+    if "dot_seg_mask_dilate_px" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_dilate_px REAL")
+    if "dot_seg_mask_tracklet_window" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_tracklet_window INTEGER")
+    if "dot_seg_mask_min_tracklet_fraction" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_min_tracklet_fraction REAL"
+        )
+    if "dot_seg_mask_cost_scale_at_zero_fraction" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_cost_scale_at_zero_fraction REAL"
+        )
+    _set_schema_version(conn, 57)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -2081,6 +2139,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 55
     if actual == 55:
         _migrate_session_v55_to_v56(conn)
+        actual = 56
+    if actual == 56:
+        _migrate_session_v56_to_v57(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

@@ -96,6 +96,8 @@ def run_tracker(
     start_time: float | None = None,
     end_time: float | None = None,
     smooth: bool = True,
+    seg_run_id: str | None = None,
+    seg_mask_label: int | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> TrackerResult:
     """Run the posetrak-tracker binary as a subprocess.
@@ -128,6 +130,17 @@ def run_tracker(
         Optional end time in seconds (passed to binary as ``--end-time``).
     smooth:
         Whether to enable RTS smoothing (``--smooth`` flag). Default True.
+    seg_run_id:
+        Optional ``seg_quality_runs.id`` gating the shared dot-assignment
+        phase's trust in a candidate's tracklet (SegmentationMaskModifier) --
+        see segmentation-mask-dot-assignment-design.md. Requires
+        ``seg_mask_label`` too; the tracker config's own
+        ``dot_seg_mask_enabled`` must also be set for this to have any
+        effect. ``posetrak.db.manage_person.resolve_seg_mask_label()``
+        resolves the label a subject's own name maps to within this
+        segmentation.
+    seg_mask_label:
+        This subject's own label (1..N) within *seg_run_id*'s masks.
     on_progress:
         Callback invoked for each non-empty output line. Called from whichever
         thread calls ``run_tracker()``.
@@ -155,6 +168,8 @@ def run_tracker(
         args += ["--end-time", str(end_time)]
     if smooth:
         args.append("--smooth")
+    if seg_run_id is not None and seg_mask_label is not None:
+        args += ["--seg-run-id", seg_run_id, "--seg-mask-label", str(seg_mask_label)]
 
     run_id: str | None = None
 

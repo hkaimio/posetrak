@@ -127,6 +127,30 @@ def persons_ordered_for_seg_run(session: sqlite3.Connection, seg_quality_run_id:
     return [p["name"] for p in list_persons(session, row["shot_id"])]
 
 
+def resolve_seg_mask_label(
+    session: sqlite3.Connection, seg_quality_run_id: str, subject_name: str
+) -> int | None:
+    """Return *subject_name*'s own mask label (1..N) within *seg_quality_run_id*,
+    or None if that name isn't in this segmentation's own person list.
+
+    Thin wrapper over :func:`persons_ordered_for_seg_run` -- the one join a
+    caller needs before passing ``--seg-run-id``/``--seg-mask-label`` to the
+    tracker binary (segmentation-mask-dot-assignment-design.md §6): C++ never
+    does this name lookup itself, only compares an already-resolved integer
+    label against a decoded mask byte, so this resolution has to happen here,
+    once, before invoking it. A prop's own name (``capture_objects.name``)
+    works identically to a person's here -- the segmentation's own person
+    list doesn't distinguish the two (see
+    ``app.pose.cutie_init_panel``'s own "an object's name flows through
+    identically to a person's" note).
+    """
+    names = persons_ordered_for_seg_run(session, seg_quality_run_id)
+    try:
+        return names.index(subject_name) + 1
+    except ValueError:
+        return None
+
+
 def get_person(session: sqlite3.Connection, person_id: str) -> sqlite3.Row | None:
     """Return one ``capture_persons`` row by id, or ``None`` if not found."""
     return session.execute(

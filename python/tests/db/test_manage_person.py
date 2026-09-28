@@ -18,6 +18,7 @@ from posetrak.db.manage_person import (
     list_persons,
     persons_ordered_for_seg_run,
     rename_person,
+    resolve_seg_mask_label,
     set_default_skeleton,
 )
 
@@ -242,3 +243,50 @@ def test_persons_ordered_for_seg_run_falls_back_to_capture_persons(session_db) -
 def test_persons_ordered_for_seg_run_missing_row_raises(session_db) -> None:
     with pytest.raises(ValueError, match="not found"):
         persons_ordered_for_seg_run(session_db, "does-not-exist")
+
+
+# ---------------------------------------------------------------------------
+# resolve_seg_mask_label (segmentation-mask-dot-assignment-design.md §6)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_seg_mask_label_returns_one_based_index(session_db) -> None:
+    capture_id = _make_capture(session_db)
+    session_db.execute(
+        "INSERT INTO seg_quality_runs "
+        "(id, shot_id, time_start_s, time_end_s, created_at, persons_json) "
+        "VALUES ('seg1', ?, 0.0, 1e9, '2026-01-01', '[\"Bob\", \"Alice\"]')",
+        (capture_id,),
+    )
+    session_db.commit()
+
+    assert resolve_seg_mask_label(session_db, "seg1", "Bob") == 1
+    assert resolve_seg_mask_label(session_db, "seg1", "Alice") == 2
+
+
+def test_resolve_seg_mask_label_none_for_a_name_not_in_this_segmentation(session_db) -> None:
+    capture_id = _make_capture(session_db)
+    session_db.execute(
+        "INSERT INTO seg_quality_runs "
+        "(id, shot_id, time_start_s, time_end_s, created_at, persons_json) "
+        "VALUES ('seg1', ?, 0.0, 1e9, '2026-01-01', '[\"Bob\"]')",
+        (capture_id,),
+    )
+    session_db.commit()
+
+    assert resolve_seg_mask_label(session_db, "seg1", "Sword") is None
+
+
+def test_resolve_seg_mask_label_works_for_an_object_name_same_as_a_person(session_db) -> None:
+    """A prop's own name flows through identically to a person's -- the
+    segmentation's own person list doesn't distinguish the two."""
+    capture_id = _make_capture(session_db)
+    session_db.execute(
+        "INSERT INTO seg_quality_runs "
+        "(id, shot_id, time_start_s, time_end_s, created_at, persons_json) "
+        "VALUES ('seg1', ?, 0.0, 1e9, '2026-01-01', '[\"Alice\", \"Sword\"]')",
+        (capture_id,),
+    )
+    session_db.commit()
+
+    assert resolve_seg_mask_label(session_db, "seg1", "Sword") == 2

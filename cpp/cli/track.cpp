@@ -31,6 +31,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 
@@ -962,7 +963,8 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                              double override_start_time = std::numeric_limits<double>::quiet_NaN(),
                              double override_end_time = std::numeric_limits<double>::quiet_NaN(),
                              std::optional<Eigen::Vector3d> const& seed_position = std::nullopt,
-                             int trace_assignment_start = -1, int trace_assignment_end = -1) {
+                             int trace_assignment_start = -1, int trace_assignment_end = -1,
+                             std::string const& seg_run_id = "", int seg_mask_label = 0) {
     try {
         PersonSpec spec;
         spec.sequence_id = sequence_id;
@@ -985,6 +987,27 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
 
         auto ctx = build_person_context(spec, opts, verbose);
 
+        // Segmentation-mask-based dot-assignment trust (segmentation-mask-
+        // dot-assignment-design.md): seg_run_id/seg_mask_label are this
+        // subject's own identity, supplied at invocation time and never
+        // persisted (the resolved-from-name mask_label a Python caller looked
+        // up via seg_quality_runs.persons_json, not a name itself -- C++ does
+        // no name resolution). Empty seg_run_id disables the whole mechanism;
+        // ctx->tracker_config.dot_seg_mask_enabled (a DB-configured tracker
+        // tunable) still gates whether SegmentationMaskModifier is actually
+        // registered even when a subject identity is supplied here.
+        SegMaskSubjectConfig seg_mask_subject_config;
+        std::unique_ptr<SessionReader> seg_mask_reader;
+        std::unordered_map<int, std::string> camera_shot_video_ids;
+        TrackletMaskState tracklet_mask_state;
+        if (!seg_run_id.empty() && seg_mask_label > 0) {
+            seg_mask_subject_config.seg_run_id = seg_run_id;
+            seg_mask_subject_config.mask_label = seg_mask_label;
+            seg_mask_reader = std::make_unique<SessionReader>(db_path);
+            camera_shot_video_ids =
+                seg_mask_reader->load_camera_shot_video_ids(ctx->sync_config_id);
+        }
+
         step_person_context_frame0(*ctx);
         for (int step = 1; step < ctx->num_steps; ++step) {
             // Shared dot-assignment three-pass shape (design doc §5.2), only when
@@ -1004,7 +1027,7 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                 if (!candidates_by_camera.empty()) {
                     step_person_context_predict(*ctx, step);
                     std::vector<DotAssignmentSubject> subjects = {
-                        DotAssignmentSubject{0, ctx->tracker.get()}};
+                        DotAssignmentSubject{0, ctx->tracker.get(), seg_mask_subject_config}};
                     double const t_effective = t_start + ctx->dt / 2.0;
                     auto const t_assign0 = Clock::now();
                     // AssignmentTrace::wants() gates on frame_idx (== step here), so this
@@ -1016,9 +1039,41 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                     AssignmentTrace trace;
                     trace.start_frame = trace_assignment_start;
                     trace.end_frame = trace_assignment_end;
-                    auto assignment = resolve_shared_dot_assignment(subjects, candidates_by_camera,
-                                                                    ctx->tracker_config, step,
-                                                                    t_effective, &trace);
+
+                    // This step's segmentation masks, one per camera with candidates,
+                    // decoded fresh every step from whatever seg_masks rows exist right
+                    // now (segmentation-mask-dot-assignment-design.md §5: no cached
+                    // derivative to go stale when a segmentation is re-edited). Each
+                    // camera's own first candidate's frame_idx stands in for "this
+                    // camera's native frame this step" -- candidates within one bucket
+                    // window are already expected to share a frame_idx in the normal
+                    // one-tracker-step-per-video-frame case.
+                    std::unordered_map<int, DecodedSegMask> seg_masks_by_camera;
+                    if (seg_mask_reader) {
+                        for (auto const& [camera_id, cam_candidates] : candidates_by_camera) {
+                            if (cam_candidates.empty())
+                                continue;
+                            auto const svid_it = camera_shot_video_ids.find(camera_id);
+                            if (svid_it == camera_shot_video_ids.end() || svid_it->second.empty())
+                                continue;
+                            auto blob = seg_mask_reader->load_seg_mask_blob(
+                                seg_run_id, svid_it->second, cam_candidates.front().frame_idx);
+                            if (!blob.has_value())
+                                continue;
+                            DecodedSegMask mask;
+                            auto const cam_it = ctx->cameras_by_id.find(camera_id);
+                            if (cam_it == ctx->cameras_by_id.end())
+                                continue;
+                            mask.native_w = cam_it->second.intrinsics().width;
+                            mask.native_h = cam_it->second.intrinsics().height;
+                            if (decode_seg_mask(*blob, mask))
+                                seg_masks_by_camera[camera_id] = std::move(mask);
+                        }
+                    }
+
+                    auto assignment = resolve_shared_dot_assignment(
+                        subjects, candidates_by_camera, ctx->tracker_config, step, t_effective,
+                        &trace, seg_masks_by_camera, &tracklet_mask_state);
                     frame_step_profile::add_dot_assignment_total_ms(
                         Ms(Clock::now() - t_assign0).count());
                     frame_step_profile::add_step();
@@ -1152,6 +1207,8 @@ int main(int argc, char* argv[]) {
     std::vector<double> db_seed_position;  // see PersonSpec::seed_position
     int db_trace_assignment_start = -1;
     int db_trace_assignment_end = -1;
+    std::string db_seg_run_id;
+    int db_seg_mask_label = 0;
     // Per-subject seeds for --person mode: repeated 4-value groups (person index, x, y, z).
     std::vector<double> db_subject_seeds;
     // Multi-person mode: repeated 4-value groups (sequence, skeleton, tracker_config,
@@ -1207,6 +1264,18 @@ int main(int argc, char* argv[]) {
                           "Last tracker step (inclusive) to trace -- see --trace-assignment-start. "
                           "Keep the range narrow: this is per-candidate-per-slot detail, not a "
                           "per-step summary.");
+    track_cmd->add_option(
+        "--seg-run-id", db_seg_run_id,
+        "seg_quality_runs ID whose masks gate the shared dot-assignment phase's trust in a "
+        "candidate's tracklet (SegmentationMaskModifier) -- see segmentation-mask-dot-"
+        "assignment-design.md. Requires --seg-mask-label too; off by default. The tracker "
+        "config's own dot_seg_mask_enabled must also be set for this to have any effect. "
+        "Single-subject DB mode only.");
+    track_cmd->add_option(
+        "--seg-mask-label", db_seg_mask_label,
+        "This subject's own label (1..N) within --seg-run-id's masks -- resolve this from the "
+        "subject's name against seg_quality_runs.persons_json before invoking the tracker; "
+        "C++ does no name resolution of its own.");
     track_cmd
         ->add_option("--seed-position", db_seed_position,
                      "Externally-supplied initial root position (x y z, meters), bypassing "
@@ -1304,11 +1373,17 @@ int main(int argc, char* argv[]) {
                 seed_position =
                     Eigen::Vector3d(db_seed_position[0], db_seed_position[1], db_seed_position[2]);
             }
-            return run_track_from_db(
-                db_path, db_sequence_id, db_skeleton_id, db_config_id, db_output_dir, verbose,
-                quiet, smooth_output, debug_output, debug_init, db_min_confidence, db_person_id,
-                db_active_joint_groups, db_start_time, db_end_time, seed_position,
-                db_trace_assignment_start, db_trace_assignment_end);
+            if (!db_seg_run_id.empty() != (db_seg_mask_label > 0)) {
+                fmt::print(stderr,
+                           "Error: --seg-run-id and --seg-mask-label must be given together\n");
+                return 1;
+            }
+            return run_track_from_db(db_path, db_sequence_id, db_skeleton_id, db_config_id,
+                                     db_output_dir, verbose, quiet, smooth_output, debug_output,
+                                     debug_init, db_min_confidence, db_person_id,
+                                     db_active_joint_groups, db_start_time, db_end_time,
+                                     seed_position, db_trace_assignment_start,
+                                     db_trace_assignment_end, db_seg_run_id, db_seg_mask_label);
         } else {
             if (track_config.empty()) {
                 fmt::print(stderr, "Error: config file required when not using --session-db\n");

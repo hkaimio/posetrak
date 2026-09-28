@@ -206,15 +206,16 @@ subject-specific, and it turns out the data already supports that:
   version of the coarse "off-mask" idea in §3: it's the same mechanism that
   also settles ambiguity *between* subjects, not only between "the scene" and
   "off-scene."
-- Consequence for config shape (see §6): `seg_run_id` etc. cannot be a single
-  scalar shared across every subject in a call the way
+- Consequence for config shape (see §6): `seg_run_id`/label etc. cannot be a
+  single scalar shared across every subject in a call the way
   `dot_tracklet_gate_multiplier` is (that one is explicitly required to be
   *identical* across subjects sharing a solve —
   `find_dot_config_disagreement()` errors on a mismatch). Which seg_run
   applies, or whether one exists at all, is legitimately per-subject (a prop
   might have no segmentation; two people in frame have two different
   silhouettes in the *same* mask blob, distinguished only by label). Needs a
-  `subject_id -> SegMaskConfig` map instead.
+  `subject_id -> SegMaskConfig` map instead — see §6 for where the
+  subject-to-label resolution actually happens (Python, not new schema).
 - Consequence for the accumulator: a tracklet's in-mask fraction is only
   meaningful relative to *one* subject's label. A tracklet correctly on
   subject A but briefly considered (and rejected) for subject B's slot must
@@ -234,8 +235,10 @@ now subject-scoped per §5.1:
 ```cpp
 struct SegMaskConfig {
     bool enabled = false;
-    std::string seg_run_id;          // seg_quality_runs.id; empty disables
-    double dilate_px = 20.0;         // native-pixel dilation before testing
+    std::string seg_run_id;   // seg_quality_runs.id; empty disables
+    int mask_label;           // already-resolved 1..N label for this subject
+                               // in that seg_run -- see resolution note below
+    double dilate_px = 20.0;  // native-pixel dilation before testing
     int tracklet_window = 60;        // frames, same accumulator-window shape
                                       // as StreakKAccumulator's own window
     double min_tracklet_fraction = 0.3;  // below this + off-mask now -> excluded
@@ -249,14 +252,35 @@ subject_id; a subject absent from the map is a no-op, so a scene with no
 segmentation at all, or where only some subjects have one, works unchanged)
 and
 `std::unordered_map<int, std::unordered_map<int, std::unordered_map<int, TrackletMaskAccumulator>>>* tracklet_mask_state = nullptr;`
-(subject_id -> camera_id -> tracklet_id). `resolve_shared_dot_assignment()`
-populates `seg_mask_config` from each subject's own seg_run association
-(likely a `tracking_run_persons`/`tracking_run_objects` column, not
-`tracker_configs` — seg_run choice is "which segmentation applies to this
-subject," not a shared tracker tuning parameter subjects must agree on) and
-resolves each subject's own mask label via `persons_json` at load time (same
-name-lookup `manage_person.py`'s `persons_ordered_for_seg_run()` already
-does), once per run rather than once per frame.
+(subject_id -> camera_id -> tracklet_id).
+
+**Name/label resolution stays in Python, not C++ — this was overcomplicated
+in an earlier draft of this note; corrected after checking the actual
+join.** `seg_quality_runs.persons_json[i]` names the subject at mask label
+`i+1`; a tracking subject's own name is `sequence_persons.person_name` for a
+person, or `capture_objects.name` for an object (both already exist,
+resolved by `manage_person.py`'s `persons_ordered_for_seg_run()` for the
+`persons_json` half, and by `finalise.py`/`sequence_persons` for the subject
+half — no new schema needed to go from "subject" to "its own mask label").
+But `cpp/src/db/session_reader.cpp` never reads either of those name-bearing
+tables today, and shouldn't have to just for this: **the Python launcher
+(`python/posetrak/tracker/runner.py`, which already builds a `PersonRunSpec`
+per subject and shells out to the tracker binary) resolves `seg_run_id` +
+subject name -> integer `mask_label` once, before invoking the binary, and
+passes the plain resolved integer down** (TOML config or CLI flag). C++ only
+ever compares an already-resolved `int` against a decoded mask byte — it
+gains a PNG decoder, not a name-matching join.
+
+Which `seg_run_id` applies to a given subject in the first place is **not
+persisted anywhere new**, mirroring `dot_mask_seg_run_id`'s own existing
+precedent (a `finalise_object_to_db` parameter, never written back to any
+column): the operator supplies it per subject at track-invocation time
+(TOML/CLI), the same way `RunDetectionDialog` already offers an explicit
+segmentation picker for a detection run (`run_detection_dialog.py`,
+`segmentation-reuse-design.md`'s "gap 2") rather than the schema
+auto-discovering it. If a future UI wants a "run tracking with this
+segmentation" picker, it can follow that same explicit-choice precedent
+without any schema change either.
 
 Masks themselves are decoded and cached per (camera, frame) for the duration
 of one step's resolve call — same "not cached across frames, one full mask
@@ -264,11 +288,6 @@ retained at a time" memory posture `_make_dot_mask_filter`'s own
 `dilated_mask()` already documents and justifies for the same data shape; one
 decoded mask is reused for every subject's label test that step, only the
 label byte compared against differs.
-
-CLI: no new scalar flag — since the seg-run association is per-subject, it
-follows whatever flag/column already selects a subject into a tracking run
-(e.g. alongside `--person`/object-selection flags), not a single
-`--seg-run-id` on the whole run as originally sketched.
 
 ## 7. Testing
 
@@ -301,9 +320,13 @@ aggregate tracked-percentage number.
    stored pool and would leave every noisy background detection riding along
    in every future run's candidate merge/solve if the finalise-time filter
    were dropped.
-4. Where does a subject's own `seg_run_id` actually live? Proposed above as a
-   new column on `tracking_run_persons`/`tracking_run_objects` (whichever
-   already carries the per-subject row for a run), rather than on
-   `tracker_configs` — but that table's exact shape for objects vs. persons
-   wasn't re-verified against the current schema as part of this note; worth
-   confirming before implementation which table gets the new column.
+4. **Settled** (you flagged this was worth checking before this note added
+   more schema — right call, an earlier draft here proposed a new
+   `tracking_run_persons`/`tracking_run_objects` column it didn't need):
+   subject-to-mask-label resolution reuses data that already exists —
+   `sequence_persons.person_name` (person) or `capture_objects.name`
+   (object) matched against `seg_quality_runs.persons_json` — done once in
+   the Python launcher (`runner.py`) before invoking the tracker binary, not
+   in C++ and not via any new column. Which `seg_run_id` applies to a
+   subject is supplied at invocation time (TOML/CLI), never persisted,
+   mirroring `dot_mask_seg_run_id`'s existing precedent. See §6.

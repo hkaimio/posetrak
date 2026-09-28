@@ -75,9 +75,10 @@ which marker slot it's competing for this step.
 
 - **(a) Current-frame membership** is a stateless lookup: decode this step's
   mask for that camera, test the candidate's (dilated) pixel against it. No
-  history needed — same computation `_make_dot_mask_filter` already does per
-  frame, just done once per (camera, frame) at tracking time instead of once
-  at finalise time.
+  history needed — but *not* the same test `_make_dot_mask_filter` does: that
+  filter tests `mask > 0` ("near any tracked subject"), while this needs
+  `mask == this_pair's_subject_label` — see §5.1, this only became clear once
+  multi-subject scenes were worked through.
 - **(b) Per-tracklet in-mask fraction** needs a running accumulator, exactly
   the shape `StreakKAccumulator` already established for the streak-velocity
   extension: plain data, no Tracker/skeleton/mask access of its own, updated in
@@ -90,28 +91,37 @@ which marker slot it's competing for this step.
 Both signals feed a new `CostModifier`:
 
 ```cpp
-/// @brief Penalizes a candidate whose current-frame position or recent
-/// tracklet history falls outside the subject's segmentation mask.
+/// @brief Penalizes a (candidate, slot) pair whose candidate's current-frame
+/// position or recent tracklet history falls outside *the slot's own
+/// subject's* label in the segmentation mask.
 ///
-/// Two independent checks, both against DotAssignmentContext::seg_mask_config:
+/// Two independent checks, both against
+/// DotAssignmentContext::seg_mask_config[slot.subject_id]:
 ///  - this frame's candidate position, dilated, tested against this step's
-///    own decoded mask for the candidate's camera (a "hard now" signal);
-///  - the candidate's tracklet's running in-mask fraction from
-///    DotAssignmentContext::tracklet_mask_state (a "soft, over time" signal
-///    -- built for exactly the case you named: segmentation is wrong or a
-///    reflective dot is still visible outside a strict silhouette during a
-///    fast swing, so the current-frame test alone would wrongly reject a
-///    real detection).
+///    own decoded mask for the candidate's camera, restricted to the pixels
+///    labeled for slot.subject_id specifically -- not "labeled for any
+///    subject" (a "hard now" signal, and the thing that lets it arbitrate
+///    between two subjects competing for the same stray candidate, see §5.1);
+///  - the candidate's tracklet's running in-mask fraction *for this subject*
+///    from DotAssignmentContext::tracklet_mask_state[slot.subject_id] (a
+///    "soft, over time" signal -- built for exactly the case you named:
+///    segmentation is wrong or a reflective dot is still visible outside a
+///    strict silhouette during a fast swing, so the current-frame test alone
+///    would wrongly reject a real detection).
 ///
 /// A pair is excluded outright when the current-frame test fails by more
-/// than dilate_px AND the tracklet's own fraction is below
-/// min_tracklet_fraction (both signs agree: not just off-mask now, but with
-/// a history of being off-mask too -- exactly the "confidently outside"
-/// case this exists to catch, not a single ambiguous frame). Otherwise the
-/// pair's cost is scaled by a factor derived from the tracklet fraction
-/// alone (see class body) -- a soft push away from a since-questionable
-/// tracklet without ever making a good candidate mathematically
-/// unreachable on one bad frame.
+/// than dilate_px AND the tracklet's own fraction (for this subject) is
+/// below min_tracklet_fraction (both signs agree: not just off-mask now, but
+/// with a history of being off-mask too -- exactly the "confidently
+/// outside" case this exists to catch, not a single ambiguous frame).
+/// Otherwise the pair's cost is scaled by a factor derived from the
+/// tracklet fraction alone (see class body) -- a soft push away from a
+/// since-questionable tracklet without ever making a good candidate
+/// mathematically unreachable on one bad frame.
+///
+/// A no-op for a subject absent from seg_mask_config (no segmentation
+/// configured for it) -- every existing single-subject caller is
+/// unaffected.
 class SegmentationMaskModifier final : public CostModifier { ... };
 ```
 
@@ -169,12 +179,57 @@ relationship at load time, should be quite cheap." Concretely:
     data, but only because it's a diagnostic record of what a specific run in
     the past decided, not an input another run reads back.
 
+### 5.1 Multi-subject scenes (dots are anonymous, candidates are shared)
+
+`resolve_dot_assignment()` already runs **one shared Hungarian solve per
+camera across every dot-bearing subject at once** — a stray candidate can
+legitimately be in contention for two different subjects' slots in the same
+call (that's the whole reason the architecture doc calls for one joint solve
+instead of one independent solve per subject). So the mask test can't be a
+single "is this candidate inside a mask" boolean; it has to be
+subject-specific, and it turns out the data already supports that:
+
+- `seg_masks.mask_blob` is not a binary silhouette — it's a **labeled** mask
+  (`0=bg, 1..N=subject`), and `seg_quality_runs.persons_json[i]` names the
+  subject at label `i+1` (confirmed this applies uniformly to persons *and*
+  objects — `cutie_init_panel.py`'s own comment: "an object's name flows
+  through identically to a person's"). `_make_dot_mask_filter` (the
+  finalise-time filter, §2) throws this away today — it tests `mask > 0`,
+  "near *any* tracked subject" — which is fine for a coarse prefilter but
+  useless for arbitration.
+- The live modifier must instead test `mask == label_for(slot.subject_id)`.
+  `CostModifier::apply()` already receives `DotSlotRef::subject_id` per pair,
+  so this needs no new plumbing to the modifier itself — the same shared
+  candidate pool, tested against each competing subject's own label in turn,
+  is exactly what lets a stray candidate score well against subject A's slots
+  and poorly against subject B's in the same call. This is a strictly better
+  version of the coarse "off-mask" idea in §3: it's the same mechanism that
+  also settles ambiguity *between* subjects, not only between "the scene" and
+  "off-scene."
+- Consequence for config shape (see §6): `seg_run_id` etc. cannot be a single
+  scalar shared across every subject in a call the way
+  `dot_tracklet_gate_multiplier` is (that one is explicitly required to be
+  *identical* across subjects sharing a solve —
+  `find_dot_config_disagreement()` errors on a mismatch). Which seg_run
+  applies, or whether one exists at all, is legitimately per-subject (a prop
+  might have no segmentation; two people in frame have two different
+  silhouettes in the *same* mask blob, distinguished only by label). Needs a
+  `subject_id -> SegMaskConfig` map instead.
+- Consequence for the accumulator: a tracklet's in-mask fraction is only
+  meaningful relative to *one* subject's label. A tracklet correctly on
+  subject A but briefly considered (and rejected) for subject B's slot must
+  not have its A-relative trust history contaminated by a B-relative score —
+  so `TrackletMaskAccumulator` state needs the same
+  `subject_id -> camera_id -> tracklet_id` nesting `PrevDotPositions`/
+  `PrevDotTrackletIds` already use, not a flat `camera_id -> tracklet_id` map.
+
 ## 6. Config and plumbing
 
 Mirrors the existing `dot_streak_*`/`dot_tracklet_gate_multiplier` precedent —
 new `TrackerConfig` fields, a new `tracker_configs` migration
 (schema is at v56 after `tracking_assignment_trace`; this would be v57),
-`DotAssignmentContext` fields analogous to `streak_config`/`streak_k_state`:
+`DotAssignmentContext` fields analogous to `streak_config`/`streak_k_state`,
+now subject-scoped per §5.1:
 
 ```cpp
 struct SegMaskConfig {
@@ -188,20 +243,32 @@ struct SegMaskConfig {
 };
 ```
 
-`DotAssignmentContext` gains `SegMaskConfig seg_mask_config;` and
-`std::unordered_map<int, TrackletMaskAccumulator>* tracklet_mask_state =
-nullptr;` (keyed by tracklet_id, one map per camera — same per-camera
-partitioning `streak_k_state` uses, since a tracklet_id is only unique within
-its own camera's detector). Masks themselves are decoded and cached per
-(camera, frame) for the duration of one step's resolve call — same "not cached
-across frames, one full mask retained at a time" memory posture
-`_make_dot_mask_filter`'s own `dilated_mask()` already documents and justifies
-for the same data shape.
+`DotAssignmentContext` gains
+`std::unordered_map<int, SegMaskConfig> seg_mask_config;` (keyed by
+subject_id; a subject absent from the map is a no-op, so a scene with no
+segmentation at all, or where only some subjects have one, works unchanged)
+and
+`std::unordered_map<int, std::unordered_map<int, std::unordered_map<int, TrackletMaskAccumulator>>>* tracklet_mask_state = nullptr;`
+(subject_id -> camera_id -> tracklet_id). `resolve_shared_dot_assignment()`
+populates `seg_mask_config` from each subject's own seg_run association
+(likely a `tracking_run_persons`/`tracking_run_objects` column, not
+`tracker_configs` — seg_run choice is "which segmentation applies to this
+subject," not a shared tracker tuning parameter subjects must agree on) and
+resolves each subject's own mask label via `persons_json` at load time (same
+name-lookup `manage_person.py`'s `persons_ordered_for_seg_run()` already
+does), once per run rather than once per frame.
 
-CLI: `--seg-run-id` flag on `posetrak-tracker track`, threaded down next to the
-existing `--trace-assignment-start/-end` flags; absent/empty disables the whole
-mechanism (matches every other optional mechanism in this file — a
-default-constructed `SegMaskConfig` is a no-op).
+Masks themselves are decoded and cached per (camera, frame) for the duration
+of one step's resolve call — same "not cached across frames, one full mask
+retained at a time" memory posture `_make_dot_mask_filter`'s own
+`dilated_mask()` already documents and justifies for the same data shape; one
+decoded mask is reused for every subject's label test that step, only the
+label byte compared against differs.
+
+CLI: no new scalar flag — since the seg-run association is per-subject, it
+follows whatever flag/column already selects a subject into a tracking run
+(e.g. alongside `--person`/object-selection flags), not a single
+`--seg-run-id` on the whole run as originally sketched.
 
 ## 7. Testing
 
@@ -227,9 +294,16 @@ aggregate tracked-percentage number.
    written above it's independent (operates on tracklet mask history, not
    tracklet *continuity*), but the order matters if both end up modifying the
    same pair's cost multiplicatively vs. one excluding first.
-3. Does `_make_dot_mask_filter` in `finalise.py` stay as-is (a separate, coarser,
-   opt-in pre-filter someone might still use without ever running a masked
-   tracking pass), or should it eventually be superseded by this mechanism?
-   Leaning toward "leave it, it's a different tool for a different moment
-   (detection-time hygiene vs. tracking-time trust)" — flagging for your
-   call rather than assuming.
+3. **Settled**: `_make_dot_mask_filter` in `finalise.py` stays as-is. It's a
+   different job — a coarse, one-time, storage/solve-cost prefilter over the
+   raw candidate pool, run once at detection-finalise time — not a cruder
+   version of the live per-subject trust mechanism, which never shrinks the
+   stored pool and would leave every noisy background detection riding along
+   in every future run's candidate merge/solve if the finalise-time filter
+   were dropped.
+4. Where does a subject's own `seg_run_id` actually live? Proposed above as a
+   new column on `tracking_run_persons`/`tracking_run_objects` (whichever
+   already carries the per-subject row for a run), rather than on
+   `tracker_configs` — but that table's exact shape for objects vs. persons
+   wasn't re-verified against the current schema as part of this note; worth
+   confirming before implementation which table gets the new column.

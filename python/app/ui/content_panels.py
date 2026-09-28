@@ -2611,6 +2611,10 @@ class _ImageCanvas(QWidget):
                                                 # reflective-dot candidates (distinct from
                                                 # marker_xy, which is a tracked/predicted
                                                 # projection, not a raw detection)
+        self._dot_status = None                # list[(status, label)] parallel to _dot_xy,
+                                                # status in {"inlier","outlier","unassigned"};
+                                                # None (or a shorter list) means "no status
+                                                # known yet" -- draws the old uniform colour
         # Visibility flags
         self._show_detected: bool = True
         self._show_tracked: bool = True
@@ -2666,6 +2670,7 @@ class _ImageCanvas(QWidget):
         self._joint_xy = None
         self._marker_xy = None
         self._dot_xy = None
+        self._dot_status = None
         self._debug_label = None
         self.update()
 
@@ -2678,6 +2683,7 @@ class _ImageCanvas(QWidget):
         self._joint_xy = None
         self._marker_xy = None
         self._dot_xy = None
+        self._dot_status = None
         self._debug_label = None
         self.update()
 
@@ -2699,12 +2705,14 @@ class _ImageCanvas(QWidget):
         show_tracked: bool,
         outlier_mask=None,
         dot_xy=None,
+        dot_status=None,
     ) -> None:
         self._obs_kp = obs_kp
         self._joint_xy = joint_xy
         self._bone_pairs = bone_pairs
         self._marker_xy = marker_xy
         self._dot_xy = dot_xy
+        self._dot_status = dot_status
         self._show_detected = show_detected
         self._show_tracked = show_tracked
         self._outlier_kp_mask = outlier_mask
@@ -3008,6 +3016,23 @@ class _ImageCanvas(QWidget):
         self._zoom_rect = _panned_rect(self._zoom_rect, -disp_dx / scale, -disp_dy / scale)
         self.update()
 
+    @staticmethod
+    def _draw_label(painter: QPainter, pt: QPointF, text: str, color: QColor) -> None:
+        """Small text label in *color*, black rounded-rect background, offset from
+        *pt* -- same background-chip idiom as the edit-mode selected-keypoint name
+        label below, parameterized so overlays other than that one can use it too."""
+        fm = painter.fontMetrics()
+        text_w = fm.horizontalAdvance(text)
+        text_h = fm.height()
+        lx = pt.x() + 8
+        ly = pt.y() - text_h / 2
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 170))
+        painter.drawRoundedRect(QRectF(lx - 2, ly - 1, text_w + 5, text_h + 2), 2.0, 2.0)
+        painter.setPen(color)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawText(QPointF(lx, ly + fm.ascent()), text)
+
     def paintEvent(self, _event) -> None:
         from math import isnan
 
@@ -3139,24 +3164,50 @@ class _ImageCanvas(QWidget):
                 painter.drawEllipse(to_pt(kp_x, kp_y), 5.0, 5.0)
 
         if self._show_detected and self._dot_xy is not None:
-            # Raw detected reflective-dot candidates -- small unfilled
-            # magenta circles. Gated with the other *detected* overlays
-            # (show_detected), not show_tracked: a candidate is a raw
-            # detection, not a tracked/predicted result, and a widget with
-            # no "tracked" concept at all (ObjectCropGridWidget always
-            # passes show_tracked=False) must still be able to show it.
-            # Colour kept distinct from marker_xy's filled yellow below (a
-            # tracked/predicted projection, not a raw detection) and from
-            # the tracked skeleton's own cyan bone lines.
-            pen = QPen(QColor(230, 0, 230))
-            pen.setWidthF(1.5)
-            painter.setPen(pen)
+            # Raw detected reflective-dot candidates. Gated with the other
+            # *detected* overlays (show_detected), not show_tracked: a
+            # candidate is a raw detection, not a tracked/predicted result,
+            # and a widget with no "tracked" concept at all
+            # (ObjectCropGridWidget always passes show_tracked=False) must
+            # still be able to show it.
+            #
+            # Colour encodes the tracker's own assignment decision for this
+            # candidate (see _TrackingRunLoader's resolved-marker pass and
+            # PersonCropGridWidget._apply_overlay's nearest-position join):
+            # magenta/default when that decision isn't known (no status
+            # array -- e.g. ObjectCropGridWidget, which has no tracking run
+            # to ask), green when the candidate was assigned to a marker
+            # slot and accepted as an inlier, orange when assigned but
+            # rejected by the UKF's outlier check, and blue when never
+            # assigned to any slot at all. Blue rather than grey: grey
+            # disappears against the kind of dark background these crops
+            # usually have.
+            status = self._dot_status
+            n_status = len(status) if status is not None else 0
+            _DOT_COLORS = {
+                "inlier": QColor(0, 220, 60),
+                "outlier": QColor(255, 140, 0),
+                "unassigned": QColor(60, 140, 255),
+            }
+            _DEFAULT_DOT_COLOR = QColor(230, 0, 230)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             for i in range(self._dot_xy.shape[0]):
                 du, dv = float(self._dot_xy[i, 0]), float(self._dot_xy[i, 1])
                 if isnan(du) or isnan(dv):
                     continue
-                painter.drawEllipse(to_pt(du, dv), 4.0, 4.0)
+                label = None
+                if i < n_status and status[i] is not None:
+                    st, label = status[i]
+                    color = _DOT_COLORS.get(st, _DEFAULT_DOT_COLOR)
+                else:
+                    color = _DEFAULT_DOT_COLOR
+                pen = QPen(color)
+                pen.setWidthF(1.5)
+                painter.setPen(pen)
+                pt = to_pt(du, dv)
+                painter.drawEllipse(pt, 4.0, 4.0)
+                if label:
+                    self._draw_label(painter, pt, label, color)
 
         # ---- Tracked skeleton (cyan lines + yellow dots) ----
         if self._show_tracked:
@@ -3332,10 +3383,11 @@ class _CropCell(QWidget):
         show_tracked: bool,
         outlier_mask=None,
         dot_xy=None,
+        dot_status=None,
     ) -> None:
         self._canvas.set_overlay(
             obs_kp, joint_xy, bone_pairs, marker_xy, show_detected, show_tracked,
-            outlier_mask=outlier_mask, dot_xy=dot_xy,
+            outlier_mask=outlier_mask, dot_xy=dot_xy, dot_status=dot_status,
         )
 
     def set_edit_mode(self, enabled: bool) -> None:
@@ -3387,8 +3439,9 @@ class _TrackingRunLoader(QThread):
     loading fails.
     """
 
-    loaded = Signal(list, dict, dict, list, dict)
-    # args: tracking_timestamps, marker_proj, joint_proj, bone_pairs, outlier_masks
+    loaded = Signal(list, dict, dict, list, dict, dict, dict)
+    # args: tracking_timestamps, marker_proj, joint_proj, bone_pairs, outlier_masks,
+    #       resolved_markers, cam_intrinsics
 
     def __init__(self, db_path: str, run_id: str) -> None:
         super().__init__()   # no Qt parent — lifetime managed via _ACTIVE_LOADERS
@@ -3413,7 +3466,7 @@ class _TrackingRunLoader(QThread):
             conn.row_factory = _sqlite3.Row
             self._do_load(conn, np, json, SkeletonLayout)
         except Exception:
-            self.loaded.emit([], {}, {}, [], {})
+            self.loaded.emit([], {}, {}, [], {}, {}, {})
         finally:
             if conn is not None:
                 conn.close()
@@ -3427,14 +3480,14 @@ class _TrackingRunLoader(QThread):
             (run_id,),
         ).fetchone()
         if run is None:
-            self.loaded.emit([], {}, {}, [], {})
+            self.loaded.emit([], {}, {}, [], {}, {}, {})
             return
 
         cam_labels: list[str] = json.loads(run["active_camera_ids"] or "[]")
         marker_names: list[str] = json.loads(run["marker_names"] or "[]")
         n_cams, n_markers = len(cam_labels), len(marker_names)
         if n_cams == 0 or n_markers == 0:
-            self.loaded.emit([], {}, {}, [], {})
+            self.loaded.emit([], {}, {}, [], {}, {}, {})
             return
 
         # Map camera label → camera_instance_id
@@ -3462,7 +3515,7 @@ class _TrackingRunLoader(QThread):
             (run["skeleton_id"],),
         ).fetchone()
         if not skel or not skel["yaml_content"]:
-            self.loaded.emit([], {}, {}, [], {})
+            self.loaded.emit([], {}, {}, [], {}, {}, {})
             return
         layout = SkeletonLayout(skel["yaml_content"])
         bone_pairs = layout.bone_pairs
@@ -3529,30 +3582,50 @@ class _TrackingRunLoader(QThread):
         # corrected skeleton on a fast-motion frame. Projecting both markers
         # and joints from the same posterior state keeps the two overlays
         # from ever visually disagreeing.
+        # resolved_markers: cam_id -> step -> {marker_name: (u, v, is_outlier)} --
+        # every marker with a non-NaN obs_blob position this step, keyed by name
+        # rather than COCO id so it covers dot/prop markers too (mi_to_coco is
+        # empty for a dots-only skeleton, unlike outlier_masks below). This is
+        # what PersonCropGridWidget._apply_overlay correlates raw dot_xy
+        # candidates against to decide each one's assigned/inlier/unassigned
+        # colour -- see that method and _ImageCanvas's dot_xy drawing block.
         outlier_masks: dict[str, dict[int, object]] = {}
-        if mi_to_coco:
-            obs_rows = conn.execute(
-                "SELECT tracker_step, obs_blob FROM tracking_obs_results "
-                "WHERE run_id=? AND person_id=0 ORDER BY tracker_step",
-                (run_id,),
-            ).fetchall()
-            expected_obs = n_cams * n_markers * 8
-            for obs_row in obs_rows:
-                step = obs_row["tracker_step"]
-                blob = np.frombuffer(bytes(obs_row["obs_blob"]), dtype="<f4")
-                if len(blob) != expected_obs:
+        resolved_markers: dict[str, dict[int, dict[str, tuple]]] = {}
+        obs_rows = conn.execute(
+            "SELECT tracker_step, obs_blob FROM tracking_obs_results "
+            "WHERE run_id=? AND person_id=0 ORDER BY tracker_step",
+            (run_id,),
+        ).fetchall()
+        expected_obs = n_cams * n_markers * 8
+        for obs_row in obs_rows:
+            step = obs_row["tracker_step"]
+            blob = np.frombuffer(bytes(obs_row["obs_blob"]), dtype="<f4")
+            if len(blob) != expected_obs:
+                continue
+            obs = blob.reshape(n_cams, n_markers, 8)
+            for ci, label in enumerate(cam_labels):
+                cam_id = label_to_cam_id.get(label)
+                if cam_id is None:
                     continue
-                obs = blob.reshape(n_cams, n_markers, 8)
-                for ci, label in enumerate(cam_labels):
-                    cam_id = label_to_cam_id.get(label)
-                    if cam_id is None:
-                        continue
+                if mi_to_coco:
                     mask = np.zeros(n_coco_kp, dtype=bool)
                     for mi, coco_id in mi_to_coco.items():
                         is_out = obs[ci, mi, 6]
                         if np.isfinite(is_out) and is_out != 0.0:
                             mask[coco_id] = True
                     outlier_masks.setdefault(cam_id, {})[step] = mask
+                by_marker: dict[str, tuple] = {}
+                for mi, marker_name in enumerate(marker_names):
+                    u, v, is_out = obs[ci, mi, 0], obs[ci, mi, 1], obs[ci, mi, 6]
+                    if np.isfinite(u) and np.isfinite(v):
+                        by_marker[marker_name] = (float(u), float(v), bool(is_out != 0.0))
+                # Recorded even when empty: an obs_blob row exists for this step, so
+                # "zero markers resolved for this camera" is a real, known answer (every
+                # candidate is unassigned), not "no data" -- collapsing the two here
+                # would make _classify_dot_candidates fall back to its no-data default
+                # (undifferentiated magenta) on exactly the frames most worth marking
+                # blue: the ones where assignment failed for every slot on this camera.
+                resolved_markers.setdefault(cam_id, {})[step] = by_marker
 
         # State blobs → joint + marker projections via FK, both from the same
         # posterior (corrected) state. Prefer the RTS-smoothed state (uses
@@ -3632,7 +3705,91 @@ class _TrackingRunLoader(QThread):
                     marker_xy[mi] = uv
                 marker_proj.setdefault(cam_id, {})[step] = marker_xy
 
-        self.loaded.emit(tracking_timestamps, marker_proj, joint_proj, bone_pairs, outlier_masks)
+        self.loaded.emit(
+            tracking_timestamps, marker_proj, joint_proj, bone_pairs, outlier_masks,
+            resolved_markers, cam_intrinsics,
+        )
+
+
+# A resolved (winning) observation's position (tracking_obs_results.obs_blob's actual_x/y)
+# is undistorted pixels (UnlabeledCandidate::position's own documented convention,
+# dot_assignment.cpp: obs.position = cand.position). The raw candidates in dot_xy
+# (pose_observations' own 'dots' blob) are the detector's original, *distorted* pixels --
+# same convention obs_kp/marker_xy/joint_xy all use, since they are drawn directly over the
+# raw (not undistorted) displayed video frame (see PersonCropGridWidget._do_load's own
+# _project_point_distorted). Comparing the two without first undistorting one of them is off
+# by however much lens distortion moves that point -- confirmed on real data: ~12px near the
+# image centre, growing further out, nowhere near noise-level. _classify_dot_candidates
+# undistorts a *copy* of dot_xy for the comparison only; the original (distorted) dot_xy is
+# still what gets drawn, so it stays aligned with the displayed frame.
+_DOT_ASSIGNMENT_MATCH_PX = 3.0
+
+
+def _undistort_for_matching(dot_xy, intrinsics: dict | None):
+    """Returns a copy of *dot_xy* (N, 2) mapped from distorted to undistorted pixel
+    space using *intrinsics* (one _TrackingRunLoader cam_intrinsics entry: fx, fy, cx,
+    cy, K_orig, dist), for _classify_dot_candidates to compare against obs_blob's own
+    undistorted positions. Returns *dot_xy* unchanged if intrinsics (or the distortion
+    half of it) aren't available -- matching then degrades to the old, wrong-but-not-
+    worse-than-before behaviour rather than raising.
+    """
+    if intrinsics is None:
+        return dot_xy
+    K_orig = intrinsics.get("K_orig")
+    dist = intrinsics.get("dist")
+    if K_orig is None or dist is None or dot_xy.shape[0] == 0:
+        return dot_xy
+
+    import cv2
+    import numpy as np
+
+    K = np.array([
+        [intrinsics["fx"], 0.0, intrinsics["cx"]],
+        [0.0, intrinsics["fy"], intrinsics["cy"]],
+        [0.0, 0.0, 1.0],
+    ])
+    pts = dot_xy.reshape(-1, 1, 2).astype(np.float64)
+    undistorted = cv2.undistortPoints(pts, K_orig, dist, P=K)
+    return undistorted.reshape(-1, 2)
+
+
+def _classify_dot_candidates(dot_xy, resolved: dict[str, tuple], intrinsics: dict | None = None) -> list:
+    """Match each raw candidate in *dot_xy* (N, 2) against *resolved*
+    ({marker_name: (u, v, is_outlier)}, one step's worth from
+    _TrackingRunLoader) by nearest position, for _ImageCanvas's
+    assigned/unassigned dot colouring.
+
+    *dot_xy* is in distorted pixel space (see this module's own comment
+    above); *resolved* is undistorted. *intrinsics*, when given, undistorts a
+    copy of *dot_xy* before matching -- see _undistort_for_matching().
+
+    Returns a list parallel to *dot_xy*: ``(status, label)`` where status is
+    "inlier" (assigned, accepted), "outlier" (assigned, rejected by the UKF),
+    or "unassigned" (no resolved marker sits close enough to this candidate
+    this step) with label ``None``. A resolved marker not claimed by any
+    candidate within the match distance (e.g. reconstructed rather than
+    observed) simply never marks one -- every candidate still gets a status.
+    """
+    import numpy as np
+    from math import isnan
+
+    match_xy = _undistort_for_matching(dot_xy, intrinsics)
+    names = list(resolved.keys())
+    positions = np.array([[resolved[n][0], resolved[n][1]] for n in names], dtype=np.float64)
+    result = []
+    for i in range(match_xy.shape[0]):
+        du, dv = float(match_xy[i, 0]), float(match_xy[i, 1])
+        if isnan(du) or isnan(dv) or len(names) == 0:
+            result.append(("unassigned", None))
+            continue
+        dist_px = np.hypot(positions[:, 0] - du, positions[:, 1] - dv)
+        j = int(np.argmin(dist_px))
+        if dist_px[j] <= _DOT_ASSIGNMENT_MATCH_PX:
+            _, _, is_outlier = resolved[names[j]]
+            result.append(("outlier" if is_outlier else "inlier", names[j]))
+        else:
+            result.append(("unassigned", None))
+    return result
 
 
 class _KeypointPickerPanel(QWidget):
@@ -3818,6 +3975,7 @@ class PersonCropGridWidget(QWidget):
         self._track_segs: dict[str, list[tuple[int, int, int]]] = {}
         # Pre-loaded per-camera data (indexed by shot_video_id or camera_instance_id)
         self._obs_kp: dict[str, dict[int, object]] = {}   # cam_instance_id→frame→kp
+        self._obs_dots: dict[str, dict[int, object]] = {}  # cam_instance_id→frame→dot_xy (N,2)
         self._det_bboxes: dict[str, dict[int, tuple]] = {}  # svid→frame→(cx,cy,w,h)
         # Tracking overlay data
         # _marker_proj: cam_instance_id → tracker_step → (n_markers, 2) predicted pixel positions
@@ -3828,6 +3986,13 @@ class PersonCropGridWidget(QWidget):
         self._tracking_timestamps: list[tuple[float, int]] = []  # sorted (ts, step)
         # cam_instance_id → tracker_step → bool array indexed by COCO keypoint ID
         self._outlier_masks: dict[str, dict[int, object]] = {}
+        # cam_instance_id → tracker_step → {marker_name: (u, v, is_outlier)} -- every
+        # marker (not just COCO-mapped ones), for the dot_xy assigned/unassigned colouring
+        self._resolved_markers: dict[str, dict[int, dict[str, tuple]]] = {}
+        # cam_instance_id → {fx, fy, cx, cy, K_orig, dist} -- undistorts a dot_xy candidate
+        # before matching it against _resolved_markers (which is already undistorted); see
+        # _undistort_for_matching's own comment.
+        self._cam_intrinsics: dict[str, dict] = {}
         self._backfill: CropBackfillWorker | None = None
         self._wide_crop_mgr: "FrameCropCacheManager | None" = None
         # Idea 3 (automated post-edit hand redetection): background worker +
@@ -3959,11 +4124,24 @@ class PersonCropGridWidget(QWidget):
                 self._video_dims[svid] = (int(dim_row["vw"]), int(dim_row["vh"]))
 
         # Pre-load merged keypoints (pose_observations with pose_observation_edits applied)
-        from app.pose.db_cache import read_observations_with_edits
+        from app.pose.db_cache import decode_dot_candidates, read_observations_with_edits
         for cam in self._cameras:
-            self._obs_kp[cam["camera_instance_id"]] = read_observations_with_edits(
-                self._conn, self._sequence_id, cam["camera_instance_id"]
+            cid = cam["camera_instance_id"]
+            self._obs_kp[cid] = read_observations_with_edits(
+                self._conn, self._sequence_id, cid
             )
+            # Raw detected reflective-dot candidates, for visual evaluation of
+            # detection quality -- read_observations_with_edits excludes them
+            # (anonymous, not named/editable keypoints; different blob layout).
+            dot_rows = self._conn.execute(
+                "SELECT video_frame, kp_blob FROM pose_observations "
+                "WHERE sequence_id = ? AND camera_instance_id = ? AND source = 'dots'",
+                (self._sequence_id, cid),
+            ).fetchall()
+            self._obs_dots[cid] = {
+                r["video_frame"]: decode_dot_candidates(bytes(r["kp_blob"]))[:, :2]
+                for r in dot_rows
+            }
 
         # Timeline dope-sheet status, one camera at a time (Phase 12).
         for cam in self._cameras:
@@ -5702,6 +5880,8 @@ class PersonCropGridWidget(QWidget):
         self._bone_pairs.clear()
         self._tracking_timestamps.clear()
         self._outlier_masks.clear()
+        self._resolved_markers.clear()
+        self._cam_intrinsics.clear()
 
         if not run_id:
             self._load_frame(self._current_t)
@@ -5740,6 +5920,8 @@ class PersonCropGridWidget(QWidget):
         joint_proj: dict,
         bone_pairs: list,
         outlier_masks: dict,
+        resolved_markers: dict,
+        cam_intrinsics: dict,
     ) -> None:
         # Do NOT clear self._loader here — the thread's run() may still be executing
         # its finally block.  _on_loader_finished (connected to finished) does it safely.
@@ -5748,6 +5930,8 @@ class PersonCropGridWidget(QWidget):
         self._joint_proj = joint_proj
         self._bone_pairs = bone_pairs
         self._outlier_masks = outlier_masks
+        self._resolved_markers = resolved_markers
+        self._cam_intrinsics = cam_intrinsics
         self._load_frame(self._current_t)
 
     def _on_loader_finished(self) -> None:
@@ -5775,6 +5959,7 @@ class PersonCropGridWidget(QWidget):
         both view and edit mode. See "View-mode parity" in the design doc.
         """
         obs_kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
+        dot_xy = self._obs_dots.get(cam_id, {}).get(frame_idx)
         joint_xy = (
             self._joint_proj.get(cam_id, {}).get(tracking_step)
             if tracking_step is not None else None
@@ -5787,6 +5972,18 @@ class PersonCropGridWidget(QWidget):
             self._outlier_masks.get(cam_id, {}).get(tracking_step)
             if tracking_step is not None else None
         )
+        dot_status = None
+        if dot_xy is not None and tracking_step is not None:
+            # None (no key at all) means no obs_blob row for this step -- genuinely no
+            # data, stays the magenta "unknown" default. {} (a real but empty dict) means
+            # a row existed and every marker was NaN for this camera -- a known answer,
+            # not a gap; _classify_dot_candidates already treats an empty *resolved* as
+            # "everything is unassigned" (len(names) == 0 branch), which is correct here.
+            resolved = self._resolved_markers.get(cam_id, {}).get(tracking_step)
+            if resolved is not None:
+                dot_status = _classify_dot_candidates(
+                    dot_xy, resolved, self._cam_intrinsics.get(cam_id)
+                )
         cell.set_overlay(
             obs_kp=obs_kp,
             joint_xy=joint_xy,
@@ -5795,6 +5992,8 @@ class PersonCropGridWidget(QWidget):
             outlier_mask=outlier_mask,
             show_detected=show_detected,
             show_tracked=show_tracked,
+            dot_xy=dot_xy,
+            dot_status=dot_status,
         )
         cell.set_hidden(frozenset(self._hidden_kp_indices))
         if self._edit_mode:

@@ -393,3 +393,39 @@ def test_auto_assign_skips_a_label_no_subject_has(session):
         "SELECT person_name FROM detection_track_assignments WHERE detection_run_id = 'run1'"
     ).fetchall()]
     assert names == ["bob"]
+
+
+def test_auto_assign_records_the_persons_subject_id(session):
+    """The person's registry (subject) id lands on the sequence and on the
+    stitched track assignment, not just the name."""
+    session.execute(
+        "INSERT INTO detection_keypoints"
+        " (detection_run_id, shot_video_id, video_frame, track_id, region_type,"
+        "  keypoints, noise_scale)"
+        " VALUES ('run1', ?, 0, 1, 'full_body', ?, 0.5)",
+        (_SVID, _kp(1.0, 133)),
+    )
+    session.execute(
+        "INSERT INTO person_tracks"
+        " (id, detection_run_id, shot_video_id, track_id, first_frame, last_frame)"
+        " VALUES ('pt1', 'run1', ?, 1, 0, 0)",
+        (_SVID,),
+    )
+    session.commit()
+
+    seq_ids = auto_assign_and_finalise(
+        session, detection_run_id="run1", shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
+        persons_ordered=["alice"], pose_model="rtmpose-l-133kp",
+    )
+    person = session.execute(
+        "SELECT id FROM capture_subjects WHERE name = 'alice'"
+    ).fetchone()["id"]
+    sp = session.execute(
+        "SELECT capture_person_id, subject_id FROM sequence_persons WHERE sequence_id = ?",
+        (seq_ids[0],),
+    ).fetchone()
+    assert (sp["capture_person_id"], sp["subject_id"]) == (person, person)
+    dta = session.execute(
+        "SELECT subject_id FROM detection_track_assignments WHERE detection_run_id = 'run1'"
+    ).fetchone()
+    assert dta["subject_id"] == person

@@ -227,3 +227,100 @@ def test_migration_backfills_labels_in_sorted_name_order_and_exception_rows(tmp_
     # The sword's label 3 needs no exception row: identity.
     assert label_for_subject_in_run(conn, "seg1", "o1") == 3
     assert resolve_seg_mask_label(conn, "seg1", "sword") == 3
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: subject_id on sequences / runs / track assignments
+# ---------------------------------------------------------------------------
+
+
+def _sequences(conn: sqlite3.Connection, cap: str) -> None:
+    """A person sequence (seqP, person Harri) and an object sequence (seqO,
+    sword) with the rows the app would have written."""
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("INSERT INTO detection_runs (id, shot_id, sync_config_id, time_start_s, time_end_s, detector_model, pose_model, status, created_at, capture_object_id) "
+                 "VALUES ('drO', ?, 'sync', 0, 1, 'aruco', 'x', 'complete', '2026-01-01', 'sword_id')", (cap,))
+    for seq, dr in (("seqP", None), ("seqO", "drO")):
+        conn.execute(
+            "INSERT INTO pose_observation_sequences (id, shot_id, sync_config_id, time_start_s, time_end_s, pose_model, detection_run_id) "
+            "VALUES (?, ?, 'sync', 0, 1, 'x', ?)", (seq, cap, dr))
+    conn.commit()
+
+
+def test_subject_id_for_person_and_object_sequences(session_db) -> None:
+    from posetrak.db.manage_subject import subject_id_for_sequence
+
+    cap = _capture(session_db)
+    harri = create_person(session_db, cap, "Harri")
+    _sequences(session_db, cap)
+    session_db.execute(
+        "INSERT INTO sequence_persons (sequence_id, person_id, person_name, capture_person_id, subject_id) "
+        "VALUES ('seqP', 0, 'Harri', ?, ?)", (harri, harri))
+    session_db.commit()
+
+    assert subject_id_for_sequence(session_db, "seqP") == harri
+    assert subject_id_for_sequence(session_db, "seqO") == "sword_id"   # from the detection run
+    assert subject_id_for_sequence(session_db, "nope") is None
+
+
+def test_seg_mask_label_for_sequence_follows_the_run_mapping(session_db) -> None:
+    from posetrak.db.manage_subject import seg_mask_label_for_sequence
+
+    cap = _capture(session_db)
+    create_person(session_db, cap, "Harri")                      # registry label 1
+    session_db.execute("PRAGMA foreign_keys = OFF")
+    session_db.execute(
+        "INSERT INTO capture_objects (id, capture_id, name, marker_body_definition_id, created_at) "
+        "VALUES ('sword_id', ?, 'sword', 'mb', '2026-01-01')", (cap,))   # registry label 2
+    _sequences(session_db, cap)
+    run = _seg_run(session_db, cap)
+
+    assert seg_mask_label_for_sequence(session_db, run, "seqO") == 2      # identity
+    set_run_label_subject(session_db, run, 3, "sword_id")                  # painted as 3 there
+    assert seg_mask_label_for_sequence(session_db, run, "seqO") == 3
+    assert seg_mask_label_for_sequence(session_db, run, "nope") is None
+
+
+def test_v59_migration_backfills_subject_ids_and_missing_run_rows(tmp_path) -> None:
+    path = tmp_path / "s.db"
+    conn = create_session(path)
+    cap = _capture(conn)
+    harri = create_person(conn, cap, "Harri")
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute(
+        "INSERT INTO capture_objects (id, capture_id, name, marker_body_definition_id, created_at) "
+        "VALUES ('sword_id', ?, 'sword', 'mb', '2026-01-01')", (cap,))
+    _sequences(conn, cap)
+    conn.execute("INSERT INTO sequence_persons (sequence_id, person_id, person_name, capture_person_id) "
+                 "VALUES ('seqP', 0, 'Harri', ?)", (harri,))
+    # A second sequence whose person is only known by name (no capture_person_id).
+    conn.execute("INSERT INTO pose_observation_sequences (id, shot_id, sync_config_id, time_start_s, time_end_s, pose_model) "
+                 "VALUES ('seqN', ?, 'sync', 0, 1, 'x')", (cap,))
+    conn.execute("INSERT INTO sequence_persons (sequence_id, person_id, person_name) VALUES ('seqN', 0, 'Harri')")
+    conn.execute("INSERT INTO detection_runs (id, shot_id, sync_config_id, time_start_s, time_end_s, detector_model, pose_model, status, created_at) "
+                 "VALUES ('drP', ?, 'sync', 0, 1, 'x', 'x', 'complete', '2026-01-01')", (cap,))
+    conn.execute("INSERT INTO detection_track_assignments (detection_run_id, shot_video_id, track_id, person_name, first_frame, last_frame) "
+                 "VALUES ('drP', 'sv', 1, 'Harri', 0, 10)")
+    # A person run and an object run that predate tracking_run_persons rows.
+    for run, seq, skel in (("runP", "seqP", "skelP"), ("runO", "seqO", "skelO")):
+        conn.execute(
+            "INSERT INTO tracking_runs (id, observation_sequence_id, tracker_config_id, skeleton_id, "
+            "extrinsic_calibration_id, sync_config_id, ran_at, posetrak_version, active_camera_ids, marker_names) "
+            "VALUES (?, ?, 'tc', ?, 'ec', 'sync', '2026-01-01', 'v', '[]', '[]')", (run, seq, skel))
+        conn.execute("INSERT INTO tracking_results (run_id, person_id, tracker_step, is_smoothed, timestamp_s, tracking_lost, state, cov_diag) "
+                     "VALUES (?, 0, 0, 0, 0.0, 0, x'00', x'00')", (run,))
+    # Downgrade to the v58 shape.
+    for table in ("sequence_persons", "tracking_run_persons", "detection_track_assignments"):
+        conn.execute(f"ALTER TABLE {table} DROP COLUMN subject_id")
+    conn.execute("PRAGMA user_version = 58")
+    conn.commit()
+    conn.close()
+
+    conn = open_session(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SESSION_SCHEMA_VERSION
+    sp = {r["sequence_id"]: r["subject_id"] for r in conn.execute("SELECT * FROM sequence_persons")}
+    assert sp == {"seqP": harri, "seqN": harri}           # by id, and by name
+    assert conn.execute("SELECT subject_id FROM detection_track_assignments").fetchone()[0] == harri
+    trp = {r["run_id"]: (r["subject_id"], r["capture_object_id"], r["skeleton_id"])
+           for r in conn.execute("SELECT * FROM tracking_run_persons")}
+    assert trp == {"runP": (harri, None, "skelP"), "runO": ("sword_id", "sword_id", "skelO")}

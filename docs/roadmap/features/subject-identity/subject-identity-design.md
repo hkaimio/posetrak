@@ -1,9 +1,9 @@
 # Capture-scoped subject identity (persons and objects) — design proposal
 
-Status: phases 1 and 2 implemented (registry, triggers, migration, exception
+Status: phases 1, 2 and 3 implemented (registry, triggers, migration, exception
 table, label-mapping UI; segmentation editor allocates by registry label,
 viewer overlays share the editor's palette and show subject names);
-phases 3-4 open.
+phase 4 open.
 
 ## 1. What is inconsistent today
 
@@ -142,6 +142,29 @@ tables.
   `label_to_color` palette and draws a swatch and the subject's name per
   painted label (from `subject_for_label_in_run`, so a Mask labels
   correction shows up there).
+
+## 5c. Phase 3 as built (schema v59)
+
+- Nullable `subject_id` on `sequence_persons`, `tracking_run_persons` and
+  `detection_track_assignments`. The migration backfills from
+  `capture_person_id` (a person's registry id is its `capture_persons` id),
+  else by name within the capture; a run's subject is its tracked object or,
+  for a person, its sequence's person. Tracking runs that predate any
+  `tracking_run_persons` row get one. `finalise_to_db` writes `subject_id`
+  on new sequences and assignments.
+- **Deviation from section 3:** object sequences still get **no**
+  `sequence_persons` row (the session tree treats their absence as "this is
+  an object sequence"). `manage_subject.subject_id_for_sequence` answers for
+  both kinds instead: a person's `sequence_persons.subject_id`, else the
+  detection run's `capture_object_id`.
+- The C++ tracker now writes the `tracking_run_persons` row when it creates a
+  run (`capture_object_id` and `subject_id` resolved by plain SQL from the
+  sequence, no name matching). It is best effort: a database without those
+  tables is left alone so provenance can never block a run.
+- `posetrak track run --seg-run <id>` looks the tracked subject's label up
+  through the registry (`seg_mask_label_for_sequence`, honouring the run's
+  exception rows) and passes it to the tracker; `--seg-label` overrides it.
+  The tracker config's `dot_seg_mask_enabled` still has to be set.
 
 ## 6. Decisions and open points
 

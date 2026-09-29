@@ -187,9 +187,10 @@ def finalise_to_db(
         # One person per sequence — person_id is always 0 within the sequence
         session.execute(
             "INSERT OR IGNORE INTO sequence_persons "
-            "(sequence_id, person_id, person_name, capture_person_id) "
-            "VALUES (?, 0, ?, ?)",
-            (seq_id, person_name, capture_person_id),
+            "(sequence_id, person_id, person_name, capture_person_id, subject_id) "
+            "VALUES (?, 0, ?, ?, ?)",
+            # A person's registry (subject) id is its capture_persons id.
+            (seq_id, person_name, capture_person_id, capture_person_id),
         )
 
         # Keyed by (camera_instance_id, video_frame, source) so that adjacent
@@ -252,11 +253,12 @@ def finalise_to_db(
     session.executemany(
         "INSERT INTO detection_track_assignments "
         "(detection_run_id, shot_video_id, track_id, person_name, capture_person_id, "
-        " first_frame, last_frame) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        " subject_id, first_frame, last_frame) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (detection_run_id, a.shot_video_id, a.track_id,
-             a.person_name, capture_person_ids[a.person_name], a.first_frame, a.last_frame)
+             a.person_name, capture_person_ids[a.person_name],
+             capture_person_ids[a.person_name], a.first_frame, a.last_frame)
             for a in assignments
         ],
     )

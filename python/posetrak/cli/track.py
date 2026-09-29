@@ -192,6 +192,8 @@ def _build_run_config(
 @click.option("--end-time", default=None, type=float, help="Override sequence end time (s).")
 @click.option("--no-smooth", is_flag=True, default=False, help="Disable RTS smoothing.")
 @click.option("--binary", default=None, help="Path to posetrak-tracker binary.")
+@click.option("--seg-run", "seg_run", default=None, help="Segmentation (seg_quality_runs) ID (prefix accepted) whose masks gate dot-assignment trust for the tracked subject; needs the tracker config's dot_seg_mask_enabled. The subject's mask label is looked up in the subject registry.")
+@click.option("--seg-label", "seg_label", default=None, type=int, help="Override the mask label looked up for --seg-run (e.g. for a label not yet mapped to a subject).")
 # Config parameter overrides
 @click.option("--process-noise-std", default=None, type=float, help="Process noise std (rad/s²). Default 0.1.")
 @click.option("--process-vel-noise-std", default=None, type=float, help="Velocity process noise std. Default 0.5.")
@@ -217,6 +219,8 @@ def cmd_run(
     end_time: float | None,
     no_smooth: bool,
     binary: str | None,
+    seg_run: str | None,
+    seg_label: int | None,
     process_noise_std: float | None,
     process_vel_noise_std: float | None,
     vel_half_life: float | None,
@@ -322,6 +326,26 @@ def cmd_run(
         skel_name = (skel_name_row["name"] if skel_name_row else "skeleton").replace(" ", "_")
         out_path = Path(session_path).parent / "posetrak_results" / capture_label / skel_name / "tracking"
 
+    seg_run_id: str | None = None
+    if seg_run is not None:
+        try:
+            seg_run_id = resolve_id_prefix(conn, "seg_quality_runs", seg_run)
+        except ValueError as exc:
+            fail(str(exc))
+        if seg_label is None:
+            from posetrak.db.manage_subject import seg_mask_label_for_sequence
+
+            seg_label = seg_mask_label_for_sequence(conn, seg_run_id, sequence_id, person_id)
+            if seg_label is None:
+                fail(
+                    "The tracked subject has no mask label in segmentation "
+                    f"{seg_run_id}; pass --seg-label, or map the label to the subject "
+                    "in the segmentation panel."
+                )
+        click.echo(f"Segmentation: {seg_run_id} (label {seg_label})", err=True)
+    elif seg_label is not None:
+        fail("--seg-label needs --seg-run.")
+
     out_path.mkdir(parents=True, exist_ok=True)
     conn.close()
 
@@ -351,6 +375,8 @@ def cmd_run(
         start_time=start_time if start_time is not None else seq_row["time_start_s"],
         end_time=end_time if end_time is not None else seq_row["time_end_s"],
         smooth=not no_smooth,
+        seg_run_id=seg_run_id,
+        seg_mask_label=seg_label,
         on_progress=lambda line: click.echo(line, err=True),
     )
 

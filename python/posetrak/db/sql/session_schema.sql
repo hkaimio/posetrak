@@ -275,6 +275,7 @@ CREATE TABLE IF NOT EXISTS sequence_persons (
     person_id         INTEGER NOT NULL,
     person_name       TEXT    NOT NULL,
     capture_person_id TEXT    REFERENCES capture_persons(id),
+    subject_id        TEXT,   -- capture_subjects.id of the person (see subject-identity-design.md)
     PRIMARY KEY (sequence_id, person_id)
 );
 
@@ -360,6 +361,7 @@ CREATE TABLE IF NOT EXISTS tracking_run_persons (
     person_id  INTEGER NOT NULL,
     skeleton_id TEXT   NOT NULL, -- references registry: skeletons(id)
     capture_object_id TEXT REFERENCES capture_objects(id),
+    subject_id TEXT,  -- capture_subjects.id of the tracked person or object
     PRIMARY KEY (run_id, person_id)
 );
 
@@ -653,6 +655,7 @@ CREATE TABLE IF NOT EXISTS detection_track_assignments (
     track_id          INTEGER NOT NULL,
     person_name       TEXT    NOT NULL,
     capture_person_id TEXT    REFERENCES capture_persons(id),
+    subject_id        TEXT,   -- capture_subjects.id the stitched track was assigned to
     first_frame       INTEGER NOT NULL,
     last_frame        INTEGER NOT NULL,
     PRIMARY KEY (detection_run_id, shot_video_id, track_id, first_frame)

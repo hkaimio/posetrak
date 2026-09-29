@@ -139,6 +139,32 @@ ResultWriter::ResultWriter(std::string const& db_path, std::string const& sequen
         throw std::runtime_error(std::string("ResultWriter: INSERT tracking_runs failed: ") +
                                  sqlite3_errmsg(db_));
     }
+
+    // Record who was tracked: one tracking_run_persons row with the run's
+    // capture subject (subject-identity-design.md). The subject is the
+    // sequence's detection run's object, else the sequence's person -- both
+    // plain SQL lookups, no name matching. Best effort: provenance must never
+    // block a run, so a database without these tables (or a failure here) is
+    // silently skipped.
+    sqlite3_stmt* trp = nullptr;
+    char const* trp_sql =
+        "INSERT OR IGNORE INTO tracking_run_persons"
+        " (run_id, person_id, skeleton_id, capture_object_id, subject_id)"
+        " SELECT ?1, ?2, ?3, dr.capture_object_id,"
+        "        COALESCE(dr.capture_object_id,"
+        "                 (SELECT sp.subject_id FROM sequence_persons sp"
+        "                  WHERE sp.sequence_id = ?4 AND sp.person_id = ?2))"
+        " FROM pose_observation_sequences pos"
+        " LEFT JOIN detection_runs dr ON dr.id = pos.detection_run_id"
+        " WHERE pos.id = ?4";
+    if (sqlite3_prepare_v2(db_, trp_sql, -1, &trp, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(trp, 1, run_id_.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int(trp, 2, person_id_);
+        sqlite3_bind_text(trp, 3, skeleton_id.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(trp, 4, sequence_id.c_str(), -1, SQLITE_STATIC);
+        sqlite3_step(trp);
+    }
+    sqlite3_finalize(trp);
 }
 
 // ---------------------------------------------------------------------------

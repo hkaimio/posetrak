@@ -145,3 +145,42 @@ def set_run_label_subject(
                 "VALUES (?, ?, ?)",
                 (seg_quality_run_id, label, subject_id),
             )
+
+
+def subject_id_for_sequence(
+    session: sqlite3.Connection, sequence_id: str, person_id: int = 0
+) -> str | None:
+    """The capture subject a pose-observation sequence's *person_id* belongs to.
+
+    A person sequence answers from ``sequence_persons.subject_id``. An object
+    sequence has no ``sequence_persons`` row (the session tree relies on
+    that), so it answers from its detection run's ``capture_object_id`` -- an
+    object's registry id is its ``capture_objects.id``. None if neither is
+    known.
+    """
+    row = session.execute(
+        "SELECT subject_id FROM sequence_persons WHERE sequence_id = ? AND person_id = ?",
+        (sequence_id, person_id),
+    ).fetchone()
+    if row is not None and row["subject_id"]:
+        return row["subject_id"]
+    row = session.execute(
+        "SELECT dr.capture_object_id FROM pose_observation_sequences pos "
+        "JOIN detection_runs dr ON dr.id = pos.detection_run_id "
+        "WHERE pos.id = ?",
+        (sequence_id,),
+    ).fetchone()
+    return row["capture_object_id"] if row is not None else None
+
+
+def seg_mask_label_for_sequence(
+    session: sqlite3.Connection, seg_quality_run_id: str, sequence_id: str, person_id: int = 0
+) -> int | None:
+    """The mask label of the subject tracked in *sequence_id* within
+    segmentation *seg_quality_run_id*, or None if the sequence's subject is
+    unknown or has no label in that segmentation. This is what the tracker
+    launcher passes as ``--seg-mask-label``."""
+    subject_id = subject_id_for_sequence(session, sequence_id, person_id)
+    if subject_id is None:
+        return None
+    return label_for_subject_in_run(session, seg_quality_run_id, subject_id)

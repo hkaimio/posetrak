@@ -25,7 +25,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 15
-SESSION_SCHEMA_VERSION: Final[int] = 58
+SESSION_SCHEMA_VERSION: Final[int] = 59
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -1966,6 +1966,74 @@ def _migrate_session_v57_to_v58(conn: sqlite3.Connection) -> None:
     conn.executescript(sql)
 
 
+def _migrate_session_v58_to_v59(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 58 to 59.
+
+    v59 adds a nullable ``subject_id`` (a capture_subjects.id) to
+    sequence_persons, tracking_run_persons and detection_track_assignments,
+    so a sequence, a tracked run and a stitched track each point at the
+    capture's subject registry instead of matching names. Existing rows are
+    backfilled: from capture_person_id where set (a person's registry id is
+    its capture_persons id), else by name within the capture; a run's
+    subject is its tracked object or, for a person, its sequence's person.
+    Tracking runs made before the tracker recorded tracking_run_persons get
+    that row too. See docs/roadmap/features/subject-identity/
+    subject-identity-design.md.
+    """
+    for table in ("sequence_persons", "tracking_run_persons", "detection_track_assignments"):
+        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if "subject_id" not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN subject_id TEXT")
+    conn.executescript(
+        """
+        UPDATE sequence_persons SET subject_id = (
+            SELECT cs.id FROM capture_subjects cs WHERE cs.id = sequence_persons.capture_person_id)
+        WHERE subject_id IS NULL AND capture_person_id IS NOT NULL;
+        UPDATE sequence_persons SET subject_id = (
+            SELECT cs.id FROM capture_subjects cs
+            JOIN pose_observation_sequences pos ON pos.shot_id = cs.capture_id
+            WHERE pos.id = sequence_persons.sequence_id
+              AND cs.name = sequence_persons.person_name AND cs.deleted = 0)
+        WHERE subject_id IS NULL;
+
+        UPDATE detection_track_assignments SET subject_id = (
+            SELECT cs.id FROM capture_subjects cs
+            WHERE cs.id = detection_track_assignments.capture_person_id)
+        WHERE subject_id IS NULL AND capture_person_id IS NOT NULL;
+        UPDATE detection_track_assignments SET subject_id = (
+            SELECT cs.id FROM capture_subjects cs
+            JOIN detection_runs dr ON dr.shot_id = cs.capture_id
+            WHERE dr.id = detection_track_assignments.detection_run_id
+              AND cs.name = detection_track_assignments.person_name AND cs.deleted = 0)
+        WHERE subject_id IS NULL;
+
+        INSERT OR IGNORE INTO tracking_run_persons
+            (run_id, person_id, skeleton_id, capture_object_id, subject_id)
+        SELECT tr.id, res.person_id, tr.skeleton_id, dr.capture_object_id,
+               COALESCE(dr.capture_object_id,
+                        (SELECT sp.subject_id FROM sequence_persons sp
+                         WHERE sp.sequence_id = tr.observation_sequence_id
+                           AND sp.person_id = res.person_id))
+        FROM tracking_runs tr
+        JOIN (SELECT DISTINCT run_id, person_id FROM tracking_results) res
+             ON res.run_id = tr.id
+        LEFT JOIN pose_observation_sequences pos ON pos.id = tr.observation_sequence_id
+        LEFT JOIN detection_runs dr ON dr.id = pos.detection_run_id;
+
+        UPDATE tracking_run_persons SET subject_id = capture_object_id
+        WHERE subject_id IS NULL AND capture_object_id IS NOT NULL;
+        UPDATE tracking_run_persons SET subject_id = (
+            SELECT sp.subject_id FROM sequence_persons sp
+            WHERE sp.sequence_id = (SELECT observation_sequence_id FROM tracking_runs
+                                    WHERE id = tracking_run_persons.run_id)
+              AND sp.person_id = tracking_run_persons.person_id)
+        WHERE subject_id IS NULL;
+        """
+    )
+    _set_schema_version(conn, 59)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -2160,6 +2228,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 57
     if actual == 57:
         _migrate_session_v57_to_v58(conn)
+        actual = 58
+    if actual == 58:
+        _migrate_session_v58_to_v59(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

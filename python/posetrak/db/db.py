@@ -25,7 +25,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 15
-SESSION_SCHEMA_VERSION: Final[int] = 57
+SESSION_SCHEMA_VERSION: Final[int] = 58
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -1951,6 +1951,21 @@ def _migrate_session_v56_to_v57(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v57_to_v58(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 57 to 58.
+
+    v58 adds capture_subjects (a capture-scoped registry giving every person
+    and object a permanent integer label, used as its segmentation-mask
+    label), the triggers that keep it in step with capture_persons/
+    capture_objects, and seg_quality_run_subjects (exception rows for
+    segmentations whose labels differ from the registry labels). Existing
+    subjects are backfilled. See 028_capture_subjects.sql and
+    docs/roadmap/features/subject-identity/subject-identity-design.md.
+    """
+    sql = (_DB_DIR / "migrations" / "028_capture_subjects.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -2142,6 +2157,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 56
     if actual == 56:
         _migrate_session_v56_to_v57(conn)
+        actual = 57
+    if actual == 57:
+        _migrate_session_v57_to_v58(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

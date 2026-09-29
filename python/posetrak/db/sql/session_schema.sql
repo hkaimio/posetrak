@@ -666,3 +666,68 @@ CREATE TABLE IF NOT EXISTS seg_masks (
     mask_blob          BLOB    NOT NULL,
     PRIMARY KEY (seg_quality_run_id, shot_video_id, frame_idx)
 );
+
+-- Capture-scoped identity for persons and objects: a permanent integer label
+-- per subject, used directly as its segmentation-mask label. Kept in step
+-- with capture_persons/capture_objects by the triggers below. See
+-- docs/roadmap/features/subject-identity/subject-identity-design.md and
+-- migrations/028_capture_subjects.sql.
+CREATE TABLE IF NOT EXISTS capture_subjects (
+    id         TEXT PRIMARY KEY,
+    capture_id TEXT NOT NULL,   -- no FK: rows come only from capture_persons/objects triggers
+    kind       TEXT NOT NULL CHECK (kind IN ('person', 'object')),
+    label      INTEGER NOT NULL CHECK (label BETWEEN 1 AND 255),
+    name       TEXT NOT NULL,
+    deleted    INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (capture_id, label)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_capture_subjects_live_name
+    ON capture_subjects (capture_id, name) WHERE deleted = 0;
+
+CREATE TABLE IF NOT EXISTS seg_quality_run_subjects (
+    seg_quality_run_id TEXT    NOT NULL REFERENCES seg_quality_runs(id),
+    label              INTEGER NOT NULL,
+    subject_id         TEXT    REFERENCES capture_subjects(id),
+    PRIMARY KEY (seg_quality_run_id, label)
+);
+
+-- A deleted subject's row stays (its label is never reused: the next label is
+-- MAX over all rows, deleted included).
+CREATE TRIGGER IF NOT EXISTS trg_capture_persons_subject_ins
+AFTER INSERT ON capture_persons
+BEGIN
+    INSERT INTO capture_subjects (id, capture_id, kind, label, name)
+    VALUES (NEW.id, NEW.capture_id, 'person',
+            COALESCE((SELECT MAX(label) FROM capture_subjects
+                      WHERE capture_id = NEW.capture_id), 0) + 1,
+            NEW.name);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_capture_objects_subject_ins
+AFTER INSERT ON capture_objects
+BEGIN
+    INSERT INTO capture_subjects (id, capture_id, kind, label, name)
+    VALUES (NEW.id, NEW.capture_id, 'object',
+            COALESCE((SELECT MAX(label) FROM capture_subjects
+                      WHERE capture_id = NEW.capture_id), 0) + 1,
+            NEW.name);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_capture_persons_subject_rename
+AFTER UPDATE OF name ON capture_persons
+BEGIN
+    UPDATE capture_subjects SET name = NEW.name WHERE id = NEW.id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_capture_objects_subject_rename
+AFTER UPDATE OF name ON capture_objects
+BEGIN
+    UPDATE capture_subjects SET name = NEW.name WHERE id = NEW.id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_capture_persons_subject_del
+AFTER DELETE ON capture_persons
+BEGIN
+    UPDATE capture_subjects SET deleted = 1 WHERE id = OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_capture_objects_subject_del
+AFTER DELETE ON capture_objects
+BEGIN
+    UPDATE capture_subjects SET deleted = 1 WHERE id = OLD.id;
+END;

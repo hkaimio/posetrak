@@ -131,26 +131,31 @@ def resolve_seg_mask_label(
     session: sqlite3.Connection, seg_quality_run_id: str, subject_name: str
 ) -> int | None:
     """Return *subject_name*'s own mask label (1..N) within *seg_quality_run_id*,
-    or None if that name isn't in this segmentation's own person list.
+    or None if it has none there.
 
-    Thin wrapper over :func:`persons_ordered_for_seg_run` -- the one join a
-    caller needs before passing ``--seg-run-id``/``--seg-mask-label`` to the
-    tracker binary (segmentation-mask-dot-assignment-design.md §6): C++ never
-    does this name lookup itself, only compares an already-resolved integer
-    label against a decoded mask byte, so this resolution has to happen here,
-    once, before invoking it. A prop's own name (``capture_objects.name``)
-    works identically to a person's here -- the segmentation's own person
-    list doesn't distinguish the two (see
-    ``app.pose.cutie_init_panel``'s own "an object's name flows through
-    identically to a person's" note).
+    Looks the subject up in the capture's subject registry
+    (:mod:`posetrak.db.manage_subject`; persons and objects alike) and
+    returns its label in that segmentation. Falls back to the
+    segmentation's recorded ``persons_json`` name list for a subject the
+    registry does not know. The caller passes the integer on to the tracker
+    binary (segmentation-mask-dot-assignment-design.md section 6): C++ never
+    does this lookup itself.
     """
+    from posetrak.db.manage_subject import get_subject_by_name, label_for_subject_in_run
+
+    row = session.execute(
+        "SELECT shot_id FROM seg_quality_runs WHERE id = ?", (seg_quality_run_id,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"seg_quality_runs row not found: {seg_quality_run_id!r}")
+    subject = get_subject_by_name(session, row["shot_id"], subject_name)
+    if subject is not None:
+        return label_for_subject_in_run(session, seg_quality_run_id, subject["id"])
     names = persons_ordered_for_seg_run(session, seg_quality_run_id)
     try:
         return names.index(subject_name) + 1
     except ValueError:
         return None
-
-
 def get_person(session: sqlite3.Connection, person_id: str) -> sqlite3.Row | None:
     """Return one ``capture_persons`` row by id, or ``None`` if not found."""
     return session.execute(

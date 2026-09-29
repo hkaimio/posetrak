@@ -1,6 +1,7 @@
 # Capture-scoped subject identity (persons and objects) — design proposal
 
-Status: proposal for review, nothing implemented.
+Status: phase 1 implemented (registry, triggers, migration, exception table,
+label-mapping UI); phases 2-4 open.
 
 ## 1. What is inconsistent today
 
@@ -27,42 +28,55 @@ label per subject that is used directly as the mask label.**
 ```sql
 CREATE TABLE capture_subjects (
     id         TEXT PRIMARY KEY,   -- equals capture_persons.id / capture_objects.id
-    capture_id TEXT NOT NULL REFERENCES captures(id),
+    capture_id TEXT NOT NULL,
     kind       TEXT NOT NULL CHECK (kind IN ('person','object')),
     label      INTEGER NOT NULL CHECK (label BETWEEN 1 AND 255),
     name       TEXT NOT NULL,
-    UNIQUE (capture_id, label),
-    UNIQUE (capture_id, name)
+    deleted    INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (capture_id, label)
 );
+CREATE UNIQUE INDEX idx_capture_subjects_live_name
+    ON capture_subjects (capture_id, name) WHERE deleted = 0;
 ```
 
 - `id` reuses the existing person/object UUID, so no existing foreign key
   changes and there is no id collision (UUIDs).
-- `label` is allocated once (lowest unused, or max+1) and **never reused**,
-  even after a subject is deleted, so old masks stay unambiguous. 255 fits a
-  uint8 PNG.
+- `label` is allocated once (`MAX(label)+1` over all rows, deleted ones
+  included) and **never reused**, so old masks stay unambiguous.
 - The person/object tables keep their own payload (default skeleton, marker
-  body); only identity is shared. Creating a person or object goes through
-  one helper that also inserts the registry row.
-- The cross-table uniqueness a plain column cannot give is enforced by the
-  registry constraints.
+  body); only identity is shared.
+- The cross-table uniqueness a plain column cannot give (a person and an
+  object cannot share a name) is enforced by the registry's constraints.
 
-For masks of segmentations that already exist:
+`seg_quality_run_subjects` holds **exceptions only**; a subject with no row in
+a run means "this run uses the subject's registry label":
 
 ```sql
 CREATE TABLE seg_quality_run_subjects (
     seg_quality_run_id TEXT NOT NULL REFERENCES seg_quality_runs(id),
     label      INTEGER NOT NULL,
-    subject_id TEXT REFERENCES capture_subjects(id),   -- NULL = unmapped
+    subject_id TEXT REFERENCES capture_subjects(id),   -- NULL = explicitly unassigned
     PRIMARY KEY (seg_quality_run_id, label)
 );
 ```
 
-Migration fills it from `persons_json` (ordinal i+1 → subject by name) and
-also records every label actually present in the run's masks, leaving
-labels with no name (label 3 here) `NULL` until a person assigns them once
-in the UI. New segmentations write `label = subject.label` and one row per
-subject; `persons_json` stays for old readers and is then derived.
+It exists for segmentations whose labels are not the registry labels (all
+segmentations made before the registry, and any later run that covers only
+some subjects). A segmentation made with registry labels needs no rows. A
+subject moved to another label in a run is not also claimed by its registry
+label (`manage_subject.subject_for_label_in_run`).
+
+The migration backfills existing subjects with labels in **sorted-name order
+per capture** (the order the Cutie panel has numbered labels so far, so most
+existing masks match with no exception row), then writes exception rows
+from each run's `persons_json` where its ordinal disagrees with the registry
+label. Registry rows are kept in step with `capture_persons` and
+`capture_objects` by SQL triggers (insert allocates `MAX(label)+1`, rename
+updates the name, delete marks the row deleted and retires its label), so
+raw-SQL inserts are covered too. Labels are limited to 255 (uint8 PNG).
+`capture_subjects.capture_id` has no foreign key: rows come only from the
+triggers, which already reference `captures` through the person/object
+tables.
 
 ## 3. What each consumer does afterwards
 
@@ -82,6 +96,12 @@ subject; `persons_json` stays for old readers and is then derived.
   `person_id` integer stays as the array index in blobs; only its meaning
   ("which subject") becomes an explicit foreign key. `detection_runs.
   capture_object_id` stays as is.
+- **Detection track ids** (`person_tracks.track_id`) stay run-local. In a
+  YOLOX run they are the detector tracker's ids (unreliable, restarted in
+  difficult videos); stitching maps them to a person in
+  `detection_track_assignments`, and that association is what gets a
+  `subject_id`. In a segmentation-driven run `track_id` is the mask label
+  itself, so with registry labels it is already the subject's label.
 
 ## 4. Phasing (each step shippable)
 
@@ -105,12 +125,12 @@ subject; `persons_json` stays for old readers and is then derived.
 - **Keep names as keys**: what we have; fails as soon as a subject is renamed
   or a run predates a subject.
 
-## 6. Open questions
+## 6. Decisions and open points
 
-1. Are 255 subjects per capture enough (yes for any realistic capture)?
-2. Should renaming a subject be allowed? With permanent labels it is safe;
-   `name` uniqueness within a capture is the only constraint.
-3. For old segmentations, is a one-time "assign label to subject" UI step
-   acceptable, or should the migration guess (e.g. by label frequency)?
-4. Should a person's pose track ids (`person_tracks.track_id`, per detection
-   run) also map to a subject at detection time, or stay run-local as now?
+- 255 subjects per capture is enough (confirmed).
+- Renaming a subject is allowed; the only constraint is a unique live name
+  per capture (a person and an object cannot share a name).
+- Old segmentations: the migration writes exception rows from
+  `persons_json`; a label that had no name (the sword's label 3 in the sword
+  session) is left to identity or assigned once in the segmentation panel's
+  "Mask labels" table.

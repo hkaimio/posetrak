@@ -1645,6 +1645,54 @@ class StandaloneRunPanel(QWidget):
         self.navigate_object_track.emit(seq_id)
 
 
+# DAVIS palette (BGR): one colour per segmentation mask label, cycling.
+_SEG_LABEL_COLORS_BGR = [
+    (80, 80, 240), (120, 200, 80), (240, 120, 80),
+    (60, 200, 240), (240, 80, 180), (220, 60, 60),
+    (80, 240, 140), (60, 140, 240), (240, 200, 60),
+]
+
+
+def _labels_present_in_run(
+    conn: sqlite3.Connection, seg_run_id: str, n_samples: int = 12
+) -> list[int]:
+    """Non-zero mask labels found in *seg_run_id*'s masks, sampled.
+
+    Decodes *n_samples* masks spread evenly over the camera with the most
+    masks (a label that appears in only a few frames can be missed) and
+    returns the sorted labels seen.
+    """
+    import cv2
+    import numpy as np
+
+    row = conn.execute(
+        "SELECT shot_video_id, COUNT(*) n FROM seg_masks WHERE seg_quality_run_id = ? "
+        "GROUP BY shot_video_id ORDER BY n DESC LIMIT 1",
+        (seg_run_id,),
+    ).fetchone()
+    if row is None:
+        return []
+    frames = [
+        r["frame_idx"] for r in conn.execute(
+            "SELECT frame_idx FROM seg_masks WHERE seg_quality_run_id = ? AND shot_video_id = ? "
+            "ORDER BY frame_idx",
+            (seg_run_id, row["shot_video_id"]),
+        )
+    ]
+    step = max(1, len(frames) // max(1, n_samples))
+    labels: set[int] = set()
+    for frame_idx in frames[::step]:
+        blob = conn.execute(
+            "SELECT mask_blob FROM seg_masks WHERE seg_quality_run_id = ? "
+            "AND shot_video_id = ? AND frame_idx = ?",
+            (seg_run_id, row["shot_video_id"], frame_idx),
+        ).fetchone()["mask_blob"]
+        mask = cv2.imdecode(np.frombuffer(bytes(blob), dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+        if mask is not None:
+            labels.update(int(v) for v in np.unique(mask) if v != 0)
+    return sorted(labels)
+
+
 class SegmentationRunPanel(QWidget):
     """Summary view for a single seg_quality_runs row, reached by clicking
     a segmentation node in the session tree (segmentation-ui-improvements
@@ -1709,6 +1757,8 @@ class SegmentationRunPanel(QWidget):
             lbl.setWordWrap(True)
             vbox.addWidget(lbl)
 
+        self._build_label_table(vbox)
+
         open_btn = QPushButton("Open / Continue…")
         open_btn.setToolTip(
             "Open the segmentation editor, continuing this run instead of "
@@ -1718,6 +1768,47 @@ class SegmentationRunPanel(QWidget):
         vbox.addWidget(open_btn, alignment=Qt.AlignmentFlag.AlignLeft)
 
         vbox.addStretch()
+
+    def _build_label_table(self, vbox: QVBoxLayout) -> None:
+        """Which subject each mask label means in this segmentation, with a
+        picker to correct it (subject-identity-design.md, seg_quality_run_
+        subjects). A label whose subject cannot be told stays unassigned."""
+        from posetrak.db.manage_subject import (
+            list_subjects, set_run_label_subject, subject_for_label_in_run,
+        )
+
+        capture_id = self._conn.execute(
+            "SELECT shot_id FROM seg_quality_runs WHERE id = ?", (self._seg_run_id,)
+        ).fetchone()["shot_id"]
+        subjects = list_subjects(self._conn, capture_id)
+        labels = _labels_present_in_run(self._conn, self._seg_run_id)
+        if not labels:
+            return
+        head = QLabel("Mask labels")
+        head.setStyleSheet("font-weight: bold;")
+        vbox.addWidget(head)
+        for label in labels:
+            b, g, r = _SEG_LABEL_COLORS_BGR[(label - 1) % len(_SEG_LABEL_COLORS_BGR)]
+            swatch = QLabel(f" {label} ")
+            swatch.setStyleSheet(f"background: rgb({r},{g},{b}); color: black;")
+            combo = QComboBox()
+            combo.addItem("(unassigned)", None)
+            for subj in subjects:
+                combo.addItem(f"{subj['name']} ({subj['kind']})", subj["id"])
+            current = subject_for_label_in_run(self._conn, self._seg_run_id, label)
+            combo.setCurrentIndex(combo.findData(current["id"]) if current else 0)
+
+            def _changed(_i, lab=label, cb=combo) -> None:
+                set_run_label_subject(self._conn, self._seg_run_id, lab, cb.currentData())
+                self.data_changed.emit()
+
+            combo.currentIndexChanged.connect(_changed)
+            row_w = QWidget()
+            row_l = QHBoxLayout(row_w)
+            row_l.setContentsMargins(0, 0, 0, 0)
+            row_l.addWidget(swatch)
+            row_l.addWidget(combo, stretch=1)
+            vbox.addWidget(row_w)
 
 
 # ---------------------------------------------------------------------------
@@ -6166,12 +6257,7 @@ class PersonCropGridWidget(QWidget):
         mask_crop = cv2.resize(
             mask_crop, (crop_bgr.shape[1], crop_bgr.shape[0]), interpolation=cv2.INTER_NEAREST,
         )
-        # DAVIS palette — BGR
-        _DAVIS_COLORS_BGR = [
-            (80, 80, 240), (120, 200, 80), (240, 120, 80),
-            (60, 200, 240), (240, 80, 180), (220, 60, 60),
-            (80, 240, 140), (60, 140, 240), (240, 200, 60),
-        ]
+        _DAVIS_COLORS_BGR = _SEG_LABEL_COLORS_BGR
         labels = [track_id] if track_id is not None else [
             int(v) for v in np.unique(mask_crop) if v != 0
         ]

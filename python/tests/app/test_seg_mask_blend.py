@@ -136,9 +136,10 @@ def test_display_crop_result_blends_when_track_id_and_show_seg_given(qapp):
     assert args[1:4] == ("sv1", 0, 3)
 
 
-def test_display_crop_result_skips_blend_without_track_id(qapp):
-    """The backfill/ghost path (no detection at this frame -> no track_id)
-    must not attempt a mask blend, even if show_seg is set."""
+def test_display_crop_result_blends_all_labels_without_track_id(qapp):
+    """The backfill/ghost path (no detection at this frame, and every frame
+    of an object sequence -> no track_id) blends every label present when
+    show_seg is set."""
     w = _make_display_widget()
     cell = MagicMock()
 
@@ -147,7 +148,8 @@ def test_display_crop_result_skips_blend_without_track_id(qapp):
         show_seg=True,
     )
 
-    w._blend_seg_mask.assert_not_called()
+    w._blend_seg_mask.assert_called_once()
+    assert w._blend_seg_mask.call_args.args[3] is None
 
 
 def test_display_crop_result_skips_blend_when_show_seg_false(qapp):

@@ -305,7 +305,7 @@ def auto_assign_and_finalise(
             last_frame=row["last_frame"],
         )
         for row in track_rows
-        if 1 <= row["track_id"] <= len(persons_ordered)
+        if 1 <= row["track_id"] <= len(persons_ordered) and persons_ordered[row["track_id"] - 1]
     ]
     return finalise_to_db(
         session=session,

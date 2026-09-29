@@ -180,3 +180,43 @@ def test_blend_without_track_id_paints_every_label(qapp, dummy_db):
     assert not np.array_equal(out[3, 3], [10, 10, 10])
     assert not np.array_equal(out[0, 0], out[3, 3])  # different colours per label
     assert np.array_equal(out[1, 1], [10, 10, 10])
+
+
+def test_blend_uses_the_editors_label_palette(qapp, dummy_db):
+    """Same colour per label as the segmentation editor (video_canvas.label_to_color)."""
+    from app.pose.video_canvas import label_to_color
+
+    mask = np.zeros((4, 4), dtype=np.uint8)
+    mask[0, 0] = 3
+    _insert_mask(dummy_db, mask)
+    w = _make_widget(dummy_db)
+    crop = np.full((4, 4, 3), 10, dtype=np.uint8)
+
+    out = w._blend_seg_mask(crop, "sv1", 0, 3, 0.0, 0.0, 4.0, 4.0)
+
+    r, g, b = label_to_color(3)
+    expected = np.array([10 * 0.55 + c * 0.45 for c in (b, g, r)], dtype=np.float32).astype(np.uint8)
+    assert np.array_equal(out[0, 0], expected)
+
+
+def test_blend_draws_a_legend_with_subject_names_on_a_large_crop(qapp, dummy_db):
+    from posetrak.db.manage_person import create_person
+
+    dummy_db.execute("INSERT INTO mocap_sessions (id, recorded_at) VALUES ('s', '2026-01-01')")
+    dummy_db.execute("INSERT INTO captures (id, session_id, capture_number) VALUES ('cap1', 's', 1)")
+    create_person(dummy_db, "cap1", "Harri")   # registry label 1
+    dummy_db.execute(
+        "INSERT INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at) "
+        "VALUES ('sqr1', 'cap1', 0, 1, '2026-01-01')"
+    )
+    mask = np.zeros((200, 200), dtype=np.uint8)
+    mask[150:190, 150:190] = 1   # far from the top-left legend area
+    _insert_mask(dummy_db, mask)
+    w = _make_widget(dummy_db)
+    w._video_dims = {"sv1": (200, 200)}
+    crop = np.full((200, 200, 3), 10, dtype=np.uint8)
+
+    out = w._blend_seg_mask(crop, "sv1", 0, None, 0.0, 0.0, 200.0, 200.0)
+
+    assert not np.array_equal(out[8:40, 8:120], crop[8:40, 8:120])   # legend drawn
+    assert np.array_equal(out[100:140, 100:140], crop[100:140, 100:140])  # rest untouched

@@ -179,7 +179,8 @@ class CutieWorker(QThread):
         log.info("CutieWorker: model ready  t=%.3f  (%.2fs to load)",
                  time.monotonic(), time.monotonic() - t0)
         proc = self._new_processor(model)
-        objects = list(range(1, len(self._persons) + 1))
+        # Labels are permanent subject labels, so the list can have gaps ("").
+        objects = [i + 1 for i, name in enumerate(self._persons) if name]
         init_t = torch.from_numpy(self._init_mask).to(self._device)
 
         total = self._last - self._init_frame + 1
@@ -262,7 +263,8 @@ class CutieWorker(QThread):
                  self._first, self._init_frame - 1, self._init_frame, t0)
         model = self._load_cutie()
         proc = self._new_processor(model)
-        objects = list(range(1, len(self._persons) + 1))
+        # Labels are permanent subject labels, so the list can have gaps ("").
+        objects = [i + 1 for i, name in enumerate(self._persons) if name]
         init_t = torch.from_numpy(self._init_mask).to(self._device)
 
         # Read backward-range frames into memory, scale + JPEG-compress immediately.

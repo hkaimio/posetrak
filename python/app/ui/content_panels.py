@@ -1645,12 +1645,14 @@ class StandaloneRunPanel(QWidget):
         self.navigate_object_track.emit(seq_id)
 
 
-# DAVIS palette (BGR): one colour per segmentation mask label, cycling.
-_SEG_LABEL_COLORS_BGR = [
-    (80, 80, 240), (120, 200, 80), (240, 120, 80),
-    (60, 200, 240), (240, 80, 180), (220, 60, 60),
-    (80, 240, 140), (60, 140, 240), (240, 200, 60),
-]
+def _seg_label_color_bgr(label: int) -> tuple[int, int, int]:
+    """BGR colour of a segmentation mask label -- the same palette the
+    segmentation editor uses (app.pose.video_canvas.label_to_color), so a
+    subject looks the same in both."""
+    from app.pose.video_canvas import label_to_color
+
+    r, g, b = label_to_color(label)
+    return (b, g, r)
 
 
 def _labels_present_in_run(
@@ -1788,7 +1790,7 @@ class SegmentationRunPanel(QWidget):
         head.setStyleSheet("font-weight: bold;")
         vbox.addWidget(head)
         for label in labels:
-            b, g, r = _SEG_LABEL_COLORS_BGR[(label - 1) % len(_SEG_LABEL_COLORS_BGR)]
+            b, g, r = _seg_label_color_bgr(label)
             swatch = QLabel(f" {label} ")
             swatch.setStyleSheet(f"background: rgb({r},{g},{b}); color: black;")
             combo = QComboBox()
@@ -6257,21 +6259,49 @@ class PersonCropGridWidget(QWidget):
         mask_crop = cv2.resize(
             mask_crop, (crop_bgr.shape[1], crop_bgr.shape[0]), interpolation=cv2.INTER_NEAREST,
         )
-        _DAVIS_COLORS_BGR = _SEG_LABEL_COLORS_BGR
         labels = [track_id] if track_id is not None else [
             int(v) for v in np.unique(mask_crop) if v != 0
         ]
         overlay = crop_bgr.astype(np.float32)
         any_fg = False
+        painted: list[int] = []
         for label in labels:
             fg = mask_crop == label
             if not fg.any():
                 continue
             any_fg = True
-            color_bgr = _DAVIS_COLORS_BGR[(label - 1) % len(_DAVIS_COLORS_BGR)]
+            color_bgr = _seg_label_color_bgr(label)
+            painted.append(label)
             for c, cv_ in enumerate(color_bgr):
                 overlay[:, :, c][fg] = overlay[:, :, c][fg] * 0.55 + cv_ * 0.45
-        return overlay.astype(np.uint8) if any_fg else crop_bgr
+        if not any_fg:
+            return crop_bgr
+        out = overlay.astype(np.uint8)
+        self._draw_seg_legend(out, sqr_id, painted)
+        return out
+
+    def _draw_seg_legend(self, img, seg_run_id: str, labels: list[int]) -> None:
+        """Draw a colour swatch and the subject's name for each painted label
+        in the top-left corner of *img* (in place). Skipped for crops too
+        small for readable text."""
+        import cv2
+        from posetrak.db.manage_subject import subject_for_label_in_run
+
+        h = img.shape[0]
+        if h < 120:
+            return
+        scale = max(0.4, h / 900.0)
+        line_h = int(28 * scale) + 6
+        for i, label in enumerate(labels):
+            subject = subject_for_label_in_run(self._conn, seg_run_id, label)
+            text = subject["name"] if subject is not None else f"label {label}"
+            y = 8 + i * line_h
+            cv2.rectangle(img, (8, y), (8 + line_h - 6, y + line_h - 6),
+                          _seg_label_color_bgr(label), -1)
+            cv2.putText(img, text, (8 + line_h, y + line_h - 10), cv2.FONT_HERSHEY_SIMPLEX,
+                        scale, (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(img, text, (8 + line_h, y + line_h - 10), cv2.FONT_HERSHEY_SIMPLEX,
+                        scale, (255, 255, 255), 1, cv2.LINE_AA)
 
     def _compute_target_rect(
         self,

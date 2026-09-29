@@ -120,6 +120,26 @@ def test_persons_union_capture_objects(qapp, capture_db):
         panel.shutdown()
 
 
+def test_labels_are_permanent_registry_labels_not_sorted_position(qapp, capture_db):
+    """Subject-identity: a subject's mask label is its registry label. A
+    subject added later that sorts *before* an existing one must not shift
+    it, and a deleted subject leaves a gap ("" at its index) instead of
+    renumbering everyone after it."""
+    from app.pose.cutie_init_panel import CutieInitPanel
+    from posetrak.db.manage_person import create_person, delete_person
+
+    # Alice already has registry label 1. "Aaron" sorts before "Alice".
+    aaron = create_person(capture_db, "cap1", "Aaron")   # label 2
+    create_person(capture_db, "cap1", "Zed")              # label 3
+    delete_person(capture_db, aaron)                       # label 2 retired
+
+    panel = CutieInitPanel(capture_db, "cap1")
+    try:
+        assert panel._persons == ["Alice", "", "Zed"]
+    finally:
+        panel.shutdown()
+
+
 def test_ensure_seg_run_creates_capture_scoped_row(qapp, capture_db):
     """_ensure_seg_run() writes shot_id (not detection_run_id) -- the
     schema-migration half of this feature."""

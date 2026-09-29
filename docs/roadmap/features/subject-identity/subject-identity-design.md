@@ -1,7 +1,9 @@
 # Capture-scoped subject identity (persons and objects) — design proposal
 
-Status: phase 1 implemented (registry, triggers, migration, exception table,
-label-mapping UI); phases 2-4 open.
+Status: phases 1 and 2 implemented (registry, triggers, migration, exception
+table, label-mapping UI; segmentation editor allocates by registry label,
+viewer overlays share the editor's palette and show subject names);
+phases 3-4 open.
 
 ## 1. What is inconsistent today
 
@@ -124,6 +126,22 @@ tables.
   reference; the registry above gets the identity benefits without that.
 - **Keep names as keys**: what we have; fails as soon as a subject is renamed
   or a run predates a subject.
+
+## 5b. Phase 2 as built
+
+- The Cutie panel builds its name list from the registry: index i holds the
+  name of label i+1, `""` for a label no subject has (so a deleted subject
+  leaves a gap instead of renumbering everyone). Names known only from an
+  earlier detection run's track assignments become persons first, so they get
+  a registry label. `persons_json` written for a new segmentation is that
+  same list, so old readers still work; consumers skip `""` entries (Cutie
+  worker objects, auto-assign, the detection dialog's summary).
+- Registry order is creation order, no longer sorted-name order, for
+  subjects created after the registry existed.
+- The tracking-run viewer colours labels with the editor's
+  `label_to_color` palette and draws a swatch and the subject's name per
+  painted label (from `subject_for_label_in_run`, so a Mask labels
+  correction shows up there).
 
 ## 6. Decisions and open points
 

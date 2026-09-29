@@ -208,7 +208,7 @@ class RunDetectionDialog(QDialog):
             # so it's left on YOLO too.
             default_index = 0
             for r in seg_runs:
-                persons = _json.loads(r["persons_json"]) if r["persons_json"] else []
+                persons = [n for n in _json.loads(r["persons_json"]) if n] if r["persons_json"] else []
                 who = ", ".join(persons) if persons else "unlabeled"
                 created = str(r["created_at"])[:19].replace("T", " ")
                 self._bbox_source_combo.addItem(

@@ -362,3 +362,34 @@ def test_auto_assign_skips_track_id_outside_persons_ordered(session):
         "SELECT person_name FROM detection_track_assignments WHERE detection_run_id = 'run1'"
     ).fetchall()
     assert [r["person_name"] for r in rows] == ["alice"]
+
+
+def test_auto_assign_skips_a_label_no_subject_has(session):
+    """Labels are permanent subject labels, so persons_ordered can hold ""
+    for an unused label -- a track on such a label is skipped, never turned
+    into a blank-named person."""
+    for track_id in (1, 2):
+        session.execute(
+            "INSERT INTO detection_keypoints"
+            " (detection_run_id, shot_video_id, video_frame, track_id, region_type,"
+            "  keypoints, noise_scale)"
+            " VALUES ('run1', ?, 0, ?, 'full_body', ?, 0.5)",
+            (_SVID, track_id, _kp(1.0, 133)),
+        )
+        session.execute(
+            "INSERT INTO person_tracks"
+            " (id, detection_run_id, shot_video_id, track_id, first_frame, last_frame)"
+            " VALUES (?, 'run1', ?, ?, 0, 0)",
+            (f"pt{track_id}", _SVID, track_id),
+        )
+    session.commit()
+
+    seq_ids = auto_assign_and_finalise(
+        session, detection_run_id="run1", shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
+        persons_ordered=["", "bob"], pose_model="rtmpose-l-133kp",
+    )
+    assert len(seq_ids) == 1
+    names = [r["person_name"] for r in session.execute(
+        "SELECT person_name FROM detection_track_assignments WHERE detection_run_id = 'run1'"
+    ).fetchall()]
+    assert names == ["bob"]

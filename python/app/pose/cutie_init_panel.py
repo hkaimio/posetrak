@@ -280,7 +280,7 @@ class CutieInitPanel(QWidget):
         # whatever narrower range track_first/track_last would otherwise
         # suggest.
         self._seg_range_s: tuple[float, float] | None = None
-        self._persons: list[str] = []       # person names, index+1 = SAM label
+        self._persons: list[str] = []       # subject names, index+1 = SAM label ("" = unused label)
         # Global-time scrubbing (see _local_frame_for docstring): None
         # means no sync config for this capture, falling back to the
         # legacy per-camera-frame domain where each camera has its own
@@ -847,9 +847,16 @@ class CutieInitPanel(QWidget):
         # persons_json's ordinal->name snapshot) -- nothing in this panel
         # ever looks the name back up against capture_persons specifically,
         # so an object's name flows through identically to a person's.
-        from posetrak.db.manage_person import list_persons
-        person_names = {r["name"] for r in list_persons(self._conn, shot_id)}
-        person_names |= {
+        # Labels come from the capture's subject registry (persons and
+        # objects share it; each has a permanent, never-reused label), not
+        # from a name's position in a sorted list -- adding a subject later
+        # cannot shift anyone's label. See docs/roadmap/features/
+        # subject-identity/subject-identity-design.md. A name only known
+        # from an earlier detection run's track assignments becomes a person
+        # first, so it gets a registry label like everyone else.
+        from posetrak.db.manage_person import find_or_create_person
+        from posetrak.db.manage_subject import list_subjects
+        legacy_names = {
             r["person_name"] for r in self._conn.execute(
                 "SELECT DISTINCT dta.person_name FROM detection_track_assignments dta "
                 "JOIN detection_runs dr ON dr.id = dta.detection_run_id "
@@ -857,13 +864,15 @@ class CutieInitPanel(QWidget):
                 (shot_id,),
             ).fetchall()
         }
-        person_names |= {
-            r["name"] for r in self._conn.execute(
-                "SELECT name FROM capture_objects WHERE capture_id = ?",
-                (shot_id,),
-            ).fetchall()
-        }
-        self._persons = sorted(person_names)
+        for name in sorted(legacy_names):
+            find_or_create_person(self._conn, shot_id, name)
+        # self._persons: index i is the name of label i+1, "" for a label no
+        # subject has -- the same ordinal-list shape persons_json and the
+        # pose/finalise code already use, now with gaps allowed.
+        subjects = list_subjects(self._conn, shot_id)
+        self._persons = [""] * max((s_["label"] for s_ in subjects), default=0)
+        for subj in subjects:
+            self._persons[subj["label"] - 1] = subj["name"]
 
         # self._sync_config_id: set whenever any sync_configs row exists
         # for the capture (most recent by rowid) -- this alone is enough
@@ -1084,7 +1093,9 @@ class CutieInitPanel(QWidget):
 
         self._person_group.setVisible(True)
         for i, name in enumerate(self._persons):
-            label = i + 1  # 1-based SAM label
+            if not name:
+                continue  # a label no subject has
+            label = i + 1  # 1-based SAM label = the subject's registry label
             r, g, b = label_to_color(label)
             luma = 0.299 * r + 0.587 * g + 0.114 * b
             text_color = "#000" if luma > 140 else "#fff"
@@ -1705,7 +1716,7 @@ class CutieInitPanel(QWidget):
                     kp_bytes, dtype=np.float32
                 ).reshape(n, 3)
 
-        assignments = {i + 1: name for i, name in enumerate(self._persons)}
+        assignments = {i + 1: name for i, name in enumerate(self._persons) if name}
         self._skeleton_overlay.set_detections([dict(d) for d in dets], kp_dict)
         self._skeleton_overlay.set_assignments(assignments)
 

@@ -366,11 +366,17 @@ class TestDetectRunSegmentation:
 
         seg_id = _gen_id()
         conn = sqlite3.connect(str(session_path))
+        # The capture's person "alice" gets registry label 1, the mask label.
+        conn.execute(
+            "INSERT INTO capture_persons (id, capture_id, name, created_at) "
+            "VALUES (?, ?, 'alice', '2026-01-01T00:00:00+00:00')",
+            (_gen_id(), capture_id),
+        )
         conn.execute(
             "INSERT INTO seg_quality_runs "
-            "(id, shot_id, time_start_s, time_end_s, created_at, quality_source, erosion_px, persons_json) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (seg_id, capture_id, 0.0, 1.0, "2026-01-01T00:00:00+00:00", "cutie", 5, json.dumps(["alice"])),
+            "(id, shot_id, time_start_s, time_end_s, created_at, quality_source, erosion_px) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (seg_id, capture_id, 0.0, 1.0, "2026-01-01T00:00:00+00:00", "cutie", 5),
         )
         conn.commit()
         conn.close()

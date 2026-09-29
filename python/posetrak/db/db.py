@@ -25,7 +25,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 15
-SESSION_SCHEMA_VERSION: Final[int] = 59
+SESSION_SCHEMA_VERSION: Final[int] = 60
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -2034,6 +2034,62 @@ def _migrate_session_v58_to_v59(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v59_to_v60(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 59 to 60.
+
+    v60 retires ``seg_quality_runs.persons_json``: label meanings now come
+    only from the subject registry and ``seg_quality_run_subjects``. So every
+    name still recorded in a persons_json list must be reachable from there.
+    For each entry (index i = mask label i+1) the subject is the capture's
+    live subject of that name, else its most recently deleted one, else a
+    person created now for the name (which gets the next registry label, so
+    its old mask label needs an exception row). An exception row is written
+    unless the subject is live and already has that label. Existing exception
+    rows are kept. The column itself stays, unused. See
+    docs/roadmap/features/subject-identity/subject-identity-design.md.
+    """
+    import datetime
+    import json
+
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    runs = conn.execute(
+        "SELECT id, shot_id, persons_json FROM seg_quality_runs WHERE persons_json IS NOT NULL"
+    ).fetchall()
+    for run_id, capture_id, persons_json in runs:
+        try:
+            names = json.loads(persons_json)
+        except ValueError:
+            continue
+        for index, name in enumerate(names):
+            if not name:
+                continue
+            label = index + 1
+            row = conn.execute(
+                "SELECT id, label, deleted FROM capture_subjects WHERE capture_id = ? AND name = ? "
+                "ORDER BY deleted, label DESC LIMIT 1",
+                (capture_id, name),
+            ).fetchone()
+            if row is None:
+                subject_id = generate_id()
+                conn.execute(
+                    "INSERT INTO capture_persons (id, capture_id, name, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (subject_id, capture_id, name, now),
+                )
+                row = conn.execute(
+                    "SELECT id, label, deleted FROM capture_subjects WHERE id = ?", (subject_id,)
+                ).fetchone()
+            subject_id, subject_label, deleted = row
+            if deleted or subject_label != label:
+                conn.execute(
+                    "INSERT OR IGNORE INTO seg_quality_run_subjects "
+                    "(seg_quality_run_id, label, subject_id) VALUES (?, ?, ?)",
+                    (run_id, label, subject_id),
+                )
+    _set_schema_version(conn, 60)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -2231,6 +2287,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 58
     if actual == 58:
         _migrate_session_v58_to_v59(conn)
+        actual = 59
+    if actual == 59:
+        _migrate_session_v59_to_v60(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

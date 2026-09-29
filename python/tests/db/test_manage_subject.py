@@ -185,11 +185,12 @@ def test_subject_from_another_capture_is_rejected(session_db) -> None:
         set_run_label_subject(session_db, run, 1, other)
 
 
-def test_name_fallback_to_persons_json_for_a_subject_not_in_the_registry(session_db) -> None:
+def test_persons_json_is_no_longer_read(session_db) -> None:
+    """A name that only exists in the legacy persons_json is not resolvable;
+    migration v60 is what moves such names into the registry."""
     cap = _capture(session_db)
     run = _seg_run(session_db, cap, '["Ghost"]')
-    assert resolve_seg_mask_label(session_db, run, "Ghost") == 1
-    assert resolve_seg_mask_label(session_db, run, "Nobody") is None
+    assert resolve_seg_mask_label(session_db, run, "Ghost") is None
 
 
 def test_migration_backfills_labels_in_sorted_name_order_and_exception_rows(tmp_path) -> None:
@@ -324,3 +325,36 @@ def test_v59_migration_backfills_subject_ids_and_missing_run_rows(tmp_path) -> N
     trp = {r["run_id"]: (r["subject_id"], r["capture_object_id"], r["skeleton_id"])
            for r in conn.execute("SELECT * FROM tracking_run_persons")}
     assert trp == {"runP": (harri, None, "skelP"), "runO": ("sword_id", "sword_id", "skelO")}
+
+
+def test_v60_migration_moves_persons_json_names_into_the_registry(tmp_path) -> None:
+    """A name only in persons_json becomes a person with an exception row for
+    its old label; a deleted subject's name maps back to that subject; a
+    live subject whose label already matches needs no row."""
+    import json
+
+    path = tmp_path / "s.db"
+    conn = create_session(path)
+    cap = _capture(conn)
+    live = create_person(conn, cap, "Live")            # label 1, matches its ordinal
+    old = create_person(conn, cap, "Old")              # label 2
+    delete_person(conn, old)                            # deleted, label 2 retired
+    # A segmentation whose list is [Live, Old, Legacy]: "Legacy" is unknown.
+    conn.execute(
+        "INSERT INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at, persons_json) "
+        "VALUES ('seg1', ?, 0, 1, 'x', ?)", (cap, json.dumps(["Live", "Old", "", "Legacy"])))
+    conn.execute("PRAGMA user_version = 59")
+    conn.commit()
+    conn.close()
+
+    conn = open_session(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SESSION_SCHEMA_VERSION
+    legacy = get_subject_by_name(conn, cap, "Legacy")
+    assert legacy is not None and legacy["kind"] == "person" and legacy["label"] == 3
+    rows = {r["label"]: r["subject_id"] for r in conn.execute(
+        "SELECT label, subject_id FROM seg_quality_run_subjects WHERE seg_quality_run_id = 'seg1'")}
+    assert rows == {2: old, 4: legacy["id"]}            # Live: identity, no row
+    from posetrak.db.manage_person import persons_ordered_for_seg_run
+    assert persons_ordered_for_seg_run(conn, "seg1") == ["Live", "Old", "", "Legacy"]
+    assert resolve_seg_mask_label(conn, "seg1", "Legacy") == 4
+    assert label_for_subject_in_run(conn, "seg1", live) == 1

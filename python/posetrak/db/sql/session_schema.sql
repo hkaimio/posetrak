@@ -271,11 +271,11 @@ CREATE TABLE IF NOT EXISTS pose_observation_sequences (
 --   stays the display/CSV-export field regardless, mirroring the linked
 --   row's name when set.
 CREATE TABLE IF NOT EXISTS sequence_persons (
-    sequence_id       TEXT    NOT NULL REFERENCES pose_observation_sequences(id),
-    person_id         INTEGER NOT NULL,
-    person_name       TEXT    NOT NULL,
-    capture_person_id TEXT    REFERENCES capture_persons(id),
-    subject_id        TEXT,   -- capture_subjects.id of the person (see subject-identity-design.md)
+    sequence_id       TEXT    NOT NULL REFERENCES pose_observation_sequences(id), -- the sequence
+    person_id         INTEGER NOT NULL,  -- index inside the sequence's blobs; 0 for the single person a finalised sequence holds
+    person_name       TEXT    NOT NULL,  -- display / CSV-export name, mirrors the linked person's name when set
+    capture_person_id TEXT    REFERENCES capture_persons(id), -- the capture's person; NULL for rows that predate the person model
+    subject_id        TEXT,              -- capture_subjects.id of that person (the same value as capture_person_id); NULL if unknown. Object sequences have no row here, see manage_subject.subject_id_for_sequence
     PRIMARY KEY (sequence_id, person_id)
 );
 
@@ -352,16 +352,15 @@ CREATE TABLE IF NOT EXISTS tracking_runs (
     trial_id                 TEXT REFERENCES trials(id)
 );
 
--- Per-person skeleton override within a run (supports multi-person tracking)
--- skeleton_id -- references registry: skeletons(id)
--- capture_object_id -- NULL for an actual person; set for a tracked object
---   (marker-based-mocap design doc §4.2).
+-- Who a tracking run tracked (one row per tracked person or object in the run) and
+-- the skeleton used for them. The tracker writes the row when it creates the run;
+-- older runs were backfilled by migration v59.
 CREATE TABLE IF NOT EXISTS tracking_run_persons (
-    run_id     TEXT    NOT NULL REFERENCES tracking_runs(id),
-    person_id  INTEGER NOT NULL,
-    skeleton_id TEXT   NOT NULL, -- references registry: skeletons(id)
-    capture_object_id TEXT REFERENCES capture_objects(id),
-    subject_id TEXT,  -- capture_subjects.id of the tracked person or object
+    run_id      TEXT    NOT NULL REFERENCES tracking_runs(id), -- the tracking run
+    person_id   INTEGER NOT NULL,  -- subject index used in this run's tracking_results rows
+    skeleton_id TEXT    NOT NULL,  -- registry skeletons.id used for this subject (per-person override)
+    capture_object_id TEXT REFERENCES capture_objects(id), -- set when the subject is a tracked object; NULL for a person
+    subject_id  TEXT,              -- capture_subjects.id of the tracked person or object; NULL if it could not be resolved
     PRIMARY KEY (run_id, person_id)
 );
 
@@ -431,27 +430,27 @@ CREATE TABLE IF NOT EXISTS tracking_obs_results (
 -- Assignment-decision trace: every (candidate, marker slot) pair the shared
 -- dot-assignment phase (dot_assignment.cpp, resolve_dot_assignment()) costed
 -- for a frame, not just the winner tracking_obs_results records -- the "why
--- was detection N (not) assigned to slot X in frame F" instrumentation
--- (sword-swing-tracking plan, 2026-09-27). Opt-in and scoped to a requested
+-- was detection N (not) assigned to slot X in frame F" instrumentation.
+-- Opt-in and scoped to a requested
 -- step range at tracking time (--trace-assignment-start/--trace-assignment-end
 -- on posetrak-tracker track); a run made without those flags writes no rows
 -- here at all. camera_idx/marker_idx index into the owning tracking_runs
 -- row's own active_camera_ids/marker_names JSON arrays, the same convention
 -- tracking_obs_results.obs_blob's two axes already use.
 CREATE TABLE IF NOT EXISTS tracking_assignment_trace (
-    run_id              TEXT    NOT NULL REFERENCES tracking_runs(id),
-    person_id           INTEGER NOT NULL,
-    tracker_step        INTEGER NOT NULL,
-    camera_idx          INTEGER NOT NULL,
+    run_id              TEXT    NOT NULL REFERENCES tracking_runs(id), -- the tracking run
+    person_id           INTEGER NOT NULL,  -- subject index within the run (as in tracking_results)
+    tracker_step        INTEGER NOT NULL,  -- tracker step the assignment was solved for
+    camera_idx          INTEGER NOT NULL,  -- index into the run's active_camera_ids
     candidate_row       INTEGER NOT NULL,  -- index into that camera/step's raw candidate list
-    tracklet_id         INTEGER NOT NULL,  -- -1 if the candidate has none
-    candidate_x         REAL    NOT NULL,
-    candidate_y         REAL    NOT NULL,
-    marker_idx          INTEGER NOT NULL,  -- the slot this row costs the candidate against
+    tracklet_id         INTEGER NOT NULL,  -- detector tracklet id of the candidate; -1 if it has none
+    candidate_x         REAL    NOT NULL,  -- candidate position x, undistorted pixels
+    candidate_y         REAL    NOT NULL,  -- candidate position y, undistorted pixels
+    marker_idx          INTEGER NOT NULL,  -- index into the run's marker_names: the slot this row costs the candidate against
     mahal_cost          REAL    NOT NULL,  -- raw squared Mahalanobis distance, before modifiers
-    final_cost          REAL    NOT NULL,  -- cost after modifiers (== mahal_cost if none fired)
-    excluded_by         TEXT    NOT NULL DEFAULT '',  -- excluding CostModifier's name(), or ''
-    in_final_assignment INTEGER NOT NULL DEFAULT 0     -- 1 iff this pair won its Hungarian solve
+    final_cost          REAL    NOT NULL,  -- cost after modifiers (== mahal_cost if none fired); 1e9 when a modifier excluded the pair
+    excluded_by         TEXT    NOT NULL DEFAULT '',  -- name of the CostModifier that excluded the pair (e.g. segmentation_mask), or ''
+    in_final_assignment INTEGER NOT NULL DEFAULT 0     -- 1 iff this pair won its camera's Hungarian solve
 );
 CREATE INDEX IF NOT EXISTS idx_tracking_assignment_trace_lookup
     ON tracking_assignment_trace (run_id, person_id, tracker_step);
@@ -545,31 +544,40 @@ CREATE INDEX IF NOT EXISTS idx_person_detections_run_video
 -- whose range it covers (containment: shot_id matches, and
 -- time_start_s <= trial.time_start_s AND time_end_s >= trial.time_end_s).
 -- See docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md.
--- trial_id is optional provenance (which trial this was created from), not
--- a scoping constraint. mask_dir: optional path to a directory containing
--- per-video NPZ debug mask files. persons_json: JSON array of person
--- names, index i = mask label i+1 (same convention tracking_runs.
--- marker_names/active_camera_ids already use for an ordered string list
--- in one column) -- the ordinal->name mapping baked into this
--- segmentation's own mask labels at creation time, so a *different*
--- caller reusing this segmentation later (gap 2, RunDetectionDialog)
--- doesn't have to assume today's capture_persons order still matches
--- whatever order was in effect when the masks were made. NULL for
--- segmentations created before this column existed, or via the offline
--- add_seg_quality.py tool (no interactive person labeling there).
+-- Columns:
+--   id             -- UUID of the segmentation run.
+--   shot_id        -- captures.id the masks belong to (the capture, despite the name).
+--   trial_id       -- trials.id it was created from; optional provenance, not a scoping
+--                     constraint. NULL when created outside a trial.
+--   time_start_s   -- start of the range the segmentation covers, capture timeline,
+--                     seconds. Editing may extend it; seg_masks holds the real extent.
+--   time_end_s     -- end of that range, seconds.
+--   created_at     -- ISO 8601 UTC creation time.
+--   quality_source -- how the masks were made: 'cutie' (offline batch),
+--                     'cutie-interactive' (interactive editor), or another tool's name.
+--   erosion_px     -- mask erosion (pixels) applied when scoring keypoints against it.
+--   mask_dir       -- optional directory of per-video NPZ debug mask files; NULL if none.
+--   notes          -- free-text notes; NULL if none.
+--   persons_json   -- LEGACY, no longer read or written. It was a JSON array of names
+--                     (index i = mask label i+1). Label meanings now come from the
+--                     capture_subjects registry plus seg_quality_run_subjects (see
+--                     docs/roadmap/features/subject-identity/subject-identity-design.md);
+--                     migration v60 moved every name in it into the registry. The
+--                     column stays only so old data remains readable.
+--   name           -- optional display name; NULL shows a timestamp instead.
 CREATE TABLE IF NOT EXISTS seg_quality_runs (
-    id             TEXT PRIMARY KEY,
-    shot_id        TEXT NOT NULL REFERENCES captures(id),
-    trial_id       TEXT REFERENCES trials(id),
-    time_start_s   REAL NOT NULL,
-    time_end_s     REAL NOT NULL,
-    created_at     TEXT NOT NULL,
-    quality_source TEXT NOT NULL DEFAULT 'cutie',
-    erosion_px     INTEGER NOT NULL DEFAULT 5,
-    mask_dir       TEXT,
-    notes          TEXT,
-    persons_json   TEXT,
-    name           TEXT
+    id             TEXT PRIMARY KEY,                      -- UUID of the run
+    shot_id        TEXT NOT NULL REFERENCES captures(id), -- capture the masks belong to
+    trial_id       TEXT REFERENCES trials(id),            -- trial it was created from; optional
+    time_start_s   REAL NOT NULL,                         -- covered range start, seconds
+    time_end_s     REAL NOT NULL,                         -- covered range end, seconds
+    created_at     TEXT NOT NULL,                         -- ISO 8601 UTC
+    quality_source TEXT NOT NULL DEFAULT 'cutie',         -- how the masks were made
+    erosion_px     INTEGER NOT NULL DEFAULT 5,            -- mask erosion, pixels
+    mask_dir       TEXT,                                  -- optional NPZ debug directory
+    notes          TEXT,                                  -- free-text notes
+    persons_json   TEXT,                                  -- LEGACY, unused (see above)
+    name           TEXT                                   -- optional display name
 );
 
 -- User-marked "split points": frames where a single Cutie tracking pass
@@ -650,14 +658,14 @@ CREATE TABLE IF NOT EXISTS frame_cache_entries (
 -- capture_person_id -- see sequence_persons.capture_person_id above; same
 --   nullable, additive-not-replacing relationship to person_name.
 CREATE TABLE IF NOT EXISTS detection_track_assignments (
-    detection_run_id  TEXT    NOT NULL REFERENCES detection_runs(id),
-    shot_video_id     TEXT    NOT NULL,
-    track_id          INTEGER NOT NULL,
-    person_name       TEXT    NOT NULL,
-    capture_person_id TEXT    REFERENCES capture_persons(id),
-    subject_id        TEXT,   -- capture_subjects.id the stitched track was assigned to
-    first_frame       INTEGER NOT NULL,
-    last_frame        INTEGER NOT NULL,
+    detection_run_id  TEXT    NOT NULL REFERENCES detection_runs(id), -- the detection run the track belongs to
+    shot_video_id     TEXT    NOT NULL,  -- capture_videos.id (one camera) the track was seen in
+    track_id          INTEGER NOT NULL,  -- person_tracks.track_id: the detector's track id, or the mask label in a segmentation-driven run
+    person_name       TEXT    NOT NULL,  -- name the track was assigned to (display)
+    capture_person_id TEXT    REFERENCES capture_persons(id), -- the capture's person it was assigned to; NULL for old rows
+    subject_id        TEXT,              -- capture_subjects.id it was assigned to; NULL if unknown
+    first_frame       INTEGER NOT NULL,  -- first video frame of the assigned segment
+    last_frame        INTEGER NOT NULL,  -- last video frame of the assigned segment (inclusive)
     PRIMARY KEY (detection_run_id, shot_video_id, track_id, first_frame)
 );
 -- Segmentation masks for interactive Cutie init widget.
@@ -676,21 +684,21 @@ CREATE TABLE IF NOT EXISTS seg_masks (
 -- docs/roadmap/features/subject-identity/subject-identity-design.md and
 -- migrations/028_capture_subjects.sql.
 CREATE TABLE IF NOT EXISTS capture_subjects (
-    id         TEXT PRIMARY KEY,
-    capture_id TEXT NOT NULL,   -- no FK: rows come only from capture_persons/objects triggers
-    kind       TEXT NOT NULL CHECK (kind IN ('person', 'object')),
-    label      INTEGER NOT NULL CHECK (label BETWEEN 1 AND 255),
-    name       TEXT NOT NULL,
-    deleted    INTEGER NOT NULL DEFAULT 0,
+    id         TEXT PRIMARY KEY,  -- equals capture_persons.id or capture_objects.id of the subject
+    capture_id TEXT NOT NULL,     -- captures.id; no FK, rows are created only by the triggers below
+    kind       TEXT NOT NULL CHECK (kind IN ('person', 'object')), -- which table the subject lives in
+    label      INTEGER NOT NULL CHECK (label BETWEEN 1 AND 255),   -- permanent mask label: MAX+1 per capture, never reused
+    name       TEXT NOT NULL,     -- current name; follows renames of the person or object
+    deleted    INTEGER NOT NULL DEFAULT 0, -- 1 once the person or object was deleted; the row and its label stay so old masks keep a readable name
     UNIQUE (capture_id, label)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_capture_subjects_live_name
     ON capture_subjects (capture_id, name) WHERE deleted = 0;
 
 CREATE TABLE IF NOT EXISTS seg_quality_run_subjects (
-    seg_quality_run_id TEXT    NOT NULL REFERENCES seg_quality_runs(id),
-    label              INTEGER NOT NULL,
-    subject_id         TEXT    REFERENCES capture_subjects(id),
+    seg_quality_run_id TEXT    NOT NULL REFERENCES seg_quality_runs(id), -- the segmentation
+    label              INTEGER NOT NULL, -- mask label (pixel value) in that segmentation
+    subject_id         TEXT    REFERENCES capture_subjects(id), -- subject the label means there; NULL = explicitly unassigned
     PRIMARY KEY (seg_quality_run_id, label)
 );
 

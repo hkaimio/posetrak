@@ -203,32 +203,7 @@ def test_delete_person_refuses_when_referenced_by_detection_track_assignments(
 # ---------------------------------------------------------------------------
 
 
-def test_persons_ordered_for_seg_run_reads_persisted_snapshot(session_db) -> None:
-    """The persisted persons_json wins even if capture_persons has since
-    changed -- the whole point: don't assume today's order still matches
-    what the masks were actually labeled with."""
-    capture_id = _make_capture(session_db)
-    create_person(session_db, capture_id, "Alice")
-    session_db.execute(
-        "INSERT INTO seg_quality_runs "
-        "(id, shot_id, time_start_s, time_end_s, created_at, persons_json) "
-        "VALUES ('seg1', ?, 0.0, 1e9, '2026-01-01', '[\"Bob\", \"Alice\"]')",
-        (capture_id,),
-    )
-    session_db.commit()
-    # A person added after the segmentation was created must not affect
-    # the persisted order.
-    create_person(session_db, capture_id, "Carol")
-
-    assert persons_ordered_for_seg_run(session_db, "seg1") == ["Bob", "Alice"]
-
-
-def test_persons_ordered_for_seg_run_falls_back_to_capture_persons(session_db) -> None:
-    """No persisted snapshot (older row, or the offline add_seg_quality.py
-    tool) -- falls back to today's capture_persons order, best-effort."""
-    capture_id = _make_capture(session_db)
-    create_person(session_db, capture_id, "Zoe")
-    create_person(session_db, capture_id, "Alice")
+def _seg_run(session_db, capture_id: str) -> str:
     session_db.execute(
         "INSERT INTO seg_quality_runs "
         "(id, shot_id, time_start_s, time_end_s, created_at) "
@@ -236,8 +211,35 @@ def test_persons_ordered_for_seg_run_falls_back_to_capture_persons(session_db) -
         (capture_id,),
     )
     session_db.commit()
+    return "seg1"
 
-    assert persons_ordered_for_seg_run(session_db, "seg1") == ["Alice", "Zoe"]
+
+def test_persons_ordered_for_seg_run_is_the_registry_label_order(session_db) -> None:
+    """Index i is the name of label i+1, from the capture's subject registry
+    (creation order, not sorted)."""
+    capture_id = _make_capture(session_db)
+    create_person(session_db, capture_id, "Zoe")
+    create_person(session_db, capture_id, "Alice")
+    run = _seg_run(session_db, capture_id)
+
+    assert persons_ordered_for_seg_run(session_db, run) == ["Zoe", "Alice"]
+
+
+def test_persons_ordered_for_seg_run_keeps_gaps_and_deleted_names(session_db) -> None:
+    """A deleted subject keeps its name (old masks still paint its label), a
+    label nobody has is "", and a remapped label follows the run's exception row."""
+    from posetrak.db.manage_subject import set_run_label_subject
+
+    capture_id = _make_capture(session_db)
+    gone = create_person(session_db, capture_id, "Gone")     # label 1
+    create_person(session_db, capture_id, "Bob")             # label 2
+    carol = create_person(session_db, capture_id, "Carol")   # label 3
+    delete_person(session_db, gone)
+    run = _seg_run(session_db, capture_id)
+    assert persons_ordered_for_seg_run(session_db, run) == ["Gone", "Bob", "Carol"]
+
+    set_run_label_subject(session_db, run, 5, carol)          # painted as 5 in this run
+    assert persons_ordered_for_seg_run(session_db, run) == ["Gone", "Bob", "", "", "Carol"]
 
 
 def test_persons_ordered_for_seg_run_missing_row_raises(session_db) -> None:
@@ -250,43 +252,35 @@ def test_persons_ordered_for_seg_run_missing_row_raises(session_db) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_seg_mask_label_returns_one_based_index(session_db) -> None:
+def test_resolve_seg_mask_label_returns_the_subjects_registry_label(session_db) -> None:
     capture_id = _make_capture(session_db)
-    session_db.execute(
-        "INSERT INTO seg_quality_runs "
-        "(id, shot_id, time_start_s, time_end_s, created_at, persons_json) "
-        "VALUES ('seg1', ?, 0.0, 1e9, '2026-01-01', '[\"Bob\", \"Alice\"]')",
-        (capture_id,),
-    )
-    session_db.commit()
+    create_person(session_db, capture_id, "Bob")
+    create_person(session_db, capture_id, "Alice")
+    run = _seg_run(session_db, capture_id)
 
-    assert resolve_seg_mask_label(session_db, "seg1", "Bob") == 1
-    assert resolve_seg_mask_label(session_db, "seg1", "Alice") == 2
+    assert resolve_seg_mask_label(session_db, run, "Bob") == 1
+    assert resolve_seg_mask_label(session_db, run, "Alice") == 2
 
 
-def test_resolve_seg_mask_label_none_for_a_name_not_in_this_segmentation(session_db) -> None:
+def test_resolve_seg_mask_label_none_for_a_name_the_capture_does_not_have(session_db) -> None:
     capture_id = _make_capture(session_db)
-    session_db.execute(
-        "INSERT INTO seg_quality_runs "
-        "(id, shot_id, time_start_s, time_end_s, created_at, persons_json) "
-        "VALUES ('seg1', ?, 0.0, 1e9, '2026-01-01', '[\"Bob\"]')",
-        (capture_id,),
-    )
-    session_db.commit()
+    create_person(session_db, capture_id, "Bob")
+    run = _seg_run(session_db, capture_id)
 
-    assert resolve_seg_mask_label(session_db, "seg1", "Sword") is None
+    assert resolve_seg_mask_label(session_db, run, "Sword") is None
 
 
-def test_resolve_seg_mask_label_works_for_an_object_name_same_as_a_person(session_db) -> None:
-    """A prop's own name flows through identically to a person's -- the
-    segmentation's own person list doesn't distinguish the two."""
+def test_resolve_seg_mask_label_works_for_an_object_like_a_person(session_db) -> None:
+    """A prop is a subject like a person -- the registry doesn't distinguish."""
+    from posetrak.db.manage_capture_object import create_capture_object
+
     capture_id = _make_capture(session_db)
+    create_person(session_db, capture_id, "Alice")
     session_db.execute(
-        "INSERT INTO seg_quality_runs "
-        "(id, shot_id, time_start_s, time_end_s, created_at, persons_json) "
-        "VALUES ('seg1', ?, 0.0, 1e9, '2026-01-01', '[\"Alice\", \"Sword\"]')",
-        (capture_id,),
+        "INSERT INTO marker_body_definitions (id, name, yaml_content, created_at) "
+        "VALUES ('mb', 'mb', 'x', '2026-01-01')"
     )
-    session_db.commit()
+    create_capture_object(session_db, capture_id, "Sword", "mb")
+    run = _seg_run(session_db, capture_id)
 
-    assert resolve_seg_mask_label(session_db, "seg1", "Sword") == 2
+    assert resolve_seg_mask_label(session_db, run, "Sword") == 2

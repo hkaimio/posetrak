@@ -12,7 +12,6 @@ Phase 4: correction workflow, RTMPose post-step.
 from __future__ import annotations
 
 import datetime
-import json
 import logging
 import sqlite3
 import time
@@ -831,22 +830,12 @@ class CutieInitPanel(QWidget):
             if seg_row["time_start_s"] is not None and seg_row["time_end_s"] is not None:
                 self._seg_range_s = (float(seg_row["time_start_s"]), float(seg_row["time_end_s"]))
 
-        # Subjects: capture-level performer definitions (can exist before any
-        # detection has run -- the real prerequisite for segmentation, not
-        # "detection already ran") union'd with any names already assigned to
-        # tracks from a prior detection run on this capture, so captures that
-        # went through the old detect-first flow keep working unchanged. See
-        # docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md.
-        #
-        # Also union in capture_objects.name, so a non-person prop (e.g. a
-        # ball with no coded pattern, tracked purely by segmentation-mask
-        # centroid) can be selected as a SAM/Cutie target here too, the same
-        # way a person is. Safe to just widen this
-        # one query: self._persons is used everywhere below as a plain list
-        # of label strings (button text, SAM object-id ordinals,
-        # persons_json's ordinal->name snapshot) -- nothing in this panel
-        # ever looks the name back up against capture_persons specifically,
-        # so an object's name flows through identically to a person's.
+        # Subjects: every person and object of the capture (they can exist
+        # before any detection has run -- the real prerequisite for
+        # segmentation). A non-person prop, e.g. a ball tracked purely by
+        # segmentation-mask centroid, is a subject like a person, so it can
+        # be a SAM/Cutie target too. self._persons is used below as a plain
+        # list of label strings (button text, SAM object-id ordinals).
         # Labels come from the capture's subject registry (persons and
         # objects share it; each has a permanent, never-reused label), not
         # from a name's position in a sorted list -- adding a subject later
@@ -867,8 +856,8 @@ class CutieInitPanel(QWidget):
         for name in sorted(legacy_names):
             find_or_create_person(self._conn, shot_id, name)
         # self._persons: index i is the name of label i+1, "" for a label no
-        # subject has -- the same ordinal-list shape persons_json and the
-        # pose/finalise code already use, now with gaps allowed.
+        # subject has -- the ordinal-list shape the pose/finalise code uses,
+        # with gaps allowed.
         subjects = list_subjects(self._conn, shot_id)
         self._persons = [""] * max((s_["label"] for s_ in subjects), default=0)
         for subj in subjects:
@@ -2299,13 +2288,10 @@ class CutieInitPanel(QWidget):
         table for this capture, since marks aren't real global-time values
         in that legacy per-camera-frame fallback.
 
-        persons_json snapshots self._persons -- the ordinal->name mapping
-        (index i = mask label i+1) actually in effect right now, the same
-        list _queue_pose_jobs threads through as persons_ordered. Lets a
-        *different* caller reuse this segmentation later without having to
-        assume today's capture_persons order still matches (gap 2,
-        RunDetectionDialog's "use existing segmentation" bbox source). See
-        docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md.
+        The masks are painted with each subject's permanent registry label
+        (see docs/roadmap/features/subject-identity/subject-identity-design.md),
+        so no label->name snapshot is stored: any caller reusing this
+        segmentation later reads the names from the subject registry.
         """
         if self._seg_init_run_id is not None:
             return
@@ -2319,10 +2305,9 @@ class CutieInitPanel(QWidget):
         self._conn.execute(
             "INSERT INTO seg_quality_runs "
             "(id, shot_id, trial_id, time_start_s, time_end_s, created_at, "
-            " quality_source, erosion_px, persons_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'cutie-interactive', 5, ?)",
-            (run_id, self._shot_id, self._trial_id, time_start_s, time_end_s,
-             now, json.dumps(list(self._persons))),
+            " quality_source, erosion_px) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'cutie-interactive', 5)",
+            (run_id, self._shot_id, self._trial_id, time_start_s, time_end_s, now),
         )
         self._conn.commit()
         self._seg_init_run_id = run_id

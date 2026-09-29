@@ -97,65 +97,63 @@ def list_persons(session: sqlite3.Connection, capture_id: str) -> list[sqlite3.R
 
 
 def persons_ordered_for_seg_run(session: sqlite3.Connection, seg_quality_run_id: str) -> list[str]:
-    """Return the ordinal->name mapping (index i = mask label i+1) a
-    segmentation's masks were labeled with.
+    """Return the label->name list of a segmentation: index i is the name of
+    mask label i+1, ``""`` for a label no subject has.
 
-    Reads ``seg_quality_runs.persons_json`` -- the snapshot taken at mask-
-    creation time (see ``CutieInitPanel._ensure_seg_run``) -- so a caller
-    reusing this segmentation later doesn't have to assume today's
-    ``capture_persons`` order still matches whatever order was in effect
-    when the masks were made (see docs/roadmap/features/segmentation-reuse/
-    segmentation-reuse-design.md, gap 2). Falls back to today's
-    ``list_persons`` order for a segmentation created before this column
-    existed, or via the offline ``add_seg_quality.py`` tool (no
-    interactive person labeling there) -- best-effort, not guaranteed
-    correct for those older rows.
+    Built from the capture's subject registry and the segmentation's exception
+    rows (:mod:`posetrak.db.manage_subject`), so a subject added, renamed or
+    deleted since the masks were made is still described correctly; a deleted
+    subject keeps its name. ``seg_quality_runs.persons_json`` is a legacy
+    column and is not read.
 
     Raises
     ------
     ValueError
         If *seg_quality_run_id* does not refer to an existing row.
     """
-    row = session.execute(
-        "SELECT shot_id, persons_json FROM seg_quality_runs WHERE id = ?",
-        (seg_quality_run_id,),
-    ).fetchone()
-    if row is None:
-        raise ValueError(f"seg_quality_runs row not found: {seg_quality_run_id!r}")
-    if row["persons_json"]:
-        return json.loads(row["persons_json"])
-    return [p["name"] for p in list_persons(session, row["shot_id"])]
+    from posetrak.db.manage_subject import _run_capture_id, subject_for_label_in_run
+
+    capture_id = _run_capture_id(session, seg_quality_run_id)
+    top = session.execute(
+        "SELECT MAX(m) FROM ("
+        " SELECT MAX(label) AS m FROM capture_subjects WHERE capture_id = ?"
+        " UNION ALL"
+        " SELECT MAX(label) FROM seg_quality_run_subjects WHERE seg_quality_run_id = ?)",
+        (capture_id, seg_quality_run_id),
+    ).fetchone()[0] or 0
+    names = []
+    for label in range(1, top + 1):
+        subject = subject_for_label_in_run(
+            session, seg_quality_run_id, label, include_deleted=True
+        )
+        names.append(subject["name"] if subject is not None else "")
+    return names
 
 
 def resolve_seg_mask_label(
     session: sqlite3.Connection, seg_quality_run_id: str, subject_name: str
 ) -> int | None:
     """Return *subject_name*'s own mask label (1..N) within *seg_quality_run_id*,
-    or None if it has none there.
+    or None if the capture has no such subject or it has no label there.
 
     Looks the subject up in the capture's subject registry
     (:mod:`posetrak.db.manage_subject`; persons and objects alike) and
-    returns its label in that segmentation. Falls back to the
-    segmentation's recorded ``persons_json`` name list for a subject the
-    registry does not know. The caller passes the integer on to the tracker
-    binary (segmentation-mask-dot-assignment-design.md section 6): C++ never
-    does this lookup itself.
+    returns its label in that segmentation. The caller passes the integer on
+    to the tracker binary (segmentation-mask-dot-assignment-design.md
+    section 6): C++ never does this lookup itself.
     """
-    from posetrak.db.manage_subject import get_subject_by_name, label_for_subject_in_run
+    from posetrak.db.manage_subject import (
+        _run_capture_id, get_subject_by_name, label_for_subject_in_run,
+    )
 
-    row = session.execute(
-        "SELECT shot_id FROM seg_quality_runs WHERE id = ?", (seg_quality_run_id,)
-    ).fetchone()
-    if row is None:
-        raise ValueError(f"seg_quality_runs row not found: {seg_quality_run_id!r}")
-    subject = get_subject_by_name(session, row["shot_id"], subject_name)
-    if subject is not None:
-        return label_for_subject_in_run(session, seg_quality_run_id, subject["id"])
-    names = persons_ordered_for_seg_run(session, seg_quality_run_id)
-    try:
-        return names.index(subject_name) + 1
-    except ValueError:
+    subject = get_subject_by_name(
+        session, _run_capture_id(session, seg_quality_run_id), subject_name
+    )
+    if subject is None:
         return None
+    return label_for_subject_in_run(session, seg_quality_run_id, subject["id"])
+
+
 def get_person(session: sqlite3.Connection, person_id: str) -> sqlite3.Row | None:
     """Return one ``capture_persons`` row by id, or ``None`` if not found."""
     return session.execute(

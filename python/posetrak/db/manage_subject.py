@@ -84,12 +84,18 @@ def label_for_subject_in_run(
 
 
 def subject_for_label_in_run(
-    session: sqlite3.Connection, seg_quality_run_id: str, label: int
+    session: sqlite3.Connection,
+    seg_quality_run_id: str,
+    label: int,
+    *,
+    include_deleted: bool = False,
 ) -> sqlite3.Row | None:
     """The subject a mask *label* means in segmentation *seg_quality_run_id*:
     the exception row's subject if there is one (None if it was explicitly
     left unassigned), else the capture's live subject with that registry
-    label, else None."""
+    label, else None. *include_deleted* also returns a deleted subject
+    through the registry-label path, for showing a name (an explicit
+    exception row always returns its subject, deleted or not)."""
     row = session.execute(
         "SELECT subject_id FROM seg_quality_run_subjects "
         "WHERE seg_quality_run_id = ? AND label = ?",
@@ -100,8 +106,9 @@ def subject_for_label_in_run(
     capture_id = _run_capture_id(session, seg_quality_run_id)
     # A subject with an exception row elsewhere in this run has been moved
     # off its registry label, so identity must not claim it here.
+    live = "" if include_deleted else " AND deleted = 0"
     return session.execute(
-        "SELECT * FROM capture_subjects WHERE capture_id = ? AND label = ? AND deleted = 0 "
+        f"SELECT * FROM capture_subjects WHERE capture_id = ? AND label = ?{live} "
         "AND id NOT IN (SELECT subject_id FROM seg_quality_run_subjects "
         "               WHERE seg_quality_run_id = ? AND subject_id IS NOT NULL)",
         (capture_id, label, seg_quality_run_id),

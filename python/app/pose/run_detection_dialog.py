@@ -186,13 +186,13 @@ class RunDetectionDialog(QDialog):
         # Only shown when at least one segmentation exists, so the common
         # case (no segmentation, YOLO-only) looks exactly as before.
         seg_runs = self._conn.execute(
-            "SELECT id, created_at, persons_json, time_start_s, time_end_s "
+            "SELECT id, created_at, time_start_s, time_end_s "
             "FROM seg_quality_runs WHERE shot_id = ? ORDER BY created_at DESC",
             (self._capture_id,),
         ).fetchall()
         self._bbox_source_combo: QComboBox | None = None
         if seg_runs:
-            import json as _json
+            from posetrak.db.manage_person import persons_ordered_for_seg_run
             self._bbox_source_combo = QComboBox()
             self._bbox_source_combo.addItem("YOLO detection", None)
             # Default to the most recent segmentation that fully covers the
@@ -208,7 +208,9 @@ class RunDetectionDialog(QDialog):
             # so it's left on YOLO too.
             default_index = 0
             for r in seg_runs:
-                persons = [n for n in _json.loads(r["persons_json"]) if n] if r["persons_json"] else []
+                persons = [
+                    n for n in persons_ordered_for_seg_run(self._conn, r["id"]) if n
+                ]
                 who = ", ".join(persons) if persons else "unlabeled"
                 created = str(r["created_at"])[:19].replace("T", " ")
                 self._bbox_source_combo.addItem(

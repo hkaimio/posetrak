@@ -1,9 +1,9 @@
 # Capture-scoped subject identity (persons and objects) — design proposal
 
-Status: phases 1, 2 and 3 implemented (registry, triggers, migration, exception
+Status: phases 1 to 4 implemented (registry, triggers, migration, exception
 table, label-mapping UI; segmentation editor allocates by registry label,
 viewer overlays share the editor's palette and show subject names);
-phase 4 open.
+the legacy `persons_json` column is retired but kept.
 
 ## 1. What is inconsistent today
 
@@ -165,6 +165,25 @@ tables.
   through the registry (`seg_mask_label_for_sequence`, honouring the run's
   exception rows) and passes it to the tracker; `--seg-label` overrides it.
   The tracker config's `dot_seg_mask_enabled` still has to be set.
+
+## 5d. Phase 4 as built (schema v60): `persons_json` retired, column kept
+
+Nothing reads or writes `seg_quality_runs.persons_json` any more. The
+label-to-name list of a segmentation (`manage_person.persons_ordered_for_seg_run`)
+is built from the subject registry and the run's exception rows, so it is
+correct after a subject is added, renamed or deleted, and a deleted subject
+keeps its name (`subject_for_label_in_run(..., include_deleted=True)`). The
+Cutie panel no longer stores a snapshot; the detection dialog, the detect CLI
+and the finalise step read names through the registry;
+`resolve_seg_mask_label` only uses the registry.
+
+Migration v60 makes that safe for old data: for each name in a persons_json
+list it uses the capture's live subject of that name, else its most recently
+deleted one, else creates a person (which gets the next registry label). It
+writes an exception row for the old label unless a live subject already has
+that label. The column stays in the table, documented as legacy, so old data
+stays readable and nothing needs the risky physical drop; it can be removed in
+a later schema version.
 
 ## 6. Decisions and open points
 

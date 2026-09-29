@@ -96,29 +96,29 @@ CREATE TABLE IF NOT EXISTS marker_body_definitions (
 
 -- UKF / tracker configuration snapshots
 CREATE TABLE IF NOT EXISTS tracker_configs (
-    id                     TEXT PRIMARY KEY,
-    name                   TEXT NOT NULL,
-    parent_id              TEXT REFERENCES tracker_configs(id),
-    created_at             TEXT NOT NULL,
-    alpha                  REAL,
-    beta                   REAL,
-    kappa                  REAL,
-    process_noise_std      REAL,
-    process_noise_vel_std  REAL,
-    velocity_half_life_s   REAL,
-    measurement_noise_std  REAL,
-    outlier_threshold      REAL,
-    tracker_fps            REAL,
-    ik_max_iterations      INTEGER,
-    ik_tolerance           REAL,
-    init_position_std      REAL,
-    init_orientation_std   REAL,
-    init_joint_std         REAL,
-    init_velocity_std      REAL,
-    min_cameras_for_init              INTEGER,
+    id                     TEXT PRIMARY KEY,                    -- UUID of the config snapshot
+    name                   TEXT NOT NULL,                       -- display name; auto-generated for per-run snapshots (is_named = 0)
+    parent_id              TEXT REFERENCES tracker_configs(id), -- config this one was derived from by an edit; NULL for a root
+    created_at             TEXT NOT NULL,                       -- ISO 8601 UTC
+    alpha                  REAL,    -- UKF sigma-point spread; about 0.5 for a ~58-dimensional state (tiny values give negative covariance weights)
+    beta                   REAL,    -- UKF prior-distribution parameter; 2 is optimal for a Gaussian
+    kappa                  REAL,    -- UKF secondary scaling parameter; usually 0
+    process_noise_std      REAL,    -- process noise std for angle/position DOFs
+    process_noise_vel_std  REAL,    -- process noise std for velocity DOFs; NULL = same as process_noise_std
+    velocity_half_life_s   REAL,    -- velocity decay half-life in seconds; NULL = no decay
+    measurement_noise_std  REAL,    -- legacy name of the calibration noise: loaded as calib_noise_std, pixels in the original video
+    outlier_threshold      REAL,    -- chi-squared threshold for rejecting an observation as an outlier
+    tracker_fps            REAL,    -- tracker sample rate, Hz
+    ik_max_iterations      INTEGER, -- inverse-kinematics iteration cap for the initial pose
+    ik_tolerance           REAL,    -- inverse-kinematics convergence tolerance
+    init_position_std      REAL,    -- initial covariance std of the root position, metres
+    init_orientation_std   REAL,    -- initial covariance std of the root orientation, radians
+    init_joint_std         REAL,    -- initial covariance std of joint angles, radians (metres for prismatic joints)
+    init_velocity_std      REAL,    -- initial covariance std of the velocities
+    min_cameras_for_init              INTEGER,  -- fewest cameras that must see a frame for it to initialise the tracker
     velocity_mode_camera_ids          TEXT,  -- JSON array of integer camera indices; NULL = all cameras use position mode
     velocity_measurement_noise_std    REAL,  -- Measurement noise std for velocity cameras (pixels/frame); NULL = use measurement_noise_std
-    notes                             TEXT,
+    notes                             TEXT,     -- free-text notes; NULL if none
     -- Added in schema migration v22 (pose_noise_std), v23 (relative obs), v24 (cross-pair obs):
     pose_noise_std                    REAL,  -- Pose estimation noise std in model-input pixels
     use_relative_observations         INTEGER, -- 0/1 flag for child-minus-parent pixel observations

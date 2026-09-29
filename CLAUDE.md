@@ -227,6 +227,25 @@ implied by `pose_model`. `SessionReader` matches manifest `name` against `Marker
 See `docs/data-model-and-storage.md` §3 and
 `docs/roadmap/features/marker-based-mocap/productization-architecture-and-plan.md`.
 
+### Database schema documentation
+
+The SQL schema files (`python/posetrak/db/sql/session_schema.sql`,
+`registry_schema.sql`) are the reference for what every column means, and the
+schema is complex enough that it must be readable from there alone.
+
+**Whenever you create or modify a table, document every column of that
+table**, not just the ones you touched. Give each column a comment on its own
+line (`-- ...`) or on the comment line directly above it saying what it holds:
+the unit or coordinate frame, what `NULL` means, and which table and column an
+id refers to. Legacy or unused columns say so and what replaced them. A table
+comment above the `CREATE TABLE` explains what a row is and who writes it.
+
+Enforcement is a ratchet: `python/tests/db/test_schema_documentation.py` lists
+the fully documented tables (`DOCUMENTED_TABLES`) and fails if any of their
+columns loses its comment. Add the table to that list in the same change that
+documents it; never remove one. A migration file is a historical record and is
+not edited to add comments; document the table in the schema file.
+
 ### Design principle: automation vs. prior human edits
 
 When a new automated write-path can conflict with a prior human edit (e.g. an

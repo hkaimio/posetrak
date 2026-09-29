@@ -160,3 +160,21 @@ def test_display_crop_result_skips_blend_when_show_seg_false(qapp):
     )
 
     w._blend_seg_mask.assert_not_called()
+
+
+def test_blend_without_track_id_paints_every_label(qapp, dummy_db):
+    """An object sequence has no person track to pick a label by (and its
+    labels are not in persons_json): every non-zero label is painted."""
+    mask = np.zeros((4, 4), dtype=np.uint8)
+    mask[0, 0] = 1
+    mask[3, 3] = 3
+    _insert_mask(dummy_db, mask)
+    w = _make_widget(dummy_db)
+    crop = np.full((4, 4, 3), 10, dtype=np.uint8)
+
+    out = w._blend_seg_mask(crop, "sv1", 0, None, 0.0, 0.0, 4.0, 4.0)
+
+    assert not np.array_equal(out[0, 0], [10, 10, 10])
+    assert not np.array_equal(out[3, 3], [10, 10, 10])
+    assert not np.array_equal(out[0, 0], out[3, 3])  # different colours per label
+    assert np.array_equal(out[1, 1], [10, 10, 10])

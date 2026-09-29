@@ -6077,7 +6077,7 @@ class PersonCropGridWidget(QWidget):
         jpeg_h = float(hpx or crop_bgr.shape[0])
         src_scale = jpeg_h / float(src_h) if src_h > 0 else 1.0
 
-        if show_seg and track_id is not None:
+        if show_seg:
             crop_bgr = self._blend_seg_mask(
                 crop_bgr, svid, frame_idx, track_id, x1, y1, float(src_w), float(src_h),
             )
@@ -6104,13 +6104,16 @@ class PersonCropGridWidget(QWidget):
         crop_bgr,
         svid: str,
         frame_idx: int,
-        track_id: int,
+        track_id: "int | None",
         x1: float,
         y1: float,
         src_w: float,
         src_h: float,
     ):
-        """Blend *track_id*'s segmentation mask into *crop_bgr*, returning the
+        """Blend *track_id*'s segmentation mask into *crop_bgr* (every label
+        present, one colour each, when *track_id* is None -- an object
+        sequence has no person track to pick a label by, and its labels are
+        not in persons_json), returning the
         blended array (or *crop_bgr* unchanged if there's no mask configured/
         stored for this frame). *x1*/*y1*/*src_w*/*src_h* are the crop's
         source region in full-frame pixel coordinates, before any black-fill
@@ -6169,15 +6172,20 @@ class PersonCropGridWidget(QWidget):
             (60, 200, 240), (240, 80, 180), (220, 60, 60),
             (80, 240, 140), (60, 140, 240), (240, 200, 60),
         ]
-        color_idx = (track_id - 1) % len(_DAVIS_COLORS_BGR)
-        color_bgr = _DAVIS_COLORS_BGR[color_idx]
-        fg = mask_crop == track_id
-        if not fg.any():
-            return crop_bgr
+        labels = [track_id] if track_id is not None else [
+            int(v) for v in np.unique(mask_crop) if v != 0
+        ]
         overlay = crop_bgr.astype(np.float32)
-        for c, cv_ in enumerate(color_bgr):
-            overlay[:, :, c][fg] = overlay[:, :, c][fg] * 0.55 + cv_ * 0.45
-        return overlay.astype(np.uint8)
+        any_fg = False
+        for label in labels:
+            fg = mask_crop == label
+            if not fg.any():
+                continue
+            any_fg = True
+            color_bgr = _DAVIS_COLORS_BGR[(label - 1) % len(_DAVIS_COLORS_BGR)]
+            for c, cv_ in enumerate(color_bgr):
+                overlay[:, :, c][fg] = overlay[:, :, c][fg] * 0.55 + cv_ * 0.45
+        return overlay.astype(np.uint8) if any_fg else crop_bgr
 
     def _compute_target_rect(
         self,
@@ -6324,6 +6332,7 @@ class PersonCropGridWidget(QWidget):
                         cell, cam_id, svid, frame_idx, tracking_step,
                         show_detected, show_tracked, mem, target_rect=desired,
                         layer_label="backfill/ghost", show_debug=show_debug,
+                        show_seg=show_seg,
                     )
                     continue
 

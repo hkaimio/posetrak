@@ -2749,6 +2749,9 @@ class _ImageCanvas(QWidget):
         # see "Debug overlay" in the design doc. None = hidden (checkbox off
         # or nothing to report yet).
         self._debug_label: str | None = None
+        # (colour, name) per segmentation label painted into the current image;
+        # drawn by Qt at the viewport's top-left, not into the image.
+        self._legend: list[tuple[QColor, str]] = []
 
     def set_placement_active(self, active: bool) -> None:
         self._placement_active = active
@@ -2768,6 +2771,7 @@ class _ImageCanvas(QWidget):
         self._dot_xy = None
         self._dot_status = None
         self._debug_label = None
+        self._legend = []
         self.update()
 
     def show_loading(self) -> None:
@@ -2781,6 +2785,7 @@ class _ImageCanvas(QWidget):
         self._dot_xy = None
         self._dot_status = None
         self._debug_label = None
+        self._legend = []
         self.update()
 
     def show_image(self, pixmap: QPixmap, x1: float, y1: float, src_scale: float) -> None:
@@ -2817,6 +2822,11 @@ class _ImageCanvas(QWidget):
     def set_debug_label(self, text: "str | None") -> None:
         if text != self._debug_label:
             self._debug_label = text
+            self.update()
+
+    def set_legend(self, entries: "list[tuple[QColor, str]]") -> None:
+        if entries != self._legend:
+            self._legend = list(entries)
             self.update()
 
     def set_edit_mode(self, enabled: bool) -> None:
@@ -3163,6 +3173,28 @@ class _ImageCanvas(QWidget):
             painter.setPen(QColor(255, 220, 0))
             painter.drawText(QPointF(2 * pad, pad + fm.ascent() + pad), self._debug_label)
 
+        def _draw_legend() -> None:
+            # Segmentation legend: a colour swatch and the subject's name per
+            # label, at the top-left of the viewport (below the debug label).
+            if not self._legend:
+                return
+            fm = painter.fontMetrics()
+            pad = 3
+            row_h = fm.height() + 2 * pad
+            y = pad + ((fm.height() + 3 * pad) if self._debug_label else 0)
+            for color, text in self._legend:
+                tw = fm.horizontalAdvance(text)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(0, 0, 0, 160))
+                painter.drawRect(QRectF(pad, y, row_h + tw + 2 * pad, row_h))
+                painter.setBrush(color)
+                painter.drawRect(QRectF(2 * pad, y + pad, fm.height(), fm.height()))
+                painter.setPen(QColor(255, 255, 255))
+                painter.drawText(
+                    QPointF(2 * pad + fm.height() + pad, y + pad + fm.ascent()), text
+                )
+                y += row_h + 2
+
         def _draw_placement_label() -> None:
             # Chain-placement mode: names which keypoint the next click will
             # set, e.g. "Left arm: elbow (2/5)" -- top-center, out of the way
@@ -3423,6 +3455,7 @@ class _ImageCanvas(QWidget):
             ))
 
         _draw_debug_label()
+        _draw_legend()
         _draw_placement_label()
         painter.end()
 
@@ -3476,6 +3509,9 @@ class _CropCell(QWidget):
 
     def show_image(self, pixmap: QPixmap, x1: float, y1: float, src_scale: float) -> None:
         self._canvas.show_image(pixmap, x1, y1, src_scale)
+
+    def set_legend(self, entries) -> None:
+        self._canvas.set_legend(entries)
 
     def set_overlay(
         self,
@@ -6433,6 +6469,7 @@ class PersonCropGridWidget(QWidget):
         y1 = float(src_y)
         src_scale = crop_bgr.shape[0] / float(src_h) if src_h > 0 else 1.0
 
+        self._seg_legend = []
         if show_seg:
             crop_bgr = self._blend_seg_mask(
                 crop_bgr, svid, frame_idx, track_id, x1, y1, float(src_w), float(src_h),
@@ -6448,6 +6485,7 @@ class PersonCropGridWidget(QWidget):
         h_img, w_img = crop_rgb.shape[:2]
         qimg = QImage(crop_rgb.data, w_img, h_img, 3 * w_img, QImage.Format.Format_RGB888)
         cell.show_image(QPixmap.fromImage(qimg), x1, y1, src_scale)
+        cell.set_legend(self._seg_legend)
         cell.set_debug_label(
             (layer_label + (" +black-fill" if black_filled else "")) if show_debug else None
         )
@@ -6533,7 +6571,7 @@ class PersonCropGridWidget(QWidget):
             painted.append(label)
         if out is None:
             return crop_bgr
-        self._draw_seg_legend(out, sqr_id, painted)
+        self._seg_legend = self._seg_legend_entries(sqr_id, painted)
         return out
 
     _SEG_MASK_CACHE_SIZE = 32
@@ -6572,28 +6610,31 @@ class PersonCropGridWidget(QWidget):
             self._seg_mask_cache.popitem(last=False)
         return mask
 
-    def _draw_seg_legend(self, img, seg_run_id: str, labels: list[int]) -> None:
-        """Draw a colour swatch and the subject's name for each painted label
-        in the top-left corner of *img* (in place). Skipped for crops too
-        small for readable text."""
-        import cv2
+    _seg_legend: "list[tuple[QColor, str]]" = []
+
+    _seg_label_names: "dict | None" = None
+
+    def _seg_legend_entries(self, seg_run_id: str, labels: list[int]) -> "list[tuple[QColor, str]]":
+        """(colour, subject name) for each painted label, for the canvas's
+        legend overlay. Names are looked up once per (run, label)."""
         from posetrak.db.manage_subject import subject_for_label_in_run
 
-        h = img.shape[0]
-        if h < 120:
-            return
-        scale = max(0.4, h / 900.0)
-        line_h = int(28 * scale) + 6
-        for i, label in enumerate(labels):
-            subject = subject_for_label_in_run(self._conn, seg_run_id, label)
-            text = subject["name"] if subject is not None else f"label {label}"
-            y = 8 + i * line_h
-            cv2.rectangle(img, (8, y), (8 + line_h - 6, y + line_h - 6),
-                          _seg_label_color_bgr(label), -1)
-            cv2.putText(img, text, (8 + line_h, y + line_h - 10), cv2.FONT_HERSHEY_SIMPLEX,
-                        scale, (0, 0, 0), 3, cv2.LINE_AA)
-            cv2.putText(img, text, (8 + line_h, y + line_h - 10), cv2.FONT_HERSHEY_SIMPLEX,
-                        scale, (255, 255, 255), 1, cv2.LINE_AA)
+        if self._seg_label_names is None:
+            self._seg_label_names = {}
+        entries = []
+        for label in labels:
+            key = (seg_run_id, label)
+            if key not in self._seg_label_names:
+                try:
+                    subject = subject_for_label_in_run(self._conn, seg_run_id, label)
+                except ValueError:   # run no longer exists
+                    subject = None
+                self._seg_label_names[key] = (
+                    subject["name"] if subject is not None else f"label {label}"
+                )
+            b, g, r = _seg_label_color_bgr(label)
+            entries.append((QColor(int(r), int(g), int(b)), self._seg_label_names[key]))
+        return entries
 
     def _compute_target_rect(
         self,
@@ -6831,6 +6872,7 @@ class PersonCropGridWidget(QWidget):
             # Segmentation mask overlay (blended directly into the JPEG before Qt
             # conversion) -- shared with _display_crop_result's wide-crop-cache/
             # backfill paths, see _blend_seg_mask.
+            self._seg_legend = []
             if show_seg and track_id is not None:
                 src_w_val = row["src_w"] if row["src_w"] is not None else (
                     crop_bgr.shape[1] / src_scale if src_scale > 0 else crop_bgr.shape[1]
@@ -6863,6 +6905,7 @@ class PersonCropGridWidget(QWidget):
                 crop_rgb.data, w_img, h_img, 3 * w_img, QImage.Format.Format_RGB888
             )
             cell.show_image(QPixmap.fromImage(qimg), x1, y1, src_scale)
+            cell.set_legend(self._seg_legend)
             cell.set_debug_label(
                 ("low-res" + (" +black-fill" if black_filled else "")) if show_debug else None
             )

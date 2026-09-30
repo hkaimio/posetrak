@@ -200,7 +200,7 @@ def test_blend_uses_the_editors_label_palette(qapp, dummy_db):
     assert np.allclose(out[0, 0], expected, atol=1)
 
 
-def test_blend_draws_a_legend_with_subject_names_on_a_large_crop(qapp, dummy_db):
+def test_blend_collects_a_legend_with_subject_names_and_leaves_the_image_alone(qapp, dummy_db):
     from posetrak.db.manage_person import create_person
 
     dummy_db.execute("INSERT INTO mocap_sessions (id, recorded_at) VALUES ('s', '2026-01-01')")
@@ -219,5 +219,6 @@ def test_blend_draws_a_legend_with_subject_names_on_a_large_crop(qapp, dummy_db)
 
     out = w._blend_seg_mask(crop, "sv1", 0, None, 0.0, 0.0, 200.0, 200.0)
 
-    assert not np.array_equal(out[8:40, 8:120], crop[8:40, 8:120])   # legend drawn
-    assert np.array_equal(out[100:140, 100:140], crop[100:140, 100:140])  # rest untouched
+    # The legend is drawn by the canvas on top of the image, not into it.
+    assert np.array_equal(out[0:100, 0:100], crop[0:100, 0:100])
+    assert [text for _color, text in w._seg_legend] == ["Harri"]

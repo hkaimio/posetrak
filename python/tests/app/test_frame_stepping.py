@@ -340,3 +340,26 @@ def test_no_crop_is_requested_while_the_view_is_still_moving(qapp):
     w._show_service_frame(cell, CAM, 42, None, True, True, False, False)
     service.request_region.assert_not_called()
     w._view_timer.stop()
+
+
+def test_the_segmentation_legend_is_drawn_by_the_canvas_at_the_viewport_corner(qapp):
+    from PySide6.QtGui import QColor, QImage, QPixmap
+
+    from app.ui.content_panels import _ImageCanvas
+
+    canvas = _ImageCanvas()
+    canvas.resize(300, 200)
+    pixmap = QPixmap(1000, 1000)
+    pixmap.fill(QColor(0, 0, 0))
+    canvas.show_image(pixmap, 0.0, 0.0, 1.0)
+    canvas._zoom_rect = (600.0, 600.0, 800.0, 700.0)   # the image's own corner is out of view
+    canvas.set_legend([(QColor(255, 0, 0), "Sword")])
+
+    img = canvas.grab().toImage().convertToFormat(QImage.Format.Format_RGB32)
+    reds = [x for x in range(0, 60) for y in range(0, 40) if QColor(img.pixel(x, y)).red() > 200
+            and QColor(img.pixel(x, y)).green() < 50]
+    assert reds   # the swatch is inside the top-left corner of the widget
+
+    canvas.set_legend([])
+    img = canvas.grab().toImage().convertToFormat(QImage.Format.Format_RGB32)
+    assert not any(QColor(img.pixel(x, y)).red() > 200 for x in range(0, 60) for y in range(0, 40))

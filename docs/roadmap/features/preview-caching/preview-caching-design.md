@@ -337,14 +337,17 @@ view therefore decides what image is needed:
   Deleting the file loses nothing.
 - **Density.** Every 8th frame (`PROXY_STEP`), matching what the time slider can address.
 - **Building.** One sequential decode per range, converting only the frames that are
-  kept. The viewer starts it in the background when a prop sequence is opened, one
-  thread per camera, in chunks of 3600 frames ordered by distance from the time on
-  screen, so the part being looked at is ready first. A sequence can span a whole
-  capture; on the five 4K cameras of the sword session the build ran at about
-  400 decoded frames per second in total, which produces about 50 stored frames per
-  second and about 2 MB per second of build time. Rows are written in short
-  transactions, because several videos are built at once and a long write transaction
-  would lock the others out.
+  kept. The viewer starts a `ProxyBuilder` per camera (background thread) when a prop
+  sequence is opened. A sequence can span a whole capture, so the range is cut into
+  chunks of 1200 frames and the chunk nearest the frame on screen is built next; when
+  the focus has stayed in another unfinished chunk for 0.5 s the chunk in progress is
+  interrupted (its frames are kept and skipped on resume) and the builder moves there.
+  The five 4K cameras of the sword session decode about 400 frames per second in total.
+  After a jump, the chunk at the new time was ready after 14-16 s on the GoPros and 30 s
+  on the slower ace2pro, which decodes at about half their rate. The label "Scrub cache
+  N %" next to the time label shows progress until everything is built. Rows are written
+  in short transactions, because several videos are built at once and a long write
+  transaction would lock the others out.
 - **Use.** While the exact frame of a camera is being decoded, the widget shows the
   nearest stored frame within one step (layer label "proxy" in the debug overlay), and
   the exact frame replaces it when ready. On the real session a jump shows the stored
@@ -352,5 +355,4 @@ view therefore decides what image is needed:
 - **CLI.** `posetrak video proxy build|info|clear` prepares a capture ahead of time,
   reports what is stored, or empties the cache.
 - **Offline.** Scrubbing works from the proxy alone; exact frames need the video.
-- Still open: a management section in the UI, pruning, a progress indicator, and
-  extending the proxy to person sequences.
+- Still open: a management section in the UI, pruning, and extending the proxy to person sequences.

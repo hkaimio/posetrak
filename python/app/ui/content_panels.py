@@ -4457,6 +4457,9 @@ class PersonCropGridWidget(QWidget):
         self._play_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._play_btn.clicked.connect(self._toggle_play)
         overlay_row.addWidget(self._play_btn)
+        self._proxy_label = QLabel("")
+        self._proxy_label.hide()
+        overlay_row.addWidget(self._proxy_label)
         overlay_row.addWidget(self._time_label)
         overlay_row.addWidget(self._edit_btn)
         overlay_row.addWidget(self._chain_btn)
@@ -4744,16 +4747,13 @@ class PersonCropGridWidget(QWidget):
         self.destroyed.connect(lambda *_args, svc=service: svc.shutdown())
 
     _proxy_cache = None
-    _proxy_cancel = None
 
     def _start_proxy_cache(self) -> None:
         """Open the sidecar scrub proxy and, in the background, make sure it
         covers this sequence for every camera. Scrubbing then shows the nearest
         stored frame at once instead of waiting for a seek."""
-        import threading
-
         from posetrak.detection.proxy_cache import (
-            PROXY_STEP, PROXY_WIDTH, ProxyCache, session_db_path, sidecar_path,
+            ProxyBuilder, ProxyCache, session_db_path, sidecar_path,
         )
 
         db = session_db_path(self._conn)
@@ -4763,41 +4763,53 @@ class PersonCropGridWidget(QWidget):
             self._proxy_cache = ProxyCache(sidecar_path(db))
         except Exception:  # noqa: BLE001  (read-only folder etc.: run without a proxy)
             return
-        cancel = self._proxy_cancel = threading.Event()
-        # A sequence can span a whole capture (tens of minutes to decode at 4K),
-        # so build it in chunks, nearest the time on screen first.
-        chunk = 3600
-        jobs = []
+        # A sequence can span a whole capture (tens of minutes to decode at 4K):
+        # each camera's builder works nearest the frame on screen first and
+        # follows the view when it moves (see _proxy_focus).
+        self._proxy_builders = {}
         for cam in self._cameras:
             svid = cam["shot_video_id"]
             first = max(0, self._sync_table.lookup(self._t_start, svid))
             last = max(first, self._sync_table.lookup(self._t_end, svid))
-            here = self._sync_table.lookup(self._current_t, svid)
-            spans = [(a, min(a + chunk - 1, last)) for a in range(first, last + 1, chunk)]
-            spans.sort(key=lambda span: abs((span[0] + span[1]) / 2 - here))
-            jobs.append((svid, cam["file_path"], spans))
-        cache_path = self._proxy_cache.path
+            builder = ProxyBuilder(
+                self._proxy_cache.path, svid, cam["file_path"], first, last,
+                self._sync_table.lookup(self._current_t, svid),
+            )
+            self._proxy_builders[svid] = builder
+            builder.start()
+        self._proxy_timer = QTimer(self)
+        self._proxy_timer.timeout.connect(self._update_proxy_progress)
+        self._proxy_timer.start(1000)
+        self.destroyed.connect(
+            lambda *_a, bs=list(self._proxy_builders.values()): [b.cancel() for b in bs]
+        )
 
-        def build(svid: str, path: str, spans: list) -> None:
-            try:
-                cache = ProxyCache(cache_path)
-                try:
-                    for start, end in spans:
-                        if cancel.is_set():
-                            break
-                        cache.build(
-                            svid, path, start=start, end=end, step=PROXY_STEP,
-                            width=PROXY_WIDTH, cancelled=cancel.is_set,
-                        )
-                finally:
-                    cache.close()
-            except Exception:  # noqa: BLE001
-                import logging
-                logging.getLogger(__name__).warning("proxy build failed: %s", path, exc_info=True)
+    _proxy_builders: "dict | None" = None
+    _proxy_timer: "QTimer | None" = None
+    _proxy_label: "QLabel | None" = None
 
-        for job in jobs:
-            threading.Thread(target=build, args=job, daemon=True, name="proxy-build").start()
-        self.destroyed.connect(lambda *_a, ev=cancel: ev.set())
+    def _proxy_focus(self, svid: str, frame_idx: int) -> None:
+        if self._proxy_builders and svid in self._proxy_builders:
+            self._proxy_builders[svid].set_focus(frame_idx)
+
+    def _update_proxy_progress(self) -> None:
+        """Show how much of the scrub proxy is built; hide it when complete."""
+        builders = self._proxy_builders or {}
+        total = sum(b.total for b in builders.values())
+        done = sum(b.done for b in builders.values())
+        if self._proxy_label is not None:
+            if total and done < total:
+                self._proxy_label.setText(f"Scrub cache {100 * done // total}%")
+                self._proxy_label.setToolTip(
+                    "Low-resolution frames used while dragging the time slider are still "
+                    "being prepared in the background, nearest the current time first. "
+                    "Until then some cameras show a loading image while scrubbing."
+                )
+                self._proxy_label.show()
+            else:
+                self._proxy_label.hide()
+        if total and done >= total and self._proxy_timer is not None:
+            self._proxy_timer.stop()
 
     _service_reload_scheduled = False
     _view_timer: "QTimer | None" = None
@@ -4838,6 +4850,7 @@ class PersonCropGridWidget(QWidget):
         loading/empty placeholder while it is being decoded or unavailable."""
         svid, cam_id = cam["shot_video_id"], cam["camera_instance_id"]
         service = self._frame_service
+        self._proxy_focus(svid, frame_idx)
         result = service.get(svid, frame_idx)
         if result is None and service.request(svid, frame_idx):
             result = service.get(svid, frame_idx)   # decoded between the two calls

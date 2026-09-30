@@ -83,3 +83,50 @@ def test_clear_removes_one_video_or_everything(cache, video):
     assert cache.nearest("a", 8, 0) is None and cache.nearest("b", 8, 0) is not None
     cache.clear()
     assert cache.stats() == []
+
+
+def _wait(predicate, timeout=20.0) -> bool:
+    import time
+    end = time.time() + timeout
+    while time.time() < end:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_builder_starts_with_the_chunk_around_the_focus_and_finishes_everything(tmp_path, video):
+    from posetrak.detection.proxy_cache import ProxyBuilder
+
+    path = tmp_path / "b.cache.db"
+    builder = ProxyBuilder(path, "sv", video, 0, 99, focus=90, width=80, chunk=20)
+    order = []
+    original = builder._nearest_pending
+
+    def spy():
+        chunk = original()
+        if chunk is not None and (not order or order[-1] != chunk):
+            order.append(chunk)
+        return chunk
+
+    builder._nearest_pending = spy
+    assert builder.total == 5
+    builder.start()
+    assert _wait(lambda: builder.done == 5)
+    assert order[0] == (80, 99)
+    assert order[1] == (60, 79)
+    reader = ProxyCache(path)
+    assert reader.nearest("sv", 8, 0) is not None and reader.nearest("sv", 96, 0) is not None
+    reader.close()
+
+
+def test_builder_follows_the_focus_to_the_nearest_unfinished_chunk(tmp_path, video):
+    from posetrak.detection.proxy_cache import ProxyBuilder
+
+    builder = ProxyBuilder(tmp_path / "c.cache.db", "sv", video, 0, 99, focus=0, chunk=20)
+    assert builder._nearest_pending() == (0, 19)
+    builder.set_focus(70)
+    assert builder._nearest_pending() == (60, 79)
+    builder._pending.remove((60, 79))
+    assert builder._nearest_pending() in ((40, 59), (80, 99))   # equidistant from 70 either way
+    builder.cancel()

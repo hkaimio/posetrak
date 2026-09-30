@@ -239,3 +239,114 @@ class ProxyCache:
             except Exception:  # noqa: BLE001
                 _log.debug("proxy build: close failed", exc_info=True)
         return written
+
+
+CHUNK_FRAMES = 1200          # granularity of the build order (10 s at 120 fps)
+_FOCUS_SETTLE_S = 0.5        # the focus must stay put this long to interrupt a chunk
+
+
+class ProxyBuilder:
+    """Builds the proxy of one video over [first, last] on a background thread.
+
+    The range is cut into chunks and the chunk nearest the *focus* frame (the
+    frame being looked at) is built next, so the part in use is ready first and
+    a jump elsewhere is followed. A chunk in progress is interrupted when the
+    focus has settled in another unfinished chunk; the frames it already wrote
+    are kept and not decoded again when it is resumed.
+    """
+
+    def __init__(
+        self,
+        cache_path: str | Path,
+        shot_video_id: str,
+        video_path: str,
+        first: int,
+        last: int,
+        focus: int,
+        *,
+        step: int = PROXY_STEP,
+        width: int = PROXY_WIDTH,
+        chunk: int = CHUNK_FRAMES,
+    ) -> None:
+        import threading
+
+        self._cache_path = Path(cache_path)
+        self._svid, self._video_path = shot_video_id, video_path
+        self._step, self._width = step, width
+        self._pending = [(a, min(a + chunk - 1, last)) for a in range(first, last + 1, chunk)]
+        self.total = len(self._pending)
+        self._lock = threading.Lock()
+        self._focus = focus
+        self._focus_since = 0.0
+        self._current: tuple[int, int] | None = None
+        self._stop = False
+        self._thread = threading.Thread(target=self._run, daemon=True, name="proxy-build")
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def cancel(self) -> None:
+        self._stop = True
+
+    @property
+    def done(self) -> int:
+        with self._lock:
+            return self.total - len(self._pending)
+
+    def set_focus(self, frame: int) -> None:
+        """Tell the builder which frame is being looked at (cheap; any thread)."""
+        import time
+
+        with self._lock:
+            if frame != self._focus:
+                self._focus = frame
+                self._focus_since = time.monotonic()
+
+    def _nearest_pending(self) -> tuple[int, int] | None:
+        """Called with the lock held."""
+        if not self._pending:
+            return None
+
+        def distance(c: tuple[int, int]) -> int:
+            if c[0] <= self._focus <= c[1]:
+                return 0
+            return min(abs(self._focus - c[0]), abs(self._focus - c[1]))
+
+        return min(self._pending, key=distance)
+
+    def _interrupted(self) -> bool:
+        import time
+
+        if self._stop:
+            return True
+        with self._lock:
+            if time.monotonic() - self._focus_since < _FOCUS_SETTLE_S:
+                return False
+            best = self._nearest_pending()
+            return best is not None and best != self._current
+
+    def _run(self) -> None:
+        try:
+            cache = ProxyCache(self._cache_path)
+        except Exception:  # noqa: BLE001
+            _log.warning("proxy builder: cannot open %s", self._cache_path, exc_info=True)
+            return
+        try:
+            while not self._stop:
+                with self._lock:
+                    chunk = self._current = self._nearest_pending()
+                if chunk is None:
+                    return
+                try:
+                    cache.build(
+                        self._svid, self._video_path, start=chunk[0], end=chunk[1],
+                        step=self._step, width=self._width, cancelled=self._interrupted,
+                    )
+                except Exception:  # noqa: BLE001
+                    _log.warning("proxy build failed: %s", self._video_path, exc_info=True)
+                    return
+                if cache.is_covered(self._svid, chunk[0], chunk[1], self._step, self._width):
+                    with self._lock:
+                        self._pending.remove(chunk)
+        finally:
+            cache.close()

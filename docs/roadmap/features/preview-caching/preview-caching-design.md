@@ -291,3 +291,15 @@ part of this work, because stepping is what read-ahead exists for:
    stay separate?
 5. The 9,973 existing `ghost_crop` rows: leave them, or drop them when the
    proxy exists?
+
+## 8. Measured behaviour of the PyAV frame service (widget level)
+
+Five 4K 120 fps cameras, offscreen `PersonCropGridWidget`, segmentation overlay on:
+
+- Decoder alone: random jump 0.24-0.84 s per camera; forward step about 1.5 ms once
+  read-ahead has run; backward step within a decoded keyframe interval about 1.6 ms.
+- Whole widget: jump to a new time, all cameras shown, 1.2-1.9 s; one frame step
+  about 140-190 ms, almost all of it main-thread redraw (five 1080p frames, of which the
+  segmentation blend is about 20 ms per camera). Decoding is no longer the limit for
+  stepping; playback speed is bounded by redraw cost, so the overlay is the first thing to
+  make cheaper if smoother playback is needed.

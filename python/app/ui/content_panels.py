@@ -4004,6 +4004,13 @@ class PersonCropGridWidget(QWidget):
     # treated as "on" when None so a test fixture without it still exercises
     # the default, common-case behavior.
     _auto_redetect_chk: "QCheckBox | None" = None
+    # Persistent PyAV decoders (app/pose/frame_service.py) that serve frames of
+    # a sequence with no person tracks -- a prop. None for person sequences.
+    _frame_service: "FrameService | None" = None
+    # Playback timer and the wall-clock time of its previous tick.
+    _play_timer: "QTimer | None" = None
+    _play_last: float = 0.0
+    _play_btn: "QPushButton | None" = None
 
     # Number-key shortcuts for limb groups (see _handle_key): plain key
     # toggles show/hide of the limb's keypoints (same rule as the timeline's
@@ -4385,6 +4392,23 @@ class PersonCropGridWidget(QWidget):
         overlay_row.addWidget(self._show_seg)
         overlay_row.addWidget(self._show_debug)
         overlay_row.addStretch()
+        for text, frames, tip in (
+            ("\u22ee\u25c0", -10, "Back 10 frames (Shift+Left)"),
+            ("\u25c0", -1, "Previous frame (Left arrow or A)"),
+            ("\u25b6", 1, "Next frame (Right arrow or D)"),
+            ("\u25b6\u22ee", 10, "Forward 10 frames (Shift+Right)"),
+        ):
+            step_btn = QPushButton(text)
+            step_btn.setToolTip(tip)
+            step_btn.setFixedWidth(34)
+            step_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            step_btn.clicked.connect(lambda _checked=False, n=frames: self._step_frames(n))
+            overlay_row.addWidget(step_btn)
+        self._play_btn = QPushButton("\u25b6 Play")
+        self._play_btn.setToolTip("Play at real-time speed (Space)")
+        self._play_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._play_btn.clicked.connect(self._toggle_play)
+        overlay_row.addWidget(self._play_btn)
         overlay_row.addWidget(self._time_label)
         overlay_row.addWidget(self._edit_btn)
         overlay_row.addWidget(self._chain_btn)
@@ -4495,6 +4519,7 @@ class PersonCropGridWidget(QWidget):
         # wide-crop cluster cache stays edit-mode-only (started/released in
         # _set_edit_mode), per its own cost/scope rationale.
         self._start_backfill()
+        self._start_frame_service()
 
         self._current_t = self._t_start
         self._load_frame(self._t_start)
@@ -4642,6 +4667,80 @@ class PersonCropGridWidget(QWidget):
         if self._timeline is not None:
             self._timeline.set_edit_mode(enabled)
             self._sync_timeline(self._current_t)
+
+    def _is_object_sequence(self) -> bool:
+        """True if this sequence tracks a prop: its detection run belongs to a
+        capture object, so it has no person tracks or detection boxes."""
+        row = self._conn.execute(
+            "SELECT dr.capture_object_id FROM pose_observation_sequences pos "
+            "JOIN detection_runs dr ON dr.id = pos.detection_run_id WHERE pos.id = ?",
+            (self._sequence_id,),
+        ).fetchone()
+        return row is not None and row["capture_object_id"] is not None
+
+    def _start_frame_service(self) -> None:
+        """Serve a prop's frames from persistent decoders (see frame_service.py)
+        instead of the person-crop cache, which has nothing to key them by."""
+        if self._frame_service is not None or not self._is_object_sequence():
+            return
+        from app.pose.frame_service import FrameService
+
+        service = FrameService(self._cameras)
+        service.frame_ready.connect(self._on_service_frame_ready)
+        service.frame_missing.connect(self._on_service_frame_ready)
+        service.unavailable.connect(lambda _svid: self._load_frame(self._current_t))
+        self._frame_service = service
+        # Bound to the service itself, not to this widget, so it still runs
+        # after the widget is gone.
+        self.destroyed.connect(lambda *_args, svc=service: svc.shutdown())
+
+    _service_reload_scheduled = False
+
+    def _on_service_frame_ready(self, svid: str, frame_idx: int) -> None:
+        """A decoder finished a frame. Redraw once for all cameras that finish
+        together (their signals arrive within a few milliseconds of each
+        other), instead of redrawing every camera for every signal."""
+        if not self._sync_table or self._service_reload_scheduled:
+            return
+        if self._sync_table.lookup(self._current_t, svid) != frame_idx:
+            return   # a prefetched or superseded frame, not the one on screen
+        self._service_reload_scheduled = True
+        QTimer.singleShot(15, self._reload_after_service)
+
+    def _reload_after_service(self) -> None:
+        self._service_reload_scheduled = False
+        self._load_frame(self._current_t)
+
+    def _show_service_frame(
+        self, cell, cam: dict, frame_idx: int, tracking_step, show_detected: bool,
+        show_tracked: bool, show_seg: bool, show_debug: bool,
+    ) -> None:
+        """Show *frame_idx* of camera *cam* from the frame service, or a
+        loading/empty placeholder while it is being decoded or unavailable."""
+        svid, cam_id = cam["shot_video_id"], cam["camera_instance_id"]
+        service = self._frame_service
+        result = service.get(svid, frame_idx)
+        if result is None and service.request(svid, frame_idx):
+            result = service.get(svid, frame_idx)   # decoded between the two calls
+        if result is None:
+            if service.is_unavailable(svid) or service.is_missing(svid, frame_idx):
+                cell.show_empty()   # no video, or the video ends before this time
+            else:
+                cell.show_loading()
+            self._apply_overlay(
+                cell, cam_id, svid, frame_idx, tracking_step, show_detected, show_tracked,
+            )
+            return
+        service.request(svid, frame_idx)   # keeps read-ahead and direction current
+        own_rect = (0.0, 0.0, float(result[5]), float(result[6]))
+        desired = self._compute_target_rect(
+            cell, cam_id, svid, frame_idx, tracking_step, own_rect,
+        )
+        self._display_crop_result(
+            cell, cam_id, svid, frame_idx, tracking_step, show_detected, show_tracked,
+            result, target_rect=desired, layer_label="frame-service", show_debug=show_debug,
+            show_seg=show_seg,
+        )
 
     def _start_backfill(self) -> None:
         """Start the background crop-generation worker if there is a detection run."""
@@ -5174,6 +5273,19 @@ class PersonCropGridWidget(QWidget):
                 self._slider.setValue(self._slider.value() + self._slider.singleStep())
             return True
 
+        # Stepping and playback work in view mode too. In edit mode the arrows
+        # nudge a selected keypoint and Space skips a chain step, so those keys
+        # only step or play when they have nothing else to do.
+        if self._slider is not None and (
+            not self._edit_mode or not self._sel_kp_indices or self._sel_cam_idx is None
+        ):
+            if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+                self._step_frames((10 if shift else 1) * (1 if key == Qt.Key.Key_Right else -1))
+                return True
+            if key == Qt.Key.Key_Space and self._chain_limb is None:
+                self._toggle_play()
+                return True
+
         if not self._edit_mode:
             return False
 
@@ -5652,6 +5764,68 @@ class PersonCropGridWidget(QWidget):
         self.status_message.emit(
             f"Interpolated missing values for {n} keypoint{'s' if n != 1 else ''} over range"
         )
+
+    def _step_frames(self, n: int) -> None:
+        """Move *n* video frames (negative = back), exactly, in the first
+        camera's frame numbering; the other cameras follow by time. The slider
+        counts milliseconds, so stepping by a fixed number of them would repeat
+        a frame every few dozen steps at 120 fps."""
+        if self._slider is None:
+            return
+        self._range_start_v = None
+        self._range_end_v = None
+        value = self._slider.value()
+        if self._sync_table and self._cameras:
+            svid = self._cameras[0]["shot_video_id"]
+            current = self._sync_table.lookup(self._current_t, svid)
+            when = (
+                self._sync_table.frame_to_global_time(current + n, svid)
+                if current is not None else None
+            )
+            if when is not None:
+                value = int(round((when - self._t_start) * 1000))
+            else:
+                value += n * self._slider.singleStep()
+        else:
+            value += n * self._slider.singleStep()
+        self._slider.setValue(max(0, min(value, self._slider.maximum())))
+
+    def _toggle_play(self) -> None:
+        """Play at real-time speed, dropping frames as needed (each tick moves
+        by the wall-clock time since the last one)."""
+        import time
+
+        if self._play_timer is not None and self._play_timer.isActive():
+            self._play_timer.stop()
+            if self._play_btn is not None:
+                self._play_btn.setText("\u25b6 Play")
+            return
+        if self._slider is None:
+            return
+        if self._play_timer is None:
+            self._play_timer = QTimer(self)
+            self._play_timer.setInterval(33)
+            self._play_timer.timeout.connect(self._play_tick)
+        self._play_last = time.monotonic()
+        self._play_timer.start()
+        if self._play_btn is not None:
+            self._play_btn.setText("\u23f8 Pause")
+
+    def _play_tick(self) -> None:
+        import time
+
+        now = time.monotonic()
+        advance = int((now - self._play_last) * 1000)
+        if advance <= 0:
+            return
+        self._play_last = now
+        end = self._slider.maximum()
+        value = self._slider.value() + advance
+        if value >= end:
+            self._slider.setValue(end)
+            self._toggle_play()
+            return
+        self._slider.setValue(value)
 
     def _on_slider(self, value: int) -> None:
         self._current_t = self._t_start + value / 1000.0
@@ -6227,19 +6401,9 @@ class PersonCropGridWidget(QWidget):
         sqr_id = self._seg_sources.get(svid)
         if not sqr_id:
             return crop_bgr
-        mask_row = self._conn.execute(
-            "SELECT mask_blob FROM seg_masks "
-            "WHERE seg_quality_run_id=? AND shot_video_id=? AND frame_idx=?",
-            (sqr_id, svid, frame_idx),
-        ).fetchone()
-        if not mask_row:
-            return crop_bgr
-        mask_buf = np.frombuffer(bytes(mask_row["mask_blob"]), dtype=np.uint8)
-        full_mask = cv2.imdecode(mask_buf, cv2.IMREAD_UNCHANGED)
+        full_mask = self._decoded_seg_mask(sqr_id, svid, frame_idx)
         if full_mask is None:
             return crop_bgr
-        if full_mask.ndim == 3:
-            full_mask = full_mask[:, :, 0]
         # Masks may be stored at a lower resolution than the video (e.g. FHD
         # masks on 4K cameras), so scale src coordinates.
         m_h, m_w = full_mask.shape[:2]
@@ -6259,26 +6423,65 @@ class PersonCropGridWidget(QWidget):
         mask_crop = cv2.resize(
             mask_crop, (crop_bgr.shape[1], crop_bgr.shape[0]), interpolation=cv2.INTER_NEAREST,
         )
+        counts = np.bincount(mask_crop.ravel(), minlength=256)
         labels = [track_id] if track_id is not None else [
-            int(v) for v in np.unique(mask_crop) if v != 0
+            int(v) + 1 for v in np.nonzero(counts[1:])[0]
         ]
-        overlay = crop_bgr.astype(np.float32)
-        any_fg = False
+        # One blended copy per label, then copy just the label's pixels in --
+        # much cheaper than per-channel indexing, which matters now that a
+        # prop's frame is a full 1080p image rather than a 240 px crop.
+        out = None
         painted: list[int] = []
         for label in labels:
-            fg = mask_crop == label
-            if not fg.any():
+            if label < 0 or label >= len(counts) or counts[label] == 0:
                 continue
-            any_fg = True
-            color_bgr = _seg_label_color_bgr(label)
+            tint = np.empty_like(crop_bgr)
+            tint[:] = _seg_label_color_bgr(label)
+            blended = cv2.addWeighted(crop_bgr, 0.55, tint, 0.45, 0)
+            if out is None:
+                out = crop_bgr.copy()
+            np.copyto(out, blended, where=(mask_crop == label)[:, :, None])
             painted.append(label)
-            for c, cv_ in enumerate(color_bgr):
-                overlay[:, :, c][fg] = overlay[:, :, c][fg] * 0.55 + cv_ * 0.45
-        if not any_fg:
+        if out is None:
             return crop_bgr
-        out = overlay.astype(np.uint8)
         self._draw_seg_legend(out, sqr_id, painted)
         return out
+
+    _SEG_MASK_CACHE_SIZE = 32
+    _seg_mask_cache: "collections.OrderedDict | None" = None
+
+    def _decoded_seg_mask(self, seg_run_id: str, svid: str, frame_idx: int):
+        """The decoded label mask of one (segmentation, camera, frame), or
+        None if there is none. Recently used masks are kept: a frame is
+        redrawn several times (each camera's decode finishing, overlay
+        toggles), and decoding a 1080p PNG each time is wasted work."""
+        import collections
+
+        import cv2
+        import numpy as np
+
+        if self._seg_mask_cache is None:
+            self._seg_mask_cache = collections.OrderedDict()
+        key = (seg_run_id, svid, frame_idx)
+        if key in self._seg_mask_cache:
+            self._seg_mask_cache.move_to_end(key)
+            return self._seg_mask_cache[key]
+        row = self._conn.execute(
+            "SELECT mask_blob FROM seg_masks "
+            "WHERE seg_quality_run_id=? AND shot_video_id=? AND frame_idx=?",
+            key,
+        ).fetchone()
+        mask = None
+        if row:
+            mask = cv2.imdecode(
+                np.frombuffer(bytes(row["mask_blob"]), dtype=np.uint8), cv2.IMREAD_UNCHANGED
+            )
+            if mask is not None and mask.ndim == 3:
+                mask = mask[:, :, 0]
+        self._seg_mask_cache[key] = mask
+        while len(self._seg_mask_cache) > self._SEG_MASK_CACHE_SIZE:
+            self._seg_mask_cache.popitem(last=False)
+        return mask
 
     def _draw_seg_legend(self, img, seg_run_id: str, labels: list[int]) -> None:
         """Draw a colour swatch and the subject's name for each painted label
@@ -6385,6 +6588,13 @@ class PersonCropGridWidget(QWidget):
             frame_idx = self._sync_table.lookup(global_time, svid)
             if frame_idx is None:
                 cell.show_empty()
+                continue
+
+            if self._frame_service is not None:
+                self._show_service_frame(
+                    cell, cam, frame_idx, tracking_step, show_detected, show_tracked,
+                    show_seg, show_debug,
+                )
                 continue
 
             # Preferred layer: wide-crop cluster cache -- generous, higher-quality

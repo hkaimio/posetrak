@@ -2729,6 +2729,9 @@ class _ImageCanvas(QWidget):
         # Zoom/pan: desired view, full-frame pixel coords; None = fit whatever
         # crop is given (today's default). See _compute_view_transform.
         self._zoom_rect: tuple[float, float, float, float] | None = None
+        # Called (no arguments) whenever zoom or pan changes the view, so the
+        # owner can fetch image data that matches the new view.
+        self.on_view_changed = None
         self._pan_active: bool = False
         self._pan_start_disp: tuple[float, float] | None = None
         self._pan_start_rect: tuple[float, float, float, float] | None = None
@@ -2882,6 +2885,11 @@ class _ImageCanvas(QWidget):
         if self._zoom_rect is not None:
             self._zoom_rect = None
             self.update()
+            self._view_changed()
+
+    def _view_changed(self) -> None:
+        if self.on_view_changed is not None:
+            self.on_view_changed()
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
         self.reset_zoom()
@@ -2977,6 +2985,7 @@ class _ImageCanvas(QWidget):
                     # rect moves opposite to the drag direction.
                     self._zoom_rect = _panned_rect(self._pan_start_rect, -fdx, -fdy)
                     self.update()
+                    self._view_changed()
             return
 
         if self._drag_kp is not None and (event.buttons() & Qt.MouseButton.LeftButton):
@@ -3095,6 +3104,7 @@ class _ImageCanvas(QWidget):
         else:
             self._zoom_rect = new_rect
         self.update()
+        self._view_changed()
 
     def _apply_pan_delta(self, disp_dx: float, disp_dy: float) -> None:
         extent = self._pixmap_extent()
@@ -3108,6 +3118,7 @@ class _ImageCanvas(QWidget):
             return
         self._zoom_rect = _panned_rect(self._zoom_rect, -disp_dx / scale, -disp_dy / scale)
         self.update()
+        self._view_changed()
 
     @staticmethod
     def _draw_label(painter: QPainter, pt: QPointF, text: str, color: QColor) -> None:
@@ -4275,6 +4286,7 @@ class PersonCropGridWidget(QWidget):
         for i, cam in enumerate(self._cameras):
             row, col = divmod(i, ncols)
             cell = _CropCell(cam["label"])
+            cell._canvas.on_view_changed = self._on_view_changed
             self._cells.append(cell)
             self._grid.addWidget(cell, row, col)
             self._grid.setColumnStretch(col, 1)
@@ -4695,6 +4707,20 @@ class PersonCropGridWidget(QWidget):
         self.destroyed.connect(lambda *_args, svc=service: svc.shutdown())
 
     _service_reload_scheduled = False
+    _view_timer: "QTimer | None" = None
+    _VIEW_SETTLE_MS = 150
+
+    def _on_view_changed(self) -> None:
+        """Zoom or pan changed. The image already shown keeps being used while
+        the view is moving; once it has settled, redraw so that a crop at the
+        resolution the new view needs is requested from the frame service."""
+        if self._frame_service is None:
+            return
+        if self._view_timer is None:
+            self._view_timer = QTimer(self)
+            self._view_timer.setSingleShot(True)
+            self._view_timer.timeout.connect(lambda: self._load_frame(self._current_t))
+        self._view_timer.start(self._VIEW_SETTLE_MS)
 
     def _on_service_frame_ready(self, svid: str, frame_idx: int) -> None:
         """A decoder finished a frame. Redraw once for all cameras that finish
@@ -4732,15 +4758,55 @@ class PersonCropGridWidget(QWidget):
             )
             return
         service.request(svid, frame_idx)   # keeps read-ahead and direction current
-        own_rect = (0.0, 0.0, float(result[5]), float(result[6]))
+        frame_w, frame_h = float(result[5]), float(result[6])
+        own_rect = (0.0, 0.0, frame_w, frame_h)
         desired = self._compute_target_rect(
             cell, cam_id, svid, frame_idx, tracking_step, own_rect,
         )
+        canvas = cell._canvas
+        zoom = canvas._zoom_rect
+        view = zoom if zoom is not None else desired
+        view_w = max(1.0, view[2] - view[0])
+        # Canvas pixels per frame pixel the view needs, against what the
+        # whole-frame image (limited in size) can give.
+        need = canvas.width() / view_w
+        chosen, target = result, (own_rect if zoom is not None else desired)
+        if need > 1.1 * result[1] / frame_w:
+            crop = service.get_region(svid, frame_idx)
+            wanted = min(1.0, need)
+            if crop is not None and self._region_serves(crop, view, frame_w, frame_h, wanted):
+                chosen = crop
+                target = (
+                    float(crop[3]), float(crop[4]),
+                    float(crop[3] + crop[5]), float(crop[4] + crop[6]),
+                )
+            elif self._view_timer is None or not self._view_timer.isActive():
+                # Zoomed in further than the whole-frame image resolves (or the
+                # current crop does not cover the view): ask for a crop of the
+                # view plus a margin, so small pans stay inside it. The
+                # whole-frame image is shown until it arrives.
+                grow_x, grow_y = 0.25 * view_w, 0.25 * (view[3] - view[1])
+                service.request_region(
+                    svid, frame_idx,
+                    (view[0] - grow_x, view[1] - grow_y, view[2] + grow_x, view[3] + grow_y),
+                    wanted,
+                )
         self._display_crop_result(
             cell, cam_id, svid, frame_idx, tracking_step, show_detected, show_tracked,
-            result, target_rect=desired, layer_label="frame-service", show_debug=show_debug,
+            chosen, target_rect=target, layer_label="frame-service", show_debug=show_debug,
             show_seg=show_seg,
         )
+
+    @staticmethod
+    def _region_serves(crop: tuple, view: tuple, frame_w: float, frame_h: float, wanted: float) -> bool:
+        """True if the region *crop* covers the part of *view* that lies inside
+        the frame, at about the resolution *wanted* (pixels per frame pixel)."""
+        cx0, cy0, cw, ch = crop[3], crop[4], crop[5], crop[6]
+        covers = (
+            cx0 <= max(0.0, view[0]) + 0.5 and cy0 <= max(0.0, view[1]) + 0.5
+            and cx0 + cw >= min(frame_w, view[2]) - 0.5 and cy0 + ch >= min(frame_h, view[3]) - 0.5
+        )
+        return covers and crop[1] / cw >= 0.9 * wanted
 
     def _start_backfill(self) -> None:
         """Start the background crop-generation worker if there is a detection run."""
@@ -6340,12 +6406,20 @@ class PersonCropGridWidget(QWidget):
         # overlay mapping stays exact.
         reduce_flag = cv2.IMREAD_COLOR
         cell_w = max(1, int(cell.width()))
+        zoom = getattr(getattr(cell, "_canvas", None), "_zoom_rect", None)
+        if isinstance(zoom, tuple):
+            view_w = zoom[2] - zoom[0]
+        elif target_rect is not None:
+            view_w = target_rect[2] - target_rect[0]
+        else:
+            view_w = float(src_w)
+        needed_px = cell_w * float(src_w) / max(1.0, view_w)   # width this image must keep
         for div, flag in (
             (8, cv2.IMREAD_REDUCED_COLOR_8),
             (4, cv2.IMREAD_REDUCED_COLOR_4),
             (2, cv2.IMREAD_REDUCED_COLOR_2),
         ):
-            if wpx // div >= cell_w:
+            if wpx / div >= needed_px:
                 reduce_flag = flag
                 break
         crop_bgr = cv2.imdecode(buf, reduce_flag)

@@ -251,3 +251,33 @@ def test_service_serves_and_reports_per_camera(video, tmp_path):
         assert not service.is_missing("a", 33)
     finally:
         service.shutdown()
+
+
+def test_a_region_crop_is_the_requested_rectangle_at_native_resolution(decoder):
+    request_and_wait(decoder, 45)
+    decoder.rec.ready.clear()
+    decoder.request_region(45, (16, 0, 48, 16), 1.0)   # blocks 1 and 2 of the index strip
+    assert wait_until(lambda: decoder.get_region(45) is not None)
+    jpeg, wpx, hpx, sx, sy, sw, sh = decoder.get_region(45)
+    assert (sx, sy, sw, sh) == (16, 0, 32, 16) and (wpx, hpx) == (32, 16)
+    assert decoder.rec.has(45)   # the owner is told a new image is available
+
+
+def test_a_region_can_be_scaled_down_and_needs_no_earlier_decode(decoder):
+    request_and_wait(decoder, 100)
+    request_and_wait(decoder, 3)   # the held full frame is now frame 3, not 100
+    decoder.request(100)
+    decoder.request_region(100, (0, 0, W, H), 0.5)
+    assert wait_until(lambda: decoder.get_region(100) is not None)
+    _jpeg, wpx, hpx, *_ = decoder.get_region(100)
+    assert (wpx, hpx) == (W // 2, H // 2)
+
+
+def test_a_region_belongs_to_its_frame_only(decoder):
+    request_and_wait(decoder, 20)
+    decoder.request_region(20, (0, 0, 32, 32), 1.0)
+    assert wait_until(lambda: decoder.get_region(20) is not None)
+    assert decoder.get_region(21) is None
+    decoder.request_region(99, (0, 0, 32, 32), 1.0)   # not the target: ignored
+    time.sleep(0.2)
+    assert decoder.get_region(99) is None

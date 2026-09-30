@@ -306,3 +306,24 @@ Five 4K 120 fps cameras, offscreen `PersonCropGridWidget`, segmentation overlay 
   about 16 ms. What remains per new frame is decoding its segmentation mask PNG on the
   main thread (about 5-9 ms per camera); moving mask decoding next to the frame decoder
   is the next lever if playback needs to be smoother.
+
+## 9. Zoom and pan
+
+The whole-frame image is limited to `DISPLAY_LONG_EDGE` (1920 px), and the JPEG may
+be decoded at a reduced size, so a zoomed-in view would be upscaled and blurry. The
+view therefore decides what image is needed:
+
+- The resolution the view needs is canvas pixels divided by the width of the view
+  in frame pixels (the zoom rectangle, or the default display rectangle). The
+  whole-frame image is used while it gives at least about that much, and the JPEG is
+  decoded at a reduced size only down to that width.
+- Beyond that, once zoom or pan has not changed for 150 ms, the decoder is asked
+  for a crop of the view plus a 25 % margin on each side, at up to native
+  resolution (`FrameDecoder.request_region`). While it is being made the previous
+  image stays on screen. The crop is for the frame on screen only, so a new frame
+  discards it.
+- A crop is used only if it covers the view (inside the frame) at the needed
+  resolution; zooming out past it, or panning off it, brings the whole-frame image
+  back at once and requests a new crop after the view settles.
+- While zoomed, the whole-frame image is displayed uncropped, so the view can be
+  moved anywhere in the frame without waiting for anything.

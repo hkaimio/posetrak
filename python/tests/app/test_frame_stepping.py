@@ -174,12 +174,20 @@ def _service_widget(service):
     return w
 
 
+def _cell(canvas_width: int = 400, zoom=None):
+    cell = MagicMock()
+    cell._canvas.width.return_value = canvas_width
+    cell._canvas._zoom_rect = zoom
+    return cell
+
+
 def test_a_cached_frame_is_displayed_and_keeps_read_ahead_going(qapp):
     result = (b"jpeg", 960, 540, 0, 0, 3840, 2160)
     service = MagicMock()
     service.get.return_value = result
+    service.get_region.return_value = None
     w = _service_widget(service)
-    cell = MagicMock()
+    cell = _cell()
 
     w._show_service_frame(cell, CAM, 42, 7, True, True, False, False)
 
@@ -262,3 +270,73 @@ def test_a_frame_past_the_end_of_a_short_video_shows_empty_not_loading(qapp):
 
     cell.show_empty.assert_called_once()
     cell.show_loading.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Zoom: sharper image for the view, and no stale crop
+# ---------------------------------------------------------------------------
+
+WHOLE = (b"jpeg", 1920, 1080, 0, 0, 3840, 2160)   # a 4K frame held at half size
+
+
+def _zoom_widget(crop=None):
+    service = MagicMock()
+    service.get.return_value = WHOLE
+    service.get_region.return_value = crop
+    w = _service_widget(service)
+    w._compute_target_rect.return_value = (0.0, 0.0, 3840.0, 2160.0)
+    return w, service
+
+
+def test_zoomed_view_needing_more_than_the_whole_frame_gives_asks_for_a_crop(qapp):
+    w, service = _zoom_widget()
+    cell = _cell(canvas_width=800, zoom=(1000.0, 500.0, 1800.0, 950.0))   # 1 px per frame px
+
+    w._show_service_frame(cell, CAM, 42, None, True, True, False, False)
+
+    rect = service.request_region.call_args.args[2]
+    assert rect[0] < 1000 and rect[2] > 1800            # the view plus a margin
+    assert service.request_region.call_args.args[3] == 1.0
+    args = w._display_crop_result.call_args
+    assert args.args[7] is WHOLE                       # meanwhile the old image stays
+    assert args.kwargs["target_rect"] == (0.0, 0.0, 3840.0, 2160.0)   # whole frame, so zooming out is never clipped
+
+
+def test_a_crop_covering_the_view_is_shown_instead(qapp):
+    crop = (b"crop", 1200, 675, 800, 400, 1200, 675)
+    w, service = _zoom_widget(crop)
+    cell = _cell(canvas_width=800, zoom=(1000.0, 500.0, 1800.0, 950.0))
+
+    w._show_service_frame(cell, CAM, 42, None, True, True, False, False)
+
+    service.request_region.assert_not_called()
+    args = w._display_crop_result.call_args
+    assert args.args[7] is crop
+    assert args.kwargs["target_rect"] == (800.0, 400.0, 2000.0, 1075.0)
+
+
+def test_a_crop_that_no_longer_covers_the_view_is_replaced_after_zooming_out(qapp):
+    crop = (b"crop", 1200, 675, 800, 400, 1200, 675)
+    w, service = _zoom_widget(crop)
+    cell = _cell(canvas_width=800, zoom=(200.0, 100.0, 2600.0, 1450.0))   # zoomed out past the crop
+
+    w._show_service_frame(cell, CAM, 42, None, True, True, False, False)
+
+    assert w._display_crop_result.call_args.args[7] is not crop
+    # 800 px for 2400 frame px is 0.33 px/px, which the half-size whole frame (0.5) already gives:
+    service.request_region.assert_not_called()
+
+
+def test_an_unzoomed_view_never_asks_for_a_crop(qapp):
+    w, service = _zoom_widget()
+    w._show_service_frame(_cell(canvas_width=800), CAM, 42, None, True, True, False, False)
+    service.request_region.assert_not_called()
+
+
+def test_no_crop_is_requested_while_the_view_is_still_moving(qapp):
+    w, service = _zoom_widget()
+    w._on_view_changed()   # starts the settle timer
+    cell = _cell(canvas_width=800, zoom=(1000.0, 500.0, 1800.0, 950.0))
+    w._show_service_frame(cell, CAM, 42, None, True, True, False, False)
+    service.request_region.assert_not_called()
+    w._view_timer.stop()

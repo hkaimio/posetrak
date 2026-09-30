@@ -22,6 +22,13 @@ JPEGs of recent frames in a byte-budgeted cache:
 - Prefetch starts only after the requests have settled, and is abandoned the
   moment a new request arrives.
 
+A whole-frame result is limited to DISPLAY_LONG_EDGE, which is not enough when
+the user zooms in. :meth:`FrameDecoder.request_region` therefore also produces,
+for the frame on screen, a crop of a requested rectangle at up to the video's
+native resolution (the full frame is kept from the exact decode, or decoded
+again). It is an extra result for that one frame; the whole-frame entry stays
+so the old image can be shown until the crop arrives.
+
 Results use the same tuple as the person-crop layers, ``(jpeg, width_px,
 height_px, src_x, src_y, src_w, src_h)``, with the source rectangle covering
 the whole decoded frame, so the existing display and overlay code can show
@@ -92,6 +99,8 @@ class FrameDecoder:
         self._cache: collections.OrderedDict[int, Result] = collections.OrderedDict()
         self._cache_bytes = 0
         self._missing: set[int] = set()   # requested frames the video does not have
+        self._region_req: tuple | None = None   # (frame_idx, rect, scale) not yet produced
+        self._region: tuple[int, Result] | None = None   # (frame_idx, crop) last produced
         self.failed = False
 
         # Decoder state, touched only by the worker thread.
@@ -102,6 +111,7 @@ class FrameDecoder:
         self._fps = 0.0
         self._tb = 0.0
         self._rotation = 0
+        self._held: tuple[int, object] | None = None   # (frame_idx, full-resolution av frame)
 
         self._thread = threading.Thread(
             target=self._run, name=f"frame-decoder-{self._file_path[-24:]}", daemon=True
@@ -128,6 +138,7 @@ class FrameDecoder:
                     self._direction = (1 if diff > 0 else -1) if abs(diff) <= _STEP_THRESHOLD else 0
             self._last_target = frame_idx
             self._target = frame_idx
+            self._region_req = None
             self._owes_ready = frame_idx not in self._cache
             self._serial += 1
             self._cond.notify_all()
@@ -137,6 +148,26 @@ class FrameDecoder:
         """The cached result for *frame_idx*, or None if it is not decoded yet."""
         with self._cond:
             return self._cache.get(frame_idx)
+
+    def request_region(self, frame_idx: int, rect: tuple, scale: float) -> None:
+        """Ask for a crop of *rect* (x0, y0, x1, y1 in frame pixels) of the
+        current target frame, at *scale* output pixels per frame pixel (at most
+        1). Ignored if *frame_idx* is no longer the target. The result is
+        available from :meth:`get_region` and announced through on_ready."""
+        with self._cond:
+            if frame_idx != self._target:
+                return
+            self._region_req = (frame_idx, tuple(rect), min(1.0, float(scale)))
+            self._serial += 1
+            self._cond.notify_all()
+
+    def get_region(self, frame_idx: int) -> Result | None:
+        """The last produced crop if it is for *frame_idx*. Its source rectangle
+        (the last four tuple items) says which part of the frame it covers."""
+        with self._cond:
+            if self._region is not None and self._region[0] == frame_idx:
+                return self._region[1]
+            return None
 
     def is_missing(self, frame_idx: int) -> bool:
         """True if *frame_idx* was requested and the video has no such frame
@@ -180,6 +211,7 @@ class FrameDecoder:
                         return
                     target, direction, handled = self._target, self._direction, self._serial
                     owes_ready = self._owes_ready
+                    self._owes_ready = False
                 assert target is not None
                 if self.get(target) is None:
                     owes_ready = True
@@ -193,6 +225,8 @@ class FrameDecoder:
                                 self._on_missing(target)
                         continue  # sleep until the next request
                 if owes_ready:
+                    self._on_ready(target)
+                if self._make_region(target):
                     self._on_ready(target)
                 if direction > 0:
                     # Stepping forward: a few frames ahead cost almost nothing
@@ -285,6 +319,8 @@ class FrameDecoder:
             if item is None:
                 return False
             idx, frame = item
+            if idx >= target and owner == target and self._held_idx() != target:
+                self._held = (target, frame)   # for request_region
             if idx >= keep_from or idx >= target:
                 self._store(idx, frame)
                 if idx > target and self.get(target) is None:
@@ -296,6 +332,45 @@ class FrameDecoder:
             count += 1
             if count % 16 == 0 and self._superseded(owner):
                 return False
+
+    def _held_idx(self) -> int | None:
+        return self._held[0] if self._held is not None else None
+
+    def _make_region(self, target: int) -> bool:
+        """Produce the pending region crop for *target*; True if one was made."""
+        import cv2
+        import numpy as np
+
+        from posetrak.detection.frame_source import _apply_rotation
+
+        with self._cond:
+            req, self._region_req = self._region_req, None
+        if req is None or req[0] != target:
+            return False
+        if self._held_idx() != target and not self._decode_to(target, keep_from=target):
+            return False
+        if self._held_idx() != target:
+            return False
+        rect, scale = req[1], req[2]
+        img = _apply_rotation(self._held[1].to_ndarray(format="bgr24"), self._rotation)
+        h, w = img.shape[:2]
+        x0 = int(np.clip(np.floor(rect[0]), 0, w - 1))
+        y0 = int(np.clip(np.floor(rect[1]), 0, h - 1))
+        x1 = int(np.clip(np.ceil(rect[2]), x0 + 1, w))
+        y1 = int(np.clip(np.ceil(rect[3]), y0 + 1, h))
+        crop = img[y0:y1, x0:x1]
+        if scale < 1.0:
+            crop = cv2.resize(
+                crop,
+                (max(1, int((x1 - x0) * scale)), max(1, int((y1 - y0) * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+        ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        if not ok:
+            return False
+        with self._cond:
+            self._region = (target, (buf.tobytes(), crop.shape[1], crop.shape[0], x0, y0, x1 - x0, y1 - y0))
+        return True
 
     def _store(self, idx: int, frame) -> None:
         if self.get(idx) is not None:
@@ -402,6 +477,15 @@ class FrameService(QObject):
     def get(self, shot_video_id: str, frame_idx: int) -> Result | None:
         decoder = self._decoders.get(shot_video_id)
         return decoder.get(frame_idx) if decoder is not None else None
+
+    def request_region(self, shot_video_id: str, frame_idx: int, rect: tuple, scale: float) -> None:
+        decoder = self._decoders.get(shot_video_id)
+        if decoder is not None:
+            decoder.request_region(frame_idx, rect, scale)
+
+    def get_region(self, shot_video_id: str, frame_idx: int) -> Result | None:
+        decoder = self._decoders.get(shot_video_id)
+        return decoder.get_region(frame_idx) if decoder is not None else None
 
     def is_missing(self, shot_video_id: str, frame_idx: int) -> bool:
         decoder = self._decoders.get(shot_video_id)

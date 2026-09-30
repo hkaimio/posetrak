@@ -104,6 +104,23 @@ the region of interest. While the user frame-steps, the decoder reads ahead
 sequentially (about 10 ms per frame) and fills an in-memory LRU of ready
 images. Crops may also be persisted in the sidecar as an `roi_crop` type.
 
+**What is and is not persisted.** Full-resolution frames are never stored in
+the session database. A whole 4K frame is about 830 KB as a JPEG, so a
+capture would need roughly 175 GB (42k frames, 5 cameras): the video file
+stays the store for full resolution, and re-decoding an exact frame takes
+about 0.5 s. Only the proxy (and, optionally, crops of frames you have looked
+at) is persisted, in the sidecar. Offline therefore means proxy-only, unless
+you "pin" a range: a native-resolution crop of a prop's region is about
+113 KB, so pinning the 6.7k-frame sword trial for 5 cameras costs about
+3.8 GB.
+
+**Proxy step follows the slider, not the frame rate.** A 56 s trial on a
+slider of about 800 px is roughly 8 frames per pixel, so a slider drag cannot
+address individual frames anyway. A proxy every 8th frame is enough for
+dragging (about 0.13 GB for the sword trial and 5 cameras); every frame of
+detail comes from the settle and read-ahead path. Per-frame stepping needs
+its own controls (section 4.6).
+
 ### 4.2 Region of interest provider
 
 The wide-crop cache already answers "what rectangle should this person's view
@@ -130,7 +147,43 @@ for stepping and prefetch. Five cameras settling in parallel takes about 0.5 s
 instead of 2–3 s. Without the source video the settle step falls back to the
 proxy, upscaled and labelled.
 
-### 4.4 Tooling
+### 4.4 Memory cache and prefetch
+
+**What the memory cache holds.** For each camera and frame, the region of
+interest plus a margin, at native resolution, kept as JPEG bytes (about
+113 KB for a 1500×800 region at quality 90) and decoded only when displayed
+(about 5–10 ms). Holding decoded images would cost 3.6 MB each, more than 30
+times as much. It is neither the whole frame (25 MB raw) nor exactly the
+displayed window: the displayed window is cut from the cached region, and the
+existing black-fill covers the case where an overlay needs a little more. The
+region is computed per frame, so a fast-moving prop does not need the next
+frame's crop to overlap this one's.
+
+**Keyframe spacing decides the policy.** This footage has a keyframe every
+1.001 s, 120 frames. A seek lands on the previous keyframe and decodes
+forward, which is the 0.3–0.6 s measured earlier. Forward reading is cheap,
+60 frames in about 0.5 s; reading backwards is not, because a frame can only
+be reached from its keyframe. Measured: a seek plus 60 sequential reads takes
+0.9 s.
+
+- **Forward:** keep about 60 frames (0.5 s of footage) ready ahead of the
+  current frame; each camera's decoder fills them in about 0.5 s, all
+  cameras in parallel.
+- **Backward:** decode in blocks, not per frame. When the user steps back, or
+  gets within about 15 frames of the start of what is cached, decode the whole
+  previous keyframe interval (120 frames, about 1.2 s) and keep it. Stepping
+  back through that second is then free.
+- **Direction bias:** after two steps in one direction, spend about two thirds
+  of the budget in that direction.
+- **Budget:** about 256 MB in total, evicting by distance from the current
+  frame. At 113 KB × 5 cameras that is about 450 frame-times, 3.7 s of
+  120 fps footage. A jump larger than the window drops the old window and
+  starts a new one at the target after the settle delay.
+- The keyframe interval differs between cameras and captures (a 30 fps clip
+  may have 30–60 frames per interval), so the block size is read from the file,
+  not assumed.
+
+### 4.5 Tooling
 
 - CLI: `posetrak cache status`, `posetrak cache build --trial X [--step N]`,
   `posetrak cache prune [--max-size]`, with `--tier proxy|roi`.
@@ -140,11 +193,27 @@ proxy, upscaled and labelled.
 - Size-capped LRU pruning of `roi_crop` entries; the proxy is only removed
   explicitly.
 
+### 4.6 Per-frame stepping and playback controls
+
+The timeline slider is the only control today, so no user action is a single
+frame step and the cache has never had a stepping case to serve. Adding one is
+part of this work, because stepping is what read-ahead exists for:
+
+- Step buttons and keys: previous/next frame (arrow keys), 10 frames
+  (Shift+arrow), and jump to the previous/next tracker step or keyframe.
+- Play/pause at a chosen rate, using sequential decode (about 100 frames per
+  second per camera at 4K, so real-time 120 fps is borderline and playback
+  should drop frames to 30 fps display).
+- Slider drag stays the "scrub" case: served from the proxy, with the exact
+  frame after the settle delay.
+
 ## 5. Order of work (each step useful alone)
 
-1. **Parallel persistent decoders and debounce.** Per-camera decoders with
-   read-ahead, a settle debounce, and a larger placeholder for props than the
-   240 px ghost thumbnail. No schema change. Removes most of the waiting.
+1. **Parallel persistent decoders, debounce and stepping controls.**
+   Per-camera decoders with read-ahead and backward block decoding, a settle
+   debounce, a larger placeholder for props than the 240 px ghost thumbnail,
+   and the per-frame step and play controls. No schema change. Removes most of
+   the waiting.
 2. **Region of interest for objects.** The provider above, used by the
    tracking-run panel so a prop run shows a useful crop and the segmentation
    overlay.
@@ -171,9 +240,9 @@ proxy, upscaled and labelled.
 
 1. Sidecar cache database next to the session database, or a per-user cache
    folder shared across sessions?
-2. Default proxy: 640×360 every 2nd frame, or 960×540 every 4th? Dots are tiny
-   at 640 px wide; the settle step covers detail, so the proxy only needs to
-   convey motion.
+2. Default proxy: 640×360 every 8th frame (matches slider granularity, about
+   0.13 GB per trial), or a denser or larger one? Dots are tiny at 640 px wide;
+   the settle step covers detail, so the proxy only needs to convey motion.
 3. What should the offline experience promise: scrub only, or also stepping
    at proxy resolution?
 4. `ObjectCropGridWidget` (marker correction) needs exact full-resolution

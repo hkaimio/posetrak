@@ -4738,9 +4738,66 @@ class PersonCropGridWidget(QWidget):
         service.frame_missing.connect(self._on_service_frame_ready)
         service.unavailable.connect(lambda _svid: self._load_frame(self._current_t))
         self._frame_service = service
+        self._start_proxy_cache()
         # Bound to the service itself, not to this widget, so it still runs
         # after the widget is gone.
         self.destroyed.connect(lambda *_args, svc=service: svc.shutdown())
+
+    _proxy_cache = None
+    _proxy_cancel = None
+
+    def _start_proxy_cache(self) -> None:
+        """Open the sidecar scrub proxy and, in the background, make sure it
+        covers this sequence for every camera. Scrubbing then shows the nearest
+        stored frame at once instead of waiting for a seek."""
+        import threading
+
+        from posetrak.detection.proxy_cache import (
+            PROXY_STEP, PROXY_WIDTH, ProxyCache, session_db_path, sidecar_path,
+        )
+
+        db = session_db_path(self._conn)
+        if db is None:
+            return
+        try:
+            self._proxy_cache = ProxyCache(sidecar_path(db))
+        except Exception:  # noqa: BLE001  (read-only folder etc.: run without a proxy)
+            return
+        cancel = self._proxy_cancel = threading.Event()
+        # A sequence can span a whole capture (tens of minutes to decode at 4K),
+        # so build it in chunks, nearest the time on screen first.
+        chunk = 3600
+        jobs = []
+        for cam in self._cameras:
+            svid = cam["shot_video_id"]
+            first = max(0, self._sync_table.lookup(self._t_start, svid))
+            last = max(first, self._sync_table.lookup(self._t_end, svid))
+            here = self._sync_table.lookup(self._current_t, svid)
+            spans = [(a, min(a + chunk - 1, last)) for a in range(first, last + 1, chunk)]
+            spans.sort(key=lambda span: abs((span[0] + span[1]) / 2 - here))
+            jobs.append((svid, cam["file_path"], spans))
+        cache_path = self._proxy_cache.path
+
+        def build(svid: str, path: str, spans: list) -> None:
+            try:
+                cache = ProxyCache(cache_path)
+                try:
+                    for start, end in spans:
+                        if cancel.is_set():
+                            break
+                        cache.build(
+                            svid, path, start=start, end=end, step=PROXY_STEP,
+                            width=PROXY_WIDTH, cancelled=cancel.is_set,
+                        )
+                finally:
+                    cache.close()
+            except Exception:  # noqa: BLE001
+                import logging
+                logging.getLogger(__name__).warning("proxy build failed: %s", path, exc_info=True)
+
+        for job in jobs:
+            threading.Thread(target=build, args=job, daemon=True, name="proxy-build").start()
+        self.destroyed.connect(lambda *_a, ev=cancel: ev.set())
 
     _service_reload_scheduled = False
     _view_timer: "QTimer | None" = None
@@ -4787,10 +4844,27 @@ class PersonCropGridWidget(QWidget):
         if result is None:
             if service.is_unavailable(svid) or service.is_missing(svid, frame_idx):
                 cell.show_empty()   # no video, or the video ends before this time
-            else:
+                self._apply_overlay(
+                    cell, cam_id, svid, frame_idx, tracking_step, show_detected, show_tracked,
+                )
+                return
+            proxy = self._nearest_proxy(svid, frame_idx)
+            if proxy is None:
                 cell.show_loading()
-            self._apply_overlay(
+                self._apply_overlay(
+                    cell, cam_id, svid, frame_idx, tracking_step, show_detected, show_tracked,
+                )
+                return
+            # The exact frame is being decoded; meanwhile show the closest
+            # stored one. It replaces itself when the decode finishes.
+            desired = self._compute_target_rect(
+                cell, cam_id, svid, frame_idx, tracking_step,
+                (0.0, 0.0, float(proxy[5]), float(proxy[6])),
+            )
+            self._display_crop_result(
                 cell, cam_id, svid, frame_idx, tracking_step, show_detected, show_tracked,
+                proxy, target_rect=desired, layer_label="proxy", show_debug=show_debug,
+                show_seg=show_seg,
             )
             return
         service.request(svid, frame_idx)   # keeps read-ahead and direction current
@@ -4832,6 +4906,16 @@ class PersonCropGridWidget(QWidget):
             chosen, target_rect=target, layer_label="frame-service", show_debug=show_debug,
             show_seg=show_seg,
         )
+
+    def _nearest_proxy(self, svid: str, frame_idx: int):
+        if self._proxy_cache is None:
+            return None
+        from posetrak.detection.proxy_cache import PROXY_STEP
+
+        try:
+            return self._proxy_cache.nearest(svid, frame_idx, PROXY_STEP)
+        except Exception:  # noqa: BLE001  (sidecar locked or removed)
+            return None
 
     @staticmethod
     def _region_serves(crop: tuple, view: tuple, frame_w: float, frame_h: float, wanted: float) -> bool:

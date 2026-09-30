@@ -252,23 +252,13 @@ class FrameDecoder:
 
     def _open(self) -> bool:
         try:
-            import av
+            from posetrak.detection.proxy_cache import open_video
 
-            from posetrak.detection.frame_source import _parse_displaymatrix, _stream_rotation
-
-            self._container = av.open(self._file_path)
-            self._stream = self._container.streams.video[0]
-            self._stream.thread_type = self._thread_type
+            self._container, self._stream, self._rotation = open_video(
+                self._file_path, self._thread_type
+            )
             self._tb = float(self._stream.time_base)
             self._fps = float(self._stream.average_rate)
-            self._rotation = _stream_rotation(self._stream)
-            if self._rotation == 0:
-                for probe in self._container.decode(self._stream):
-                    for sd in probe.side_data or []:
-                        if "DISPLAYMATRIX" in str(sd.type).upper():
-                            self._rotation = _parse_displaymatrix(bytes(sd))
-                    break
-                self._container.seek(0, stream=self._stream, backward=True, any_frame=False)
             return True
         except Exception:  # noqa: BLE001
             _log.warning("frame decoder: cannot open %s", self._file_path, exc_info=True)

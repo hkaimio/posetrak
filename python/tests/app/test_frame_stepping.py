@@ -363,3 +363,23 @@ def test_the_segmentation_legend_is_drawn_by_the_canvas_at_the_viewport_corner(q
     canvas.set_legend([])
     img = canvas.grab().toImage().convertToFormat(QImage.Format.Format_RGB32)
     assert not any(QColor(img.pixel(x, y)).red() > 200 for x in range(0, 60) for y in range(0, 40))
+
+
+def test_the_nearest_stored_frame_is_shown_while_the_exact_one_is_decoded(qapp):
+    proxy = (b"proxy", 640, 360, 0, 0, 3840, 2160)
+    service = MagicMock()
+    service.get.return_value = None
+    service.request.return_value = False
+    service.is_unavailable.return_value = False
+    service.is_missing.return_value = False
+    w = _service_widget(service)
+    w._proxy_cache = MagicMock()
+    w._proxy_cache.nearest.return_value = proxy
+    cell = MagicMock()
+
+    w._show_service_frame(cell, CAM, 42, None, True, True, False, False)
+
+    args = w._display_crop_result.call_args
+    assert args.args[7] is proxy and args.kwargs["layer_label"] == "proxy"
+    cell.show_loading.assert_not_called()
+    service.request.assert_called_once_with("sv1", 42)   # the exact frame is still requested

@@ -327,3 +327,30 @@ view therefore decides what image is needed:
   back at once and requests a new crop after the view settles.
 - While zoomed, the whole-frame image is displayed uncropped, so the view can be
   moved anywhere in the frame without waiting for anything.
+
+## 10. Scrub proxy as built
+
+- **Storage.** `<session>.cache.db` beside the session database (`posetrak/detection/proxy_cache.py`):
+  `proxy_frames` (one 640 px wide JPEG at quality 70 per stored frame, with the size of
+  the frame it was reduced from) and `proxy_ranges` (passes that ran to completion).
+  Every frame index is `round(pts * time_base * fps)`, the same as the frame service.
+  Deleting the file loses nothing.
+- **Density.** Every 8th frame (`PROXY_STEP`), matching what the time slider can address.
+- **Building.** One sequential decode per range, converting only the frames that are
+  kept. The viewer starts it in the background when a prop sequence is opened, one
+  thread per camera, in chunks of 3600 frames ordered by distance from the time on
+  screen, so the part being looked at is ready first. A sequence can span a whole
+  capture; on the five 4K cameras of the sword session the build ran at about
+  400 decoded frames per second in total, which produces about 50 stored frames per
+  second and about 2 MB per second of build time. Rows are written in short
+  transactions, because several videos are built at once and a long write transaction
+  would lock the others out.
+- **Use.** While the exact frame of a camera is being decoded, the widget shows the
+  nearest stored frame within one step (layer label "proxy" in the debug overlay), and
+  the exact frame replaces it when ready. On the real session a jump shows the stored
+  frame after 2-25 ms instead of waiting 0.6-1.4 s for the decode.
+- **CLI.** `posetrak video proxy build|info|clear` prepares a capture ahead of time,
+  reports what is stored, or empties the cache.
+- **Offline.** Scrubbing works from the proxy alone; exact frames need the video.
+- Still open: a management section in the UI, pruning, a progress indicator, and
+  extending the proxy to person sequences.

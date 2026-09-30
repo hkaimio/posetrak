@@ -300,6 +300,9 @@ Five 4K 120 fps cameras, offscreen `PersonCropGridWidget`, segmentation overlay 
   read-ahead has run; backward step within a decoded keyframe interval about 1.6 ms.
 - Whole widget: jump to a new time, all cameras shown, 1.2-1.9 s; one frame step
   about 140-190 ms, almost all of it main-thread redraw (five 1080p frames, of which the
-  segmentation blend is about 20 ms per camera). Decoding is no longer the limit for
-  stepping; playback speed is bounded by redraw cost, so the overlay is the first thing to
-  make cheaper if smoother playback is needed.
+  segmentation blend is about 20 ms per camera) when everything ran at source resolution.
+  Decoding the JPEG at 1/2, 1/4 or 1/8 size so that it stays at least as wide as the cell,
+  and doing the blend and overlay at that size, brings a full redraw of four cameras to
+  about 16 ms. What remains per new frame is decoding its segmentation mask PNG on the
+  main thread (about 5-9 ms per camera); moving mask decoding next to the frame decoder
+  is the next lever if playback needs to be smoother.

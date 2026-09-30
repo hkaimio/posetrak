@@ -6332,7 +6332,23 @@ class PersonCropGridWidget(QWidget):
 
         jpeg, wpx, hpx, src_x, src_y, src_w, src_h = result
         buf = np.frombuffer(jpeg, dtype=np.uint8)
-        crop_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        # A whole video frame is far larger than the cell showing it. Let the
+        # JPEG decoder produce it at 1/2, 1/4 or 1/8 size (cheaper than
+        # decoding in full), as long as it stays at least as wide as the cell;
+        # the blend, black fill and colour conversion below then work on the
+        # smaller image too. The scale is taken from the decoded size, so the
+        # overlay mapping stays exact.
+        reduce_flag = cv2.IMREAD_COLOR
+        cell_w = max(1, int(cell.width()))
+        for div, flag in (
+            (8, cv2.IMREAD_REDUCED_COLOR_8),
+            (4, cv2.IMREAD_REDUCED_COLOR_4),
+            (2, cv2.IMREAD_REDUCED_COLOR_2),
+        ):
+            if wpx // div >= cell_w:
+                reduce_flag = flag
+                break
+        crop_bgr = cv2.imdecode(buf, reduce_flag)
         if crop_bgr is None:
             cell.show_empty()
             self._apply_overlay(
@@ -6341,8 +6357,7 @@ class PersonCropGridWidget(QWidget):
             return
         x1 = float(src_x)
         y1 = float(src_y)
-        jpeg_h = float(hpx or crop_bgr.shape[0])
-        src_scale = jpeg_h / float(src_h) if src_h > 0 else 1.0
+        src_scale = crop_bgr.shape[0] / float(src_h) if src_h > 0 else 1.0
 
         if show_seg:
             crop_bgr = self._blend_seg_mask(

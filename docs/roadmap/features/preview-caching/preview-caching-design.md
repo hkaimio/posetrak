@@ -138,14 +138,53 @@ tried in order:
 For a prop the person-detection step simply yields nothing, so the same code
 serves both cases.
 
-### 4.3 Decoding
+### 4.3 Decoding: PyAV, not OpenCV
 
-One persistent decoder thread per camera (as `FrameReader` does today, but
-for every camera in parallel and shared by all views of the capture),
-preferring: proxy for scrubbing, exact decode when settling, sequential read
-for stepping and prefetch. Five cameras settling in parallel takes about 0.5 s
-instead of 2–3 s. Without the source video the settle step falls back to the
-proxy, upscaled and labelled.
+The persistent decoders should use PyAV (`av`, already a declared dependency,
+and already what detection uses through `posetrak/detection/frame_source.py`),
+not `cv2.VideoCapture` as the preview code does today. Measured on the same
+4K, 120 fps HEVC file (keyframe every 120 frames):
+
+| | OpenCV | PyAV, threaded | PyAV, single thread |
+|---|---|---|---|
+| Random seek to an exact frame | 0.27–0.62 s | 0.12–0.47 s | 0.28–2.6 s |
+| Sequential frame, decode only | 3.0 ms (`grab`) | 3.1 ms | 22 ms |
+| Sequential frame, decoded to BGR | 9.9 ms | 5.5 ms | 26 ms |
+
+What PyAV adds beyond speed:
+
+- **Frame-exact and consistent with detection.** Seeking by timestamp landed
+  on the requested frame every time; the number of frames decoded from the
+  keyframe (12 to 115) matches the position inside the interval. The frame
+  index is derived from the timestamp exactly as detection does it, so a
+  preview frame is the frame a detection or tracking result refers to. OpenCV
+  counts frames itself, which can disagree on variable-frame-rate phone
+  footage, and the code already has a defensive rescale for the two decoders
+  disagreeing on resolution.
+- **Keyframe index for free.** Reading the packet headers without decoding
+  found all 352 keyframes of a 42k-frame file in 1.9 s. That gives the exact
+  block boundaries the backward policy in section 4.4 needs, instead of
+  assuming the interval. The index can be stored in the sidecar per video.
+- **Control over conversion and threads.** Only frames we keep are converted
+  to BGR, and thread count can be set per decoder.
+- **Rotation handled in one place.** Detection already corrects portrait
+  phone footage (stream rotation tag or display matrix); the preview would use
+  the same code instead of relying on OpenCV's auto-rotation.
+
+What PyAV does not change: a frame is still only reachable from its keyframe,
+so the 0.2–0.5 s random-seek cost and the block policy for backward stepping
+remain. It also removes nothing for offline use.
+
+**Caveat.** `frame_source.py` documents that closing a container while
+threaded decoding is still mid-stream can hang forever (seen with a stack dump
+of a worker stuck in the parser), and therefore decodes single-threaded there.
+Single-threaded decode is 5–7 times slower here (22 ms per frame), too slow
+for the preview. A quick test of 8 close-after-50-frames cycles with threaded
+decoding did not hang, but that is not proof. So the decoders must be built so
+a hang cannot block the interface: each decoder runs on its own thread, is
+closed from that thread with a watchdog, and is abandoned (not joined) if it
+does not finish in a few seconds. To be validated with a longer soak test
+before relying on threaded decode.
 
 ### 4.4 Memory cache and prefetch
 
@@ -231,8 +270,10 @@ part of this work, because stepping is what read-ahead exists for:
   ffmpeg needed). Comparable size and instant seeking, but harder to prune
   per range and to keep alongside the session; per-frame rows in a sidecar
   database prune and rebuild trivially.
-- **A keyframe-aware decoder library (PyAV).** Fixes seek cost for the full
-  resolution tier but adds a dependency, and does nothing for offline use.
+- **Keep OpenCV (`VideoCapture`) for decoding.** Works, but it is slower per
+  frame, gives no keyframe information, indexes frames by its own count rather
+  than by timestamp, and is a different decoder from the one detection uses;
+  see section 4.3.
 - **Only sparse scrub thumbnails, no proxy for stepping.** Cheapest, but every
   step then waits on a 0.3–0.6 s seek unless read-ahead is working.
 

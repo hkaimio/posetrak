@@ -1173,6 +1173,22 @@ extrinsics feature; listed here because Harri flagged the ~2 px vs
 
 ### Deferred / research (not scheduled)
 
+**Ideas raised during the sword tracking work, not scheduled**
+
+- **Dot assignment editor** in the main viewer: show dot tracklets and their slot
+  assignments and let the user edit them; also edit or add dot detections where the
+  detector missed one. Base it on the person keypoint editor.
+- **Learned assignment cost.** The cost modifiers are combined linearly and are getting
+  hard to tune by hand. Consider a small network trained on validated assignments from
+  many real captures, possibly used only to weight the existing terms.
+- **Props attached to persons.** Props are often held, sometimes by two hands, and the
+  attachment can break completely (a thrown ball), so it has to be dynamic. Options:
+  (a) attach the prop to the person's skeleton; (b) target points, lines or surfaces
+  on prop and person with an artificial measurement that their distance is zero;
+  (c) both; (d) later, a tracker with a body-surface model that detects contact
+  itself. Tracking the person alongside the prop should already remove dots of the
+  person being assigned to the prop's slots.
+
 Automatic calibration-time labeling (redesign §3); body-model spike
 (redesign §6.1); person↔prop coupling tuning, grip anchors, free flight
 and handoff; hand markers vs wrist-seeded markerless hands; UC3 moving

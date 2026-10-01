@@ -452,12 +452,21 @@ class FrameService(QObject):
             svid = cam["shot_video_id"]
             self._decoders[svid] = FrameDecoder(
                 cam["file_path"],
-                on_ready=lambda idx, s=svid: self.frame_ready.emit(s, idx),
-                on_failed=lambda s=svid: self.unavailable.emit(s),
-                on_missing=lambda idx, s=svid: self.frame_missing.emit(s, idx),
+                on_ready=lambda idx, s=svid: self._emit(self.frame_ready, s, idx),
+                on_failed=lambda s=svid: self._emit(self.unavailable, s),
+                on_missing=lambda idx, s=svid: self._emit(self.frame_missing, s, idx),
                 budget_bytes=per_decoder,
                 **decoder_kwargs,
             )
+
+    @staticmethod
+    def _emit(signal, *args) -> None:
+        """Emit from a decoder thread; the service may already be deleted while a
+        decode that was in flight finishes."""
+        try:
+            signal.emit(*args)
+        except RuntimeError:
+            pass
 
     def request(self, shot_video_id: str, frame_idx: int) -> bool:
         """Ask for a frame; True if it is already cached."""

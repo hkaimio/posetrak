@@ -14,7 +14,8 @@ database (``<session>.cache.db``): it is disposable, safe to delete at any time,
 and never part of the session data.
 
 A frame index means the same frame here as in the frame service and in
-detection: ``round(pts * time_base * fps)`` of the PyAV frame.
+detection: ``round(pts * time_base * fps)`` of the PyAV frame, minus the index of
+the file's first frame (see :func:`first_frame_index`).
 """
 
 from __future__ import annotations
@@ -100,6 +101,17 @@ def open_video(path: str, thread_type: str = "AUTO"):
     return container, stream, rotation
 
 
+def first_frame_index(stream) -> int:
+    """pts-based index (``round(pts * time_base * fps)``) of the first frame of
+    *stream*: 0 for most files, 1 for a file whose first presentation time is
+    about a frame after zero (the OnePlus recordings). A frame number everywhere
+    else in the project (detection, segmentation masks, sync points) counts the
+    first frame as 0, so the previewing code subtracts this."""
+    if stream.start_time is None:
+        return 0
+    return round(float(stream.start_time) * float(stream.time_base) * float(stream.average_rate))
+
+
 class ProxyCache:
     """The sidecar database. Each instance has its own connection, so create one
     per thread."""
@@ -174,8 +186,9 @@ class ProxyCache:
         written = 0
         try:
             tb, fps = float(stream.time_base), float(stream.average_rate)
+            offset = first_frame_index(stream)
             container.seek(
-                int(max(0.0, (start - 0.5) / fps) / tb), stream=stream, backward=True,
+                int(max(0.0, (start + offset - 0.5) / fps) / tb), stream=stream, backward=True,
                 any_frame=False,
             )
             have = {
@@ -203,7 +216,7 @@ class ProxyCache:
             for frame in container.decode(stream):
                 if frame.pts is None:
                     continue
-                idx = round(float(frame.pts) * tb * fps)
+                idx = round(float(frame.pts) * tb * fps) - offset
                 if end is not None and idx > end:
                     break
                 last = idx

@@ -111,6 +111,7 @@ class FrameDecoder:
         self._fps = 0.0
         self._tb = 0.0
         self._rotation = 0
+        self._index_offset = 0   # pts-based index of the file's first frame
         self._held: tuple[int, object] | None = None   # (frame_idx, full-resolution av frame)
 
         self._thread = threading.Thread(
@@ -252,13 +253,14 @@ class FrameDecoder:
 
     def _open(self) -> bool:
         try:
-            from posetrak.detection.proxy_cache import open_video
+            from posetrak.detection.proxy_cache import first_frame_index, open_video
 
             self._container, self._stream, self._rotation = open_video(
                 self._file_path, self._thread_type
             )
             self._tb = float(self._stream.time_base)
             self._fps = float(self._stream.average_rate)
+            self._index_offset = first_frame_index(self._stream)
             return True
         except Exception:  # noqa: BLE001
             _log.warning("frame decoder: cannot open %s", self._file_path, exc_info=True)
@@ -274,7 +276,7 @@ class FrameDecoder:
 
     def _seek(self, target: int) -> None:
         # Half a frame early so rounding cannot land after the target.
-        seek_s = max(0.0, (target - 0.5) / self._fps)
+        seek_s = max(0.0, (target + self._index_offset - 0.5) / self._fps)
         self._container.seek(
             int(seek_s / self._tb), stream=self._stream, backward=True, any_frame=False
         )
@@ -291,7 +293,7 @@ class FrameDecoder:
                 return None
             if frame.pts is None:
                 continue
-            idx = round(float(frame.pts) * self._tb * self._fps)
+            idx = round(float(frame.pts) * self._tb * self._fps) - self._index_offset
             self._pos = idx
             return idx, frame
 

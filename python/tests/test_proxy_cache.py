@@ -130,3 +130,16 @@ def test_builder_follows_the_focus_to_the_nearest_unfinished_chunk(tmp_path, vid
     builder._pending.remove((60, 79))
     assert builder._nearest_pending() in ((40, 59), (80, 99))   # equidistant from 70 either way
     builder.cancel()
+
+
+def test_first_frame_index_counts_a_late_first_frame_as_an_offset():
+    from types import SimpleNamespace
+
+    from posetrak.detection.proxy_cache import first_frame_index
+
+    def stream(start, tb, fps):
+        return SimpleNamespace(start_time=start, time_base=tb, average_rate=fps)
+
+    assert first_frame_index(stream(0, 1 / 120000, 119.88)) == 0
+    assert first_frame_index(stream(None, 1 / 90000, 120)) == 0
+    assert first_frame_index(stream(963, 1 / 90000, 119.967)) == 1   # first frame ~1.3 frames in

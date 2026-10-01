@@ -24,8 +24,8 @@ from typing import Final
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 15
-SESSION_SCHEMA_VERSION: Final[int] = 60
+REGISTRY_SCHEMA_VERSION: Final[int] = 16
+SESSION_SCHEMA_VERSION: Final[int] = 61
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -328,6 +328,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 14
     if actual == 14:
         _migrate_registry_v14_to_v15(conn)
+        actual = 15
+    if actual == 15:
+        _migrate_registry_v15_to_v16(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -777,6 +780,18 @@ def _migrate_registry_v14_to_v15(conn: sqlite3.Connection) -> None:
             "ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_cost_scale_at_zero_fraction REAL"
         )
     _set_schema_version(conn, 15)
+    conn.commit()
+
+
+def _migrate_registry_v15_to_v16(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 15 to 16.
+
+    v16 adds tracker_configs.dot_seg_mask_hard_distance_px, mirroring the
+    session schema v60->v61 change -- see _migrate_session_v60_to_v61.
+    """
+    if "dot_seg_mask_hard_distance_px" not in _tracker_config_columns(conn):
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_hard_distance_px REAL")
+    _set_schema_version(conn, 16)
     conn.commit()
 
 
@@ -1951,6 +1966,21 @@ def _migrate_session_v56_to_v57(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v60_to_v61(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 60 to 61.
+
+    v61 adds tracker_configs.dot_seg_mask_hard_distance_px: a candidate farther
+    than this from its subject's mask label in the current frame cannot be
+    assigned to the subject's slots, whatever its tracklet's history. Mirrors
+    the registry schema v15->v16 change, since every session embeds a copy of
+    tracker_configs.
+    """
+    if "dot_seg_mask_hard_distance_px" not in _tracker_config_columns(conn):
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_hard_distance_px REAL")
+    _set_schema_version(conn, 61)
+    conn.commit()
+
+
 def _migrate_session_v57_to_v58(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 57 to 58.
 
@@ -2290,6 +2320,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 59
     if actual == 59:
         _migrate_session_v59_to_v60(conn)
+        actual = 60
+    if actual == 60:
+        _migrate_session_v60_to_v61(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

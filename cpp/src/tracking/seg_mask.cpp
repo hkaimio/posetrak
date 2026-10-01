@@ -36,6 +36,9 @@ bool decode_seg_mask(std::string const& png_bytes, DecodedSegMask& out) {
     out.mask_h = h;
     out.labels.assign(data, data + (static_cast<size_t>(w) * static_cast<size_t>(h)));
     stbi_image_free(data);
+    out.label_present.fill(false);
+    for (std::uint8_t const v : out.labels)
+        out.label_present[v] = true;
     return true;
 }
 

@@ -216,7 +216,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
         "       COALESCE(dot_seg_mask_min_tracklet_fraction, 0.3) AS "
         "dot_seg_mask_min_tracklet_fraction,"
         "       COALESCE(dot_seg_mask_cost_scale_at_zero_fraction, 4.0) AS "
-        "dot_seg_mask_cost_scale_at_zero_fraction"
+        "dot_seg_mask_cost_scale_at_zero_fraction,"
+        "       COALESCE(dot_seg_mask_hard_distance_px, 0.0) AS dot_seg_mask_hard_distance_px"
         " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -255,7 +256,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //         61=dot_corroboration_gate_multiplier, 62=dot_camera_noise_scale,
     //         63=dot_seg_mask_enabled, 64=dot_seg_mask_dilate_px,
     //         65=dot_seg_mask_tracklet_window, 66=dot_seg_mask_min_tracklet_fraction,
-    //         67=dot_seg_mask_cost_scale_at_zero_fraction
+    //         67=dot_seg_mask_cost_scale_at_zero_fraction,
+    //         68=dot_seg_mask_hard_distance_px
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -474,6 +476,7 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     apply_int(65, out.tracker.dot_seg_mask_tracklet_window);
     apply_real(66, out.tracker.dot_seg_mask_min_tracklet_fraction);
     apply_real(67, out.tracker.dot_seg_mask_cost_scale_at_zero_fraction);
+    apply_real(68, out.tracker.dot_seg_mask_hard_distance_px);
 
     // dot_camera_noise_scale: stored as a JSON object of camera_id (as a string
     // key, e.g. "2") -> scale, e.g. {"2": 1.3, "3": 0.7}.

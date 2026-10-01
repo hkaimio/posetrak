@@ -367,3 +367,33 @@ rise. Whether the remaining `dot2`/`dot3` resolutions are the correct ones,
 and whether the ArUco recovery delay is gone, has not been checked against
 video; the aggregate numbers alone do not show it. `dilate_px` 20 vs 150
 shows no clear difference here.
+
+## 10. Distance exclusion
+
+The tracklet-history rule (section 3) cannot judge a candidate whose tracklet is new.
+A static background light that a fast-moving prop passes in front of is detected as a
+new tracklet every few frames, so the prop's slot can lock onto it and then hold it,
+because the filter has no other measurement to pull it away.
+
+`dot_seg_mask_hard_distance_px` (tracker config, 0 = off) adds a rule that needs no
+history: a candidate farther than this from its subject's mask label in the current frame
+cannot be assigned to that subject's slots. The search is `mask_label_present_near` with
+the larger radius. It is skipped for a camera whose mask has no pixel of the label at all
+(`DecodedSegMask::label_present`), because a frame where segmentation lost the subject
+says nothing about where the subject is.
+
+Evidence on a 2.6 s window of a fast sword swing, 4K cameras, tracker at 120 Hz, mask
+label of the sword (1 pixel in the mask = 2 video pixels):
+
+- Before the lock-on, every accepted dot was within 60 video pixels of the sword mask
+  (281 inside, 71 within 20 px, 22 within 20-60 px, none beyond).
+- With the mask rules but no distance rule, 632 of 689 accepted assignments after the
+  lock-on were more than 150 px from the mask (up to 920 px).
+- With a distance of 70 px, after the same moment 937 were inside, 199 within 20 px,
+  68 within 60 px, 3 within 150 px and none farther. Mean inlier observations per
+  step rose from 2.8 to 19.8 (steps 100-200) and from 5.4 to 14 (steps 200-310); 7
+  steps with no usable measurement were reported lost.
+
+The distance should exceed the largest distance at which a correct dot is seen from the
+mask (mask boundary accuracy, a thin part the segmentation misses), and be small
+compared with how far a stray light can be from the subject.

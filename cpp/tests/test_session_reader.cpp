@@ -219,7 +219,8 @@ static void create_fixture_db() {
             dot_seg_mask_dilate_px REAL,
             dot_seg_mask_tracklet_window INTEGER,
             dot_seg_mask_min_tracklet_fraction REAL,
-            dot_seg_mask_cost_scale_at_zero_fraction REAL
+            dot_seg_mask_cost_scale_at_zero_fraction REAL,
+            dot_seg_mask_hard_distance_px REAL
         );
     )");
 

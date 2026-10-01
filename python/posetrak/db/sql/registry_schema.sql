@@ -235,7 +235,13 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     dot_seg_mask_dilate_px            REAL,    -- Search radius, native px; NULL/20.0 = default
     dot_seg_mask_tracklet_window      INTEGER, -- Rolling per-tracklet window, frames; NULL/60 = default
     dot_seg_mask_min_tracklet_fraction REAL,   -- Hard-exclude threshold; NULL/0.3 = default
-    dot_seg_mask_cost_scale_at_zero_fraction REAL -- Soft-penalty ceiling; NULL/4.0 = default
+    dot_seg_mask_cost_scale_at_zero_fraction REAL, -- Soft-penalty ceiling; NULL/4.0 = default
+    -- Added in schema migration v61 (session)/v16 (registry). A candidate
+    -- farther than this many native pixels from its subject's mask label in
+    -- the current frame is excluded outright, with no tracklet history needed
+    -- (a flickering static light gets a new tracklet id every few frames);
+    -- skipped for a camera whose mask lacks the label entirely.
+    dot_seg_mask_hard_distance_px     REAL     -- Native px; NULL/0 = disabled
 );
 
 -- Added in schema migration v37: hierarchical body/hand solver -- per-stage

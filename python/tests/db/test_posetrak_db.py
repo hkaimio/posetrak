@@ -1161,6 +1161,24 @@ def test_migrate_session_v56_to_v57_adds_seg_mask_columns(tmp_path: Path) -> Non
     conn.close()
 
 
+def test_migrate_adds_the_hard_mask_distance_column() -> None:
+    """Registry v15->v16 and session v60->v61 add dot_seg_mask_hard_distance_px
+    to a tracker_configs table that lacks it, and are safe to repeat."""
+    import sqlite3
+
+    from posetrak.db.db import _migrate_registry_v15_to_v16, _migrate_session_v60_to_v61
+
+    for migrate, version in ((_migrate_registry_v15_to_v16, 16), (_migrate_session_v60_to_v61, 61)):
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE tracker_configs (id TEXT PRIMARY KEY)")
+        migrate(conn)
+        migrate(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tracker_configs)")}
+        assert "dot_seg_mask_hard_distance_px" in cols
+        assert get_schema_version(conn) == version
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # PRAGMA foreign_keys
 # ---------------------------------------------------------------------------

@@ -98,6 +98,8 @@ TrackerAppConfig TrackerAppConfig::load(std::filesystem::path const& config_path
             tracking["dot_seg_mask_min_tracklet_fraction"].value_or(0.3);
         result.dot_seg_mask_cost_scale_at_zero_fraction =
             tracking["dot_seg_mask_cost_scale_at_zero_fraction"].value_or(4.0);
+        result.dot_seg_mask_hard_distance_px =
+            tracking["dot_seg_mask_hard_distance_px"].value_or(0.0);
         if (auto vel_cams = tracking["velocity_mode_camera_ids"].as_array()) {
             for (auto&& elem : *vel_cams) {
                 if (auto v = elem.value<int64_t>())
@@ -363,6 +365,11 @@ void TrackerAppConfig::validate() const {
     if (dot_seg_mask_dilate_px < 0.0) {
         throw std::runtime_error(fmt::format("Invalid dot_seg_mask_dilate_px: {} (must be >= 0)",
                                              dot_seg_mask_dilate_px));
+    }
+    if (dot_seg_mask_hard_distance_px < 0.0) {
+        throw std::runtime_error(
+            fmt::format("Invalid dot_seg_mask_hard_distance_px: {} (must be >= 0)",
+                        dot_seg_mask_hard_distance_px));
     }
     if (dot_seg_mask_min_tracklet_fraction < 0.0 || dot_seg_mask_min_tracklet_fraction > 1.0) {
         throw std::runtime_error(

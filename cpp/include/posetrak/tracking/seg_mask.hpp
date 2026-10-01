@@ -25,6 +25,7 @@
 
 #include <Eigen/Core>
 
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <optional>
@@ -45,8 +46,15 @@ struct DecodedSegMask {
     int native_w = 0;
     int native_h = 0;
     std::vector<std::uint8_t> labels;  ///< Row-major, mask_w * mask_h bytes.
+    /// Which labels occur anywhere in the mask (filled by decode_seg_mask()). Lets a
+    /// caller tell "this candidate is far from the subject" from "the subject is not
+    /// in this mask at all" (a failed or missing segmentation) without scanning.
+    std::array<bool, 256> label_present{};
 
     bool valid() const { return mask_w > 0 && mask_h > 0 && !labels.empty(); }
+    bool has_label(int label) const {
+        return label > 0 && label < 256 && label_present[static_cast<size_t>(label)];
+    }
 };
 
 /// @brief Decodes *png_bytes* (a seg_masks.mask_blob value: a plain

@@ -250,6 +250,9 @@ struct DotAssignmentContext {
     /// Search radius, in native pixels, for SegmentationMaskModifier's
     /// current-frame membership test (mask_label_present_near's dilate_px).
     double dot_seg_mask_dilate_px = 20.0;
+    /// Candidates farther than this from the subject's mask label are excluded outright,
+    /// without needing tracklet history; 0 = off (see TrackerConfig).
+    double dot_seg_mask_hard_distance_px = 0.0;
     /// Rolling per-tracklet window (TrackletMaskAccumulator), in frames.
     int dot_seg_mask_tracklet_window = 60;
     /// Below this in-mask fraction, a tracklet that also fails the current-frame

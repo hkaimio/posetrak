@@ -153,6 +153,11 @@ struct TrackerConfig {
     int dot_seg_mask_tracklet_window = 60;
     double dot_seg_mask_min_tracklet_fraction = 0.3;
     double dot_seg_mask_cost_scale_at_zero_fraction = 4.0;
+    /// A candidate farther than this many native pixels from its subject's mask label in
+    /// the current frame cannot be assigned to that subject's slots, whatever its
+    /// tracklet's history (a young tracklet has none). 0 = off. Skipped for a camera
+    /// whose mask does not contain the label at all.
+    double dot_seg_mask_hard_distance_px = 0.0;
 
     // === Streak-derived dot velocity ===
     // See docs/roadmap/features/marker-based-mocap/streak-velocity-design.md §3/§4.
@@ -400,6 +405,11 @@ struct TrackerAppConfig {
     int dot_seg_mask_tracklet_window = 60;
     double dot_seg_mask_min_tracklet_fraction = 0.3;
     double dot_seg_mask_cost_scale_at_zero_fraction = 4.0;
+    /// A candidate farther than this many native pixels from its subject's mask label in
+    /// the current frame cannot be assigned to that subject's slots, whatever its
+    /// tracklet's history (a young tracklet has none). 0 = off. Skipped for a camera
+    /// whose mask does not contain the label at all.
+    double dot_seg_mask_hard_distance_px = 0.0;
 
     // === Streak-derived dot velocity === (see TrackerConfig's own field doc comments)
     bool dot_streak_velocity_enabled = false;
@@ -560,6 +570,7 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.dot_seg_mask_tracklet_window = dot_seg_mask_tracklet_window;
     tc.dot_seg_mask_min_tracklet_fraction = dot_seg_mask_min_tracklet_fraction;
     tc.dot_seg_mask_cost_scale_at_zero_fraction = dot_seg_mask_cost_scale_at_zero_fraction;
+    tc.dot_seg_mask_hard_distance_px = dot_seg_mask_hard_distance_px;
     tc.dot_streak_velocity_enabled = dot_streak_velocity_enabled;
     tc.dot_streak_k_window = dot_streak_k_window;
     tc.dot_streak_k_min_samples = dot_streak_k_min_samples;

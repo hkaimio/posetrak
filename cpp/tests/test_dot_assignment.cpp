@@ -1434,6 +1434,7 @@ DecodedSegMask make_mask(int w, int h, int x0, int y0, int x1, int y1, int label
             mask.labels[static_cast<size_t>(y) * w + x] = static_cast<std::uint8_t>(label);
         }
     }
+    mask.label_present[static_cast<size_t>(label)] = x1 >= x0 && y1 >= y0;
     return mask;
 }
 
@@ -1522,6 +1523,50 @@ TEST_CASE("SegmentationMaskModifier: excludes only when off-mask now AND trackle
     in_mask_cand.tracklet_id = 7;
     CostSupport in_support = modifier.apply(make_slot(0, 0, 7, pred), in_mask_cand, context);
     REQUIRE_FALSE(in_support.exclude);
+}
+
+TEST_CASE("SegmentationMaskModifier: hard distance excludes a far candidate with no history",
+          "[dot_assignment][seg_mask]") {
+    DotAssignmentContext context = make_context();
+    context.seg_mask_subject[0] = SegMaskSubjectConfig{"seg-run", 1};
+    context.dot_seg_mask_dilate_px = 0.0;
+    context.dot_seg_mask_hard_distance_px = 30.0;
+    context.seg_masks_by_camera[0] = make_mask(200, 200, 10, 10, 20, 20, /*label=*/1);
+    TrackletMaskState state;  // empty: every tracklet is new
+    context.tracklet_mask_state = &state;
+
+    auto pred = make_prediction(0.0, 0.0);
+    SegmentationMaskModifier modifier;
+
+    UnlabeledCandidate far_cand = make_candidate(0, 120.0, 120.0);
+    far_cand.tracklet_id = 99;
+    REQUIRE(modifier.apply(make_slot(0, 0, 7, pred), far_cand, context).exclude);
+
+    // Beyond the dilation radius (0) but within the hard distance: not excluded.
+    UnlabeledCandidate near_cand = make_candidate(0, 40.0, 40.0);
+    near_cand.tracklet_id = 99;
+    REQUIRE_FALSE(modifier.apply(make_slot(0, 0, 7, pred), near_cand, context).exclude);
+
+    // Off (0) by default: the far candidate is judged only by history, which a
+    // new tracklet does not have.
+    context.dot_seg_mask_hard_distance_px = 0.0;
+    REQUIRE_FALSE(modifier.apply(make_slot(0, 0, 7, pred), far_cand, context).exclude);
+}
+
+TEST_CASE("SegmentationMaskModifier: hard distance is skipped when the mask lacks the label",
+          "[dot_assignment][seg_mask]") {
+    DotAssignmentContext context = make_context();
+    context.seg_mask_subject[0] = SegMaskSubjectConfig{"seg-run", 1};
+    context.dot_seg_mask_hard_distance_px = 30.0;
+    context.seg_masks_by_camera[0] = make_mask(200, 200, 10, 10, 20, 20, /*label=*/2);
+    TrackletMaskState state;
+    context.tracklet_mask_state = &state;
+
+    auto pred = make_prediction(0.0, 0.0);
+    UnlabeledCandidate cand = make_candidate(0, 120.0, 120.0);
+    cand.tracklet_id = 99;
+    SegmentationMaskModifier modifier;
+    REQUIRE_FALSE(modifier.apply(make_slot(0, 0, 7, pred), cand, context).exclude);
 }
 
 TEST_CASE(

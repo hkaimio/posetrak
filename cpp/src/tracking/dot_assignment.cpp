@@ -167,6 +167,16 @@ CostSupport SegmentationMaskModifier::apply(DotSlotRef const& slot,
 
     auto const mask_it = context.seg_masks_by_camera.find(slot.camera_id);
     if (mask_it != context.seg_masks_by_camera.end()) {
+        // Far from the subject in this frame: not its dot, whatever the tracklet's
+        // history -- a young tracklet (a flickering background light gets a new id
+        // every few frames) has none to judge it by. Only when the subject is in
+        // the mask at all; a frame where segmentation lost it says nothing.
+        if (context.dot_seg_mask_hard_distance_px > 0.0 &&
+            mask_it->second.has_label(subject_it->second.mask_label) &&
+            !mask_label_present_near(mask_it->second, candidate.position_distorted,
+                                     subject_it->second.mask_label,
+                                     context.dot_seg_mask_hard_distance_px))
+            return {1.0, true};
         bool const in_mask_now =
             mask_label_present_near(mask_it->second, candidate.position_distorted,
                                     subject_it->second.mask_label, context.dot_seg_mask_dilate_px);
@@ -604,6 +614,7 @@ std::string find_dot_config_disagreement(std::vector<TrackerConfig const*> const
         POSETRAK_CHECK_DOT_FIELD(dot_seg_mask_tracklet_window)
         POSETRAK_CHECK_DOT_FIELD(dot_seg_mask_min_tracklet_fraction)
         POSETRAK_CHECK_DOT_FIELD(dot_seg_mask_cost_scale_at_zero_fraction)
+        POSETRAK_CHECK_DOT_FIELD(dot_seg_mask_hard_distance_px)
 #undef POSETRAK_CHECK_DOT_FIELD
     }
     return {};
@@ -682,6 +693,7 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     context.dot_camera_noise_scale = config.dot_camera_noise_scale;
     context.dot_seg_mask_enabled = config.dot_seg_mask_enabled;
     context.dot_seg_mask_dilate_px = config.dot_seg_mask_dilate_px;
+    context.dot_seg_mask_hard_distance_px = config.dot_seg_mask_hard_distance_px;
     context.dot_seg_mask_tracklet_window = config.dot_seg_mask_tracklet_window;
     context.dot_seg_mask_min_tracklet_fraction = config.dot_seg_mask_min_tracklet_fraction;
     context.dot_seg_mask_cost_scale_at_zero_fraction =

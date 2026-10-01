@@ -168,6 +168,7 @@ CAM = {"shot_video_id": "sv1", "camera_instance_id": "cam1"}
 def _service_widget(service):
     w = _make_widget()
     w._frame_service = service
+    w._object_view = True
     w._apply_overlay = MagicMock()
     w._compute_target_rect = MagicMock(return_value=(0, 0, 10, 10))
     w._display_crop_result = MagicMock()
@@ -383,3 +384,34 @@ def test_the_nearest_stored_frame_is_shown_while_the_exact_one_is_decoded(qapp):
     assert args.args[7] is proxy and args.kwargs["layer_label"] == "proxy"
     cell.show_loading.assert_not_called()
     service.request.assert_called_once_with("sv1", 42)   # the exact frame is still requested
+
+
+def test_a_person_view_is_framed_on_the_keypoints_not_the_whole_frame(qapp):
+    service = MagicMock()
+    service.get.return_value = WHOLE
+    service.get_region.return_value = None
+    w = _service_widget(service)
+    w._object_view = False
+    person_rect = (1000.0, 500.0, 1400.0, 1100.0)
+    w._compute_target_rect.return_value = person_rect
+
+    w._show_service_frame(_cell(canvas_width=400), CAM, 42, None, True, True, False, False)
+
+    assert w._compute_target_rect.call_args.args[5] is None   # no whole-frame base for a person
+    assert w._display_crop_result.call_args.kwargs["target_rect"] == person_rect
+    # 400 canvas px for a 400 px wide view is 1 px per frame px; the half-size frame
+    # cannot give that, so a native-resolution crop of the person is requested.
+    assert service.request_region.called
+
+
+def test_a_person_without_keypoints_or_skeleton_is_shown_whole(qapp):
+    service = MagicMock()
+    service.get.return_value = WHOLE
+    service.get_region.return_value = None
+    w = _service_widget(service)
+    w._object_view = False
+    w._compute_target_rect.return_value = None
+
+    w._show_service_frame(_cell(canvas_width=400), CAM, 42, None, True, True, False, False)
+
+    assert w._display_crop_result.call_args.kwargs["target_rect"] == (0.0, 0.0, 3840.0, 2160.0)

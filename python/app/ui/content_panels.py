@@ -4569,8 +4569,8 @@ class PersonCropGridWidget(QWidget):
         # placeholder. See "View-mode parity" in the design doc. The heavier
         # wide-crop cluster cache stays edit-mode-only (started/released in
         # _set_edit_mode), per its own cost/scope rationale.
-        self._start_backfill()
         self._start_frame_service()
+        self._start_backfill()
 
         self._current_t = self._t_start
         self._load_frame(self._t_start)
@@ -4729,10 +4729,19 @@ class PersonCropGridWidget(QWidget):
         ).fetchone()
         return row is not None and row["capture_object_id"] is not None
 
+    _object_view: "bool | None" = None
+
+    def _is_object_view(self) -> bool:
+        if self._object_view is None:
+            self._object_view = self._is_object_sequence()
+        return self._object_view
+
     def _start_frame_service(self) -> None:
-        """Serve a prop's frames from persistent decoders (see frame_service.py)
-        instead of the person-crop cache, which has nothing to key them by."""
-        if self._frame_service is not None or not self._is_object_sequence():
+        """Serve every camera's frames from persistent decoders (see
+        frame_service.py) instead of the crop caches stored in the session
+        database. A person's view is framed on the person from the keypoints and
+        tracked skeleton (_show_service_frame), at the resolution the view needs."""
+        if self._frame_service is not None or not self._cameras:
             return
         from app.pose.frame_service import FrameService
 
@@ -4883,9 +4892,13 @@ class PersonCropGridWidget(QWidget):
         service.request(svid, frame_idx)   # keeps read-ahead and direction current
         frame_w, frame_h = float(result[5]), float(result[6])
         own_rect = (0.0, 0.0, frame_w, frame_h)
+        # A prop is shown whole (its rect is the frame); a person is framed on
+        # their keypoints and tracked skeleton, and only if there are none on the
+        # whole frame.
         desired = self._compute_target_rect(
-            cell, cam_id, svid, frame_idx, tracking_step, own_rect,
-        )
+            cell, cam_id, svid, frame_idx, tracking_step,
+            own_rect if self._is_object_view() else None,
+        ) or own_rect
         canvas = cell._canvas
         zoom = canvas._zoom_rect
         view = zoom if zoom is not None else desired
@@ -4943,7 +4956,7 @@ class PersonCropGridWidget(QWidget):
 
     def _start_backfill(self) -> None:
         """Start the background crop-generation worker if there is a detection run."""
-        if not self._det_run_id:
+        if self._frame_service is not None or not self._det_run_id:
             _log.debug("backfill: no detection run — skipping")
             return
         row = self._conn.execute("PRAGMA database_list").fetchone()
@@ -4975,7 +4988,7 @@ class PersonCropGridWidget(QWidget):
         reuses the first panel's already-built cache instead of rebuilding it
         -- see "Cache scope and lifecycle" in the design doc.
         """
-        if not self._det_run_id:
+        if self._frame_service is not None or not self._det_run_id:
             return
         row = self._conn.execute("PRAGMA database_list").fetchone()
         if row is None or not row[2]:
@@ -6740,8 +6753,8 @@ class PersonCropGridWidget(QWidget):
         svid: str,
         frame_idx: int,
         tracking_step: "int | None",
-        own_rect: "tuple[float, float, float, float]",
-    ) -> "tuple[float, float, float, float]":
+        own_rect: "tuple[float, float, float, float] | None",
+    ) -> "tuple[float, float, float, float] | None":
         """Minimum display bbox for one camera/frame: *own_rect* (whichever
         crop-source layer's own decoded extent) unioned with the windowed
         keypoint bbox and the tracked-skeleton bbox, padded by a margin, and
@@ -6770,10 +6783,12 @@ class PersonCropGridWidget(QWidget):
                 # Widen to cover whatever's actually drawn -- an edit (or a
                 # tracking run's own projection) can place a point far from
                 # where the raw (possibly wrong) detection said the person was.
-                desired = (
+                desired = bbox if desired is None else (
                     min(desired[0], bbox[0]), min(desired[1], bbox[1]),
                     max(desired[2], bbox[2]), max(desired[3], bbox[3]),
                 )
+        if desired is None:
+            return None   # no own rect and nothing drawn to frame
         # Margin around the minimum display bbox so overlay points never sit
         # flush against the cell edge.
         mx = (desired[2] - desired[0]) * _DISPLAY_MARGIN_FRAC

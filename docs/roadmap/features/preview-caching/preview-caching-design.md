@@ -356,3 +356,23 @@ view therefore decides what image is needed:
   reports what is stored, or empties the cache.
 - **Offline.** Scrubbing works from the proxy alone; exact frames need the video.
 - Still open: a management section in the UI, pruning, and extending the proxy to person sequences.
+
+## 11. Person views and the frame index convention
+
+- Person sequences use the same frame service as props: the crop caches in the session
+  database (`frame_cache_entries`) and their background workers are not started. The
+  view is framed from the person's keypoints and the tracked skeleton (the existing
+  minimum-display rectangle); with neither, the whole frame is shown. A tighter view
+  needs more resolution than the whole-frame image gives, so the native-resolution crop
+  of section 9 is requested for it, which is what makes zoomed person views sharp.
+  Without the video file the view is empty (or shows the scrub proxy where it has been
+  built); the old crops did not need the video.
+- A frame number counts the first frame of a file as 0 everywhere in the project
+  (detection, segmentation masks, sync points, OpenCV). PyAV's pts-based index
+  `round(pts * time_base * fps)` equals that only when the first frame is at time 0.
+  Some files (the OnePlus recordings) start about a frame later, so the frame service
+  and the proxy subtract the index of the file's first frame
+  (`posetrak.detection.proxy_cache.first_frame_index`). Without it their frames were one
+  ahead of the masks for those files, which showed as the mask lagging the image by a
+  few pixels while the person moved. Measured: mask edges best match the image of
+  frame f+1 in pts-based indexing for that camera, and frame f for the others.

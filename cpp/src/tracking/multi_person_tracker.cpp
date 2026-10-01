@@ -843,22 +843,30 @@ void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet,
         }
         auto smoothed = ctx.tracker->smooth();
 
-        // smoothed[0] is step_person_context_frame0()'s untracked warm-up result when
-        // that frame actually ran (ctx.frame0_tracked) -- it has no filtered-row
-        // (is_smoothed=0) counterpart, since that frame's result is deliberately never
-        // written to tracking_results/state_vectors.csv. Skip it here so smoothed
-        // tracker_step N lines up with filtered tracker_step N instead of being off by
-        // one (a real, previously-shipped bug: every smoothed row was mislabeled).
-        auto const smoothed_begin =
-            ctx.frame0_tracked && !smoothed.empty() ? smoothed.begin() + 1 : smoothed.begin();
+        // Each smoothed frame is labelled with the tracker step its timestamp belongs to.
+        // The list is not one-per-step: the warm-up frame before step 1 has no filtered
+        // row, a step with no observations has no entry, and a predicted-only step is
+        // smoothed but not written. Counting entries instead would shift every smoothed
+        // row after the first such step onto an earlier step, so the smoothed pose would
+        // lead the video by the number of steps skipped so far.
+        struct StepFrame {
+            int step;
+            SmoothedFrame const* frame;
+        };
+        std::vector<StepFrame> out_frames;
+        for (auto const& sf : smoothed) {
+            int const step = smoothed_step(sf.timestamp, ctx.start_time, ctx.dt);
+            if (step >= 1)
+                out_frames.push_back({step, &sf});
+        }
 
         {
             auto path = ctx.spec.output_dir / "smoothed_state_vectors.csv";
             std::ofstream f(path);
             f << generate_state_header(*ctx.layout) << "\n";
-            int step = 1;
-            for (auto it = smoothed_begin; it != smoothed.end(); ++it) {
-                export_state_vector(f, step++, it->timestamp, it->state, *ctx.layout);
+            for (auto const& [step, sf] : out_frames) {
+                if (sf->tracked)
+                    export_state_vector(f, step, sf->timestamp, sf->state, *ctx.layout);
             }
         }
         {
@@ -866,9 +874,10 @@ void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet,
             std::ofstream f(path);
             f << "frame,timestamp,joint_name,angle_x,angle_y,angle_z,"
                  "velocity_x,velocity_y,velocity_z\n";
-            int step = 1;
-            for (auto it = smoothed_begin; it != smoothed.end(); ++it) {
-                write_smoothed_joint_angles_frame(f, step++, it->timestamp, it->state, *ctx.layout);
+            for (auto const& [step, sf] : out_frames) {
+                if (sf->tracked)
+                    write_smoothed_joint_angles_frame(f, step, sf->timestamp, sf->state,
+                                                      *ctx.layout);
             }
         }
         {
@@ -876,17 +885,19 @@ void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet,
             std::ofstream f(path);
             f << "frame,timestamp,pos_x,pos_y,pos_z,quat_w,quat_x,quat_y,quat_z,"
                  "vel_x,vel_y,vel_z,omega_x,omega_y,omega_z\n";
-            int step = 1;
-            for (auto it = smoothed_begin; it != smoothed.end(); ++it) {
-                write_smoothed_root_pose_frame(f, step++, it->timestamp, it->state);
+            for (auto const& [step, sf] : out_frames) {
+                if (sf->tracked)
+                    write_smoothed_root_pose_frame(f, step, sf->timestamp, sf->state);
             }
         }
 
         // Write smoothed frames to DB (same full-skeleton expansion as the forward
         // pass above -- see PersonContext::full_layout's doc comment).
         {
-            int step_idx = 1;
-            for (auto it = smoothed_begin; it != smoothed.end(); ++it) {
+            for (auto const& [step_idx, sf_ptr] : out_frames) {
+                if (!sf_ptr->tracked)
+                    continue;
+                auto const* it = sf_ptr;
                 Eigen::VectorXd const state_vec =
                     ctx.full_layout
                         ? expand_state_to_full_layout(it->state, *ctx.layout, *ctx.full_layout)
@@ -900,12 +911,16 @@ void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet,
                               ctx.tracker_config.init_velocity_std *
                                   ctx.tracker_config.init_velocity_std))
                         : it->covariance;
-                ctx.result_writer->write_smoothed_frame(step_idx++, it->timestamp, state_vec,
+                ctx.result_writer->write_smoothed_frame(step_idx, it->timestamp, state_vec,
                                                         cov_for_write);
             }
         }
 
-        ctx.smoothed_frames.assign(smoothed_begin, smoothed.end());
+        // One entry per step that has a frame, predicted-only steps included (their
+        // smoothed state is the estimate for that step).
+        ctx.smoothed_frames.clear();
+        for (auto const& [step, sf] : out_frames)
+            ctx.smoothed_frames.push_back(*sf);
 
         if (!quiet) {
             fmt::print("  Smoothed {} frames\n", smoothed.size());

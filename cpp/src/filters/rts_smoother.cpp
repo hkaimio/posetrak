@@ -164,7 +164,8 @@ std::vector<SmoothedFrame> RTSSmoother::smooth(std::vector<FrameSmootherData> co
     std::vector<SmoothedFrame> result;
     result.reserve(N);
     for (int k = 0; k < N; ++k) {
-        result.push_back({data[k].timestamp, data[k].posterior_state, data[k].posterior_cov});
+        result.push_back(
+            {data[k].timestamp, data[k].posterior_state, data[k].posterior_cov, data[k].tracked});
     }
 
     // Backward sweep: k = N-2 down to 0.

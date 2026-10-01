@@ -920,3 +920,18 @@ TEST_CASE("A seed position does not make a multi-dot body without a coded marker
     CAPTURE(error);
     REQUIRE(error.find("anonymous-dot markers") != std::string::npos);
 }
+
+// A smoothed row's tracker step comes from its timestamp, not from its position in
+// the smoothed list: steps without a frame (no observations, or no update) leave no
+// entry, and counting entries instead moved every later smoothed row onto an earlier
+// step, so the smoothed pose led the video by the number of steps skipped so far.
+TEST_CASE("smoothed_step maps a timestamp to its tracker step", "[rts_smoother]") {
+    double const start = 100.0;
+    double const dt = 1.0 / 120.0;
+    CHECK(smoothed_step(start + dt * 0.5, start, dt) == -1);  // warm-up frame (rounds to 0 or 1)
+    CHECK(smoothed_step(start + 1 * dt, start, dt) == 1);
+    CHECK(smoothed_step(start + 4300 * dt, start, dt) == 4300);
+    // An entry after a skipped step keeps its own step number.
+    CHECK(smoothed_step(start + 12 * dt, start, dt) == 12);
+    CHECK(smoothed_step(start + 12 * dt + 1e-9, start, dt) == 12);
+}

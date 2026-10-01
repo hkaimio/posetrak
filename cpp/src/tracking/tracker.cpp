@@ -1067,6 +1067,15 @@ TrackingResult Tracker::update_step(std::vector<Observation> const& observations
 
     // Step 2: Check if we have observations
     if (!has_sufficient_observations(annotated)) {
+        // The filter's state continues through this frame as its own prediction, so the
+        // smoother needs the frame too (see FrameSmootherData).
+        if (smoothing_enabled_) {
+            smoother_cache_.push_back(FrameSmootherData{
+                timestamp, ukf_->state(), ukf_->covariance(), prior_state, prior_cov,
+                predict_result.cross_cov_future.get(), /*tracked=*/false});
+        } else {
+            predict_result.cross_cov_future.get();
+        }
         return TrackingResult{timestamp, ukf_->state(), ukf_->covariance(),         {},
                               0,         true,          "Insufficient observations"};
     }

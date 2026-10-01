@@ -29,6 +29,7 @@
 
 #include "posetrak/core/skeleton_layout.hpp"
 #include "posetrak/core/state.hpp"
+#include <cmath>
 #include <memory>
 #include <vector>
 
@@ -36,8 +37,12 @@ namespace posetrak {
 
 /// @brief Per-frame data accumulated during the forward UKF pass.
 ///
-/// Stored for every successfully tracked frame so the RTS backward sweep can
-/// compute smoothed estimates without re-running the forward filter.
+/// Stored for every frame the filter predicted, so the RTS backward sweep can
+/// compute smoothed estimates without re-running the forward filter. A frame
+/// that was predicted but could not be updated (no usable observations) is kept
+/// too, with its prediction as its posterior and tracked = false: the filter's
+/// state continues through it, so dropping it would pair each later frame's
+/// transition (cross-covariance and prior) with the wrong earlier frame.
 struct FrameSmootherData {
     double timestamp;  ///< Frame timestamp (seconds)
 
@@ -51,6 +56,10 @@ struct FrameSmootherData {
     /// with the prior x_{k|k-1}.  Shape: error_dim × error_dim.
     /// Computed by UKF::predict() when it spans step k-1 → k.
     Eigen::MatrixXd cross_cov;
+
+    /// False for a predicted-only frame (see above); such frames are smoothed but
+    /// are not written out as results.
+    bool tracked = true;
 };
 
 /// @brief Smoothed state estimate for a single frame.
@@ -58,7 +67,22 @@ struct SmoothedFrame {
     double timestamp;
     State state;
     Eigen::MatrixXd covariance;
+    bool tracked = true;  ///< Copied from FrameSmootherData::tracked.
 };
+
+/// @brief Tracker step (>= 1) a smoothed frame belongs to, from its timestamp, or
+/// -1 for the warm-up frame (stamped start_time + dt / 2). Step s is stamped
+/// start_time + s * dt.
+/// Derived from the timestamp, not from the frame's position in the smoothed
+/// list, because steps without a frame (no observations at all) leave no entry.
+inline int smoothed_step(double timestamp, double start_time, double dt) {
+    double const position = (timestamp - start_time) / dt;
+    long const step = std::lround(position);
+    // The warm-up frame is stamped half a step after the start; it belongs to no step.
+    if (std::abs(position - static_cast<double>(step)) > 0.25)
+        return -1;
+    return step >= 1 ? static_cast<int>(step) : -1;
+}
 
 /// @brief Rauch-Tung-Striebel fixed-interval smoother.
 ///

@@ -14,13 +14,14 @@
 # separate `shoulder` joint (the clavicle-equivalent bone, instrumented by
 # torso.marker-module.yaml's own clavicle_R/L instead -- a different
 # physical marker near a different bone). The forearm still carries its own
-# well-conditioned rigid cluster (elbow x2 + wrist x2). index_R/pinky_R ride
-# each finger's own first (proximal phalanx) segment -- "first joint" is the
-# MCP joint at its base.
+# well-conditioned rigid cluster (elbow x2 + wrist x2). index_R/pinky_R sit at
+# the first joint (MCP) of the index and little finger and ride the hand (the
+# palm): the fingers carry no markers of their own, and the palm is the rigid
+# body those two knuckle markers belong to.
 module: arm
 requires_topology: reallusion-no-waist
 requires_topology_hash: c962335e1aa10ef711c13f4a082ba1c188f726e9ce20afc0c542ef70a69922fe
-requires_joints: [upper_arm, forearm, f_index.01, f_pinky.01]
+requires_joints: [upper_arm, forearm, hand]
 
 markers:
   - {name: shoulder_R, parent_joint: upper_arm.R, mirror: true}
@@ -28,5 +29,5 @@ markers:
   - {name: elbow_med_R, parent_joint: forearm.R, mirror: true}
   - {name: wrist_rad_R, parent_joint: forearm.R, mirror: true}
   - {name: wrist_uln_R, parent_joint: forearm.R, mirror: true}
-  - {name: index_R, parent_joint: f_index.01.R, mirror: true}
-  - {name: pinky_R, parent_joint: f_pinky.01.R, mirror: true}
+  - {name: index_R, parent_joint: hand.R, mirror: true}
+  - {name: pinky_R, parent_joint: hand.R, mirror: true}

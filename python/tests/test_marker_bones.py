@@ -81,3 +81,35 @@ def test_marker_track_needs_two_cameras_at_the_same_time():
     }
     times, points = marker_track(obs, states)
     assert len(times) == 1 and np.allclose(points[0], X, atol=1e-6)
+
+
+def test_a_fit_is_decisive_only_when_clearly_the_best_bone():
+    from posetrak.markers.bones import BoneFit
+    from posetrak.markers.calibrate import GroupFit
+
+    def fit(joint, spread):
+        return BoneFit(joint, spread, np.zeros(3), 100)
+
+    clear = GroupFit((0, 6), [], 100, [fit("shin.R", 0.005), fit("thigh.R", 0.012)])
+    close = GroupFit((0, 6), [], 100, [fit("shin.R", 0.005), fit("foot.R", 0.006)])
+    loose = GroupFit((0, 6), [], 100, [fit("shin.R", 0.05), fit("thigh.R", 0.2)])
+    assert clear.decisive().joint == "shin.R"
+    assert close.decisive() is None      # a neighbouring bone fits almost as well
+    assert loose.decisive() is None      # not rigid enough on any bone
+
+
+def test_votes_of_different_windows_for_the_same_place_are_clustered():
+    from posetrak.markers.bones import BoneFit
+    from posetrak.markers.calibrate import GroupFit, cluster_votes
+
+    def vote(window, joint, offset):
+        return GroupFit(window, [], 100, [BoneFit(joint, 0.004, np.array(offset), 100), BoneFit("hips", 0.05, np.zeros(3), 100)])
+
+    clusters = cluster_votes([
+        vote((0, 6), "shin.R", [0.0, 0.05, 0.10]),
+        vote((3, 9), "shin.R", [0.005, 0.052, 0.10]),   # same marker, a different window
+        vote((3, 9), "shin.R", [0.0, -0.05, 0.10]),     # the medial one, 10 cm away
+        vote((6, 12), "thigh.R", [0.0, 0.05, 0.10]),    # same offset, other bone
+    ])
+    by_joint = sorted((c.joint, len(c.windows)) for c in clusters)
+    assert by_joint == [("shin.R", 1), ("shin.R", 2), ("thigh.R", 1)]

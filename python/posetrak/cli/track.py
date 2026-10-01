@@ -174,7 +174,34 @@ def _build_run_config(
                 vals["cross_pair_max_n"],
             ),
         )
+        if base_config_id is not None:
+            _copy_remaining_config_columns(conn, base_config_id, config_id)
     return config_id
+
+
+def _copy_remaining_config_columns(
+    conn: sqlite3.Connection, base_config_id: str, new_config_id: str,
+) -> None:
+    """Carry every tracker_configs column the run row did not set itself (dot
+    assignment, streak, segmentation-mask settings, ...) over from the base
+    config, so a run made from a base config uses all of its settings and
+    columns added later are not silently dropped. Columns the CLI overrides
+    (_CONFIG_DEFAULTS) and the row's own identity columns are left alone."""
+    own = set(_CONFIG_DEFAULTS) | {
+        "id", "name", "parent_id", "created_at", "notes",
+        "velocity_mode_camera_ids", "use_relative_observations", "relative_min_confidence",
+        "cross_pair_max_px", "cross_pair_max_n",
+    }
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(tracker_configs)") if r[1] not in own]
+    if not cols:
+        return
+    assignments = ", ".join(
+        f"{c} = (SELECT {c} FROM tracker_configs WHERE id = :base)" for c in cols
+    )
+    conn.execute(
+        f"UPDATE tracker_configs SET {assignments} WHERE id = :new",
+        {"base": base_config_id, "new": new_config_id},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +220,7 @@ def _build_run_config(
 @click.option("--no-smooth", is_flag=True, default=False, help="Disable RTS smoothing.")
 @click.option("--binary", default=None, help="Path to posetrak-tracker binary.")
 @click.option("--seg-run", "seg_run", default=None, help="Segmentation (seg_quality_runs) ID (prefix accepted) whose masks gate dot-assignment trust for the tracked subject; needs the tracker config's dot_seg_mask_enabled. The subject's mask label is looked up in the subject registry.")
+@click.option("--trace-steps", "trace_steps", nargs=2, type=int, default=None, metavar="FIRST LAST", help="Record the full dot-assignment decision trace (every candidate considered per marker slot, its cost, what excluded it, whether it won) for tracker steps FIRST..LAST (inclusive) into tracking_assignment_trace. Keep the range narrow. Step 0 is the run's start time; steps follow the tracker frame rate.")
 @click.option("--seg-label", "seg_label", default=None, type=int, help="Override the mask label looked up for --seg-run (e.g. for a label not yet mapped to a subject).")
 # Config parameter overrides
 @click.option("--process-noise-std", default=None, type=float, help="Process noise std (rad/s²). Default 0.1.")
@@ -220,6 +248,7 @@ def cmd_run(
     no_smooth: bool,
     binary: str | None,
     seg_run: str | None,
+    trace_steps: tuple[int, int] | None,
     seg_label: int | None,
     process_noise_std: float | None,
     process_vel_noise_std: float | None,
@@ -377,6 +406,7 @@ def cmd_run(
         smooth=not no_smooth,
         seg_run_id=seg_run_id,
         seg_mask_label=seg_label,
+        trace_assignment_steps=trace_steps,
         on_progress=lambda line: click.echo(line, err=True),
     )
 

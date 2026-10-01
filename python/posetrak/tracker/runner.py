@@ -98,6 +98,7 @@ def run_tracker(
     smooth: bool = True,
     seg_run_id: str | None = None,
     seg_mask_label: int | None = None,
+    trace_assignment_steps: tuple[int, int] | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> TrackerResult:
     """Run the posetrak-tracker binary as a subprocess.
@@ -170,6 +171,11 @@ def run_tracker(
         args.append("--smooth")
     if seg_run_id is not None and seg_mask_label is not None:
         args += ["--seg-run-id", seg_run_id, "--seg-mask-label", str(seg_mask_label)]
+    if trace_assignment_steps is not None:
+        args += [
+            "--trace-assignment-start", str(trace_assignment_steps[0]),
+            "--trace-assignment-end", str(trace_assignment_steps[1]),
+        ]
 
     run_id: str | None = None
 

@@ -907,3 +907,29 @@ class TestRunPersonsWithObjects:
         )
         assert result.exit_code == 0, result.output
         assert [s.seed_position for s in mock_run.call_args.args[1]] == [None, (1.0, 2.0, 3.0), None]
+
+
+def test_a_run_config_made_from_a_base_keeps_every_other_setting(tmp_path):
+    """Settings the CLI does not override (dot assignment, segmentation mask, ...)
+    must be carried over from the base config, not reset to defaults."""
+    from posetrak.cli.track import _build_run_config
+    from posetrak.db.db import create_session
+
+    conn = create_session(tmp_path / "s.db")
+    conn.execute(
+        "INSERT INTO tracker_configs (id, name, created_at, dot_seg_mask_enabled,"
+        " dot_seg_mask_hard_distance_px, dot_assignment_gate_mahalanobis, outlier_threshold)"
+        " VALUES ('base', 'b', '2026-01-01', 1, 70.0, 12.5, 6.0)"
+    )
+    new_id = _build_run_config(
+        conn, base_config_id="base", process_noise_std=None, process_noise_vel_std=None,
+        velocity_half_life_s=None, measurement_noise_std=None, pose_noise_std=None,
+        outlier_threshold=9.0, tracker_fps=None, use_relative_obs=False,
+        relative_min_conf=None, cross_pair_radius=None, cross_pair_max_n=None,
+        velocity_cam_labels=None, sequence_cameras=[],
+    )
+    row = conn.execute("SELECT * FROM tracker_configs WHERE id = ?", (new_id,)).fetchone()
+    assert (row["dot_seg_mask_enabled"], row["dot_seg_mask_hard_distance_px"]) == (1, 70.0)
+    assert row["dot_assignment_gate_mahalanobis"] == 12.5
+    assert row["outlier_threshold"] == 9.0   # the CLI override still wins
+    assert row["parent_id"] == "base"

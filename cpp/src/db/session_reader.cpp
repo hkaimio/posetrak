@@ -638,7 +638,11 @@ SessionReader::load_cameras(std::string const& session_id,
     Stmt cam_stmt(db_,
                   "SELECT ci.id, ci.label,"
                   "       ic.fx, ic.fy, ic.cx, ic.cy, ic.dist_coeffs, ic.distortion_model,"
-                  "       COALESCE(cm.width_px, 0), COALESCE(cm.height_px, 0), ic.matrix_original"
+                  // The calibration's own image size, which fx/cx apply to, wins over the
+                  // camera mode's declared size (a mode entered with a wrong width would
+                  // otherwise mis-scale everything that maps native pixels, such as masks).
+                  "       COALESCE(ic.image_width, cm.width_px, 0),"
+                  "       COALESCE(ic.image_height, cm.height_px, 0), ic.matrix_original"
                   " FROM capture_videos sv"
                   " JOIN captures sh ON sh.id = sv.shot_id"
                   " JOIN sync_configs scfg ON scfg.shot_id = sh.id"

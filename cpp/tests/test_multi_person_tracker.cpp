@@ -186,7 +186,8 @@ void create_fixture_db(fs::path const& path, int num_frames, double dt) {
             calibrated_at TEXT NOT NULL, calibration_tool TEXT,
             distortion_model TEXT NOT NULL DEFAULT 'radtan',
             fx REAL NOT NULL, fy REAL NOT NULL, cx REAL NOT NULL, cy REAL NOT NULL,
-            dist_coeffs BLOB, rms_error REAL, notes TEXT, matrix_original BLOB
+            dist_coeffs BLOB, rms_error REAL, notes TEXT, matrix_original BLOB,
+            image_width INTEGER, image_height INTEGER
         );
     )");
     exec_sql(db, R"(

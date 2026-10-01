@@ -128,7 +128,9 @@ static void create_fixture_db() {
             dist_coeffs BLOB,
             rms_error REAL,
             notes TEXT,
-            matrix_original BLOB
+            matrix_original BLOB,
+            image_width INTEGER,
+            image_height INTEGER
         );
     )");
     exec_sql(db, R"(
@@ -806,6 +808,28 @@ TEST_CASE("SessionReader load_sequence_info", "[session_reader]") {
     auto info = reader.load_sequence_info("seq1");
     REQUIRE(info.time_start_s == Catch::Approx(0.0));
     REQUIRE(info.time_end_s == Catch::Approx(1.0));
+}
+
+TEST_CASE("SessionReader load_cameras: the calibration's image size wins over the camera mode's",
+          "[session_reader]") {
+    auto db_path = ensure_fixture();
+    auto copy = db_path.parent_path() / "session_reader_mode_mismatch.db";
+    fs::copy_file(db_path, copy, fs::copy_options::overwrite_existing);
+    {
+        sqlite3* db = nullptr;
+        REQUIRE(sqlite3_open(copy.string().c_str(), &db) == SQLITE_OK);
+        exec_sql(db, "UPDATE camera_modes SET width_px = 1950;");
+        exec_sql(db, "UPDATE intrinsics_calibrations SET image_width = 1920, image_height = 1080;");
+        sqlite3_close(db);
+    }
+    {
+        SessionReader reader(copy.string());
+        auto const cameras = reader.load_cameras("sess1", "ec1", "sc1");
+        REQUIRE(cameras.at("cam1").intrinsics().width == 1920);
+        REQUIRE(cameras.at("cam1").intrinsics().height == 1080);
+    }
+    std::error_code ignored;
+    fs::remove(copy, ignored);
 }
 
 TEST_CASE("SessionReader load_cameras", "[session_reader]") {

@@ -4259,8 +4259,8 @@ class PersonCropGridWidget(QWidget):
             ).fetchone()
             self._seg_sources[svid] = row_sq["seg_quality_run_id"] if row_sq else None
             dim_row = self._conn.execute(
-                "SELECT COALESCE(cm.width_px, ic.image_width) AS vw, "
-                "       COALESCE(cm.height_px, ic.image_height) AS vh "
+                "SELECT COALESCE(ic.image_width, cm.width_px) AS vw, "
+                "       COALESCE(ic.image_height, cm.height_px) AS vh "
                 "FROM capture_videos cv "
                 "LEFT JOIN camera_modes cm ON cm.id = cv.camera_mode_id "
                 "LEFT JOIN intrinsics_calibrations ic ON ic.id = cv.intrinsics_calibration_id "

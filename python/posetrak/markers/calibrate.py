@@ -5,10 +5,17 @@
 """calibrate.py — find where a person's markers sit on the skeleton, from a calibration trial.
 
 Per time window the dot tracklets on the person are grouped into physical markers
-(grouping.py), each marker's 3D track is fitted to the bones the catalog allows
-(bones.py), and a marker whose track is clearly rigid in one bone's frame votes for
-that bone and offset. Votes from many windows are then clustered into candidate
-markers, each a bone and an offset in the bone's frame.
+(grouping.py) and each marker's 3D track is kept. A track is then tested against
+the slots of the catalog: it can be slot S if it is rigid in the frame of S's parent
+bone (little spread) and its mean position there lies near where S is expected
+along the bone (the slot's ``along``). Tests from many windows are clustered into
+candidate markers, each a bone and an offset in the bone's frame.
+
+The markerless skeleton is only good to about a centimetre and neighbouring bones
+barely move against each other in many poses, so a track alone does not name its
+bone; the expected place along the bone is what separates, say, a knee marker from
+a thigh one. Slots of one bone that share the same place (knee_lat and knee_med)
+are not told apart here: they come out as an unordered set for review.
 """
 from __future__ import annotations
 
@@ -19,15 +26,46 @@ import numpy as np
 
 from app.setup.extrinsics_solver import CamCalibState
 from posetrak.calibration.session_cameras import load_camera_states, load_sync_table
-from posetrak.markers.bones import BodyPose, BoneFit, fit_bones, marker_observations, marker_track
-from posetrak.markers.catalog import MarkerModule
+from posetrak.markers.bones import BodyPose, fit_bones, marker_observations, marker_track
+from posetrak.markers.catalog import MarkerModule, Slot
 from posetrak.markers.grouping import build_groups
 from posetrak.markers.tracklets import SubjectMasks, collect_tracklets, filter_tracklets
 
+MAX_SPREAD_M = 0.03      # a track this loose in a bone's frame is not rigid on that bone
+MAX_ANCHOR_DIST_M = 0.12  # nor can it be a slot this far from where the slot is expected
 
-def parent_joints(modules: list[MarkerModule]) -> list[str]:
-    """The distinct joints the modules' markers ride on."""
-    return sorted({slot.parent_joint for module in modules for slot in module.slots})
+
+def slots_of(modules: list[MarkerModule]) -> list[Slot]:
+    """Every marker of the modules that has a coarse place along its bone."""
+    return [slot for module in modules for slot in module.slots if slot.along is not None]
+
+
+def bone_length(pose: BodyPose, joint: str) -> float:
+    """Length of the bone of *joint*: its tip offset, or for a joint without one (the pelvis)
+    the offset of its first child."""
+    joints = {j.name: j for j in pose.layout.joints}
+    info = joints.get(joint)
+    if info is not None and info.bone_tip_offset is not None:
+        return float(np.linalg.norm(info.bone_tip_offset))
+    for child in joints.values():
+        if child.parent == joint:
+            return float(np.linalg.norm(child.offset))
+    raise KeyError(f"no bone length for joint {joint!r}")
+
+
+def anchor(pose: BodyPose, slot: Slot) -> np.ndarray:
+    """Where the slot is expected in its parent bone's frame (a bone runs along local y)."""
+    return np.array([0.0, slot.along * bone_length(pose, slot.parent_joint), 0.0])
+
+
+@dataclass
+class GroupTrack:
+    """The 3D track of one marker (a group of tracklets) in one window."""
+
+    window: tuple[float, float]
+    members: list[tuple[str, int]]
+    times: np.ndarray
+    points: np.ndarray
 
 
 @dataclass
@@ -40,7 +78,7 @@ class CalibrationContext:
     svid_by_cam: dict[str, str]
     masks: SubjectMasks
     pose: BodyPose
-    parents: list[str]
+    slots: list[Slot]
 
 
 def open_context(
@@ -61,30 +99,12 @@ def open_context(
     masks = SubjectMasks(conn, seg_run_id, mask_label, mask_margin_px, native)
     return CalibrationContext(
         conn, shot_id, detection_run_id, states, sync_table, svid_by_cam, masks,
-        BodyPose(conn, tracking_run_id), parent_joints(modules),
+        BodyPose(conn, tracking_run_id), slots_of(modules),
     )
 
 
-@dataclass
-class GroupFit:
-    """One marker (a group of tracklets) in one window, fitted to the allowed bones."""
-
-    window: tuple[float, float]
-    members: list[tuple[str, int]]
-    n_samples: int
-    fits: list[BoneFit] = field(default_factory=list)   # best (least spread) first
-
-    def decisive(self, max_spread_m: float = 0.02, margin: float = 1.4) -> BoneFit | None:
-        """The best bone if its spread is small and clearly below the runner-up's."""
-        if not self.fits or self.fits[0].spread_m > max_spread_m:
-            return None
-        if len(self.fits) > 1 and self.fits[1].spread_m < margin * self.fits[0].spread_m:
-            return None
-        return self.fits[0]
-
-
-def fit_window(ctx: CalibrationContext, t0: float, t1: float, *, min_samples: int = 30) -> list[GroupFit]:
-    """Group the person's tracklets of [t0, t1] and fit each group to the allowed bones."""
+def window_tracks(ctx: CalibrationContext, t0: float, t1: float, *, min_samples: int = 30) -> list[GroupTrack]:
+    """Group the person's tracklets of [t0, t1] and triangulate each group."""
     filtered = {}
     for cam_id, svid in ctx.svid_by_cam.items():
         if cam_id not in ctx.states:
@@ -99,39 +119,77 @@ def fit_window(ctx: CalibrationContext, t0: float, t1: float, *, min_samples: in
     for group in groups:
         observations = marker_observations(group["members"], filtered, ctx.sync_table, ctx.svid_by_cam)
         times, points = marker_track(observations, ctx.states)
-        if len(times) < min_samples:
-            continue
-        out.append(GroupFit((t0, t1), group["members"], len(times),
-                            fit_bones(times, points, ctx.pose, ctx.parents)))
+        if len(times) >= min_samples:
+            out.append(GroupTrack((t0, t1), group["members"], times, points))
     return out
 
 
 @dataclass
+class SlotTest:
+    """A track tested against one slot: how rigid it is on the slot's bone and where it sits."""
+
+    slot: str
+    joint: str
+    spread_m: float
+    anchor_dist_m: float
+    offset: np.ndarray
+    samples: int
+
+    @property
+    def cost(self) -> float:
+        return self.spread_m / 0.01 + self.anchor_dist_m / 0.05
+
+
+def test_track(ctx: CalibrationContext, track: GroupTrack) -> list[SlotTest]:
+    """The slots the track could be, best first."""
+    by_joint: dict[str, object] = {}
+    tests = []
+    for slot in ctx.slots:
+        if slot.parent_joint not in by_joint:
+            fits = fit_bones(track.times, track.points, ctx.pose, [slot.parent_joint])
+            by_joint[slot.parent_joint] = fits[0] if fits else None
+        fit = by_joint[slot.parent_joint]
+        if fit is None or fit.spread_m > MAX_SPREAD_M:
+            continue
+        dist = float(np.linalg.norm(fit.offset - anchor(ctx.pose, slot)))
+        if dist <= MAX_ANCHOR_DIST_M:
+            tests.append(SlotTest(slot.name, slot.parent_joint, fit.spread_m, dist, fit.offset, fit.n))
+    return sorted(tests, key=lambda t: t.cost)
+
+
+@dataclass
 class MarkerCandidate:
-    """Votes for one marker: a bone and an offset in its frame."""
+    """Votes for one marker: a bone and an offset in its frame, and the slots it could be."""
 
     joint: str
     offset: np.ndarray
+    slots: set[str]
     votes: int = 0
     samples: int = 0
     windows: set = field(default_factory=set)
 
 
-def cluster_votes(group_fits: list[GroupFit], offset_tol_m: float = 0.03) -> list[MarkerCandidate]:
-    """Cluster the decisive fits of many windows by bone and offset. Largest support first."""
+def cluster_tests(tests: list[tuple[GroupTrack, list[SlotTest]]], offset_tol_m: float = 0.03) -> list[MarkerCandidate]:
+    """Cluster the best bone of each track, over many windows, by bone and offset.
+
+    A track whose slot tests name two bones with equal cost (a forearm and hand marker
+    near the wrist) votes for the cheaper one. Largest support first.
+    """
     clusters: list[MarkerCandidate] = []
-    for gf in group_fits:
-        best = gf.decisive()
-        if best is None:
+    for track, slot_tests in tests:
+        if not slot_tests:
             continue
+        best = slot_tests[0]
+        slots = {t.slot for t in slot_tests if t.joint == best.joint and t.cost <= best.cost * 1.5 + 0.5}
         for cand in clusters:
             if cand.joint == best.joint and np.linalg.norm(cand.offset - best.offset) <= offset_tol_m:
-                total = cand.samples + gf.n_samples
-                cand.offset = (cand.offset * cand.samples + best.offset * gf.n_samples) / total
+                total = cand.samples + best.samples
+                cand.offset = (cand.offset * cand.samples + best.offset * best.samples) / total
                 cand.samples = total
                 cand.votes += 1
-                cand.windows.add(gf.window)
+                cand.windows.add(track.window)
+                cand.slots &= slots or cand.slots
                 break
         else:
-            clusters.append(MarkerCandidate(best.joint, best.offset.copy(), 1, gf.n_samples, {gf.window}))
+            clusters.append(MarkerCandidate(best.joint, best.offset.copy(), slots, 1, best.samples, {track.window}))
     return sorted(clusters, key=lambda c: (-len(c.windows), -c.samples))

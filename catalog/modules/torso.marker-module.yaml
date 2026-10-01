@@ -30,16 +30,16 @@ requires_joints: [hips, spine1, spine2, neck1, shoulder]
 
 markers:
   # Pelvis: front-left, front-right and a back midline marker.
-  - {name: asis_R, parent_joint: hips}
-  - {name: asis_L, parent_joint: hips}
-  - {name: sacrum, parent_joint: hips}
+  - {name: asis_R, parent_joint: hips, along: 0.4}
+  - {name: asis_L, parent_joint: hips, along: 0.4}
+  - {name: sacrum, parent_joint: hips, along: 0.3}
   # Spine: one back midline marker per segment, plus a front chest pair on
   # spine2 (spine1 has no front marker -- unreachable/not worn there).
-  - {name: spine1_back, parent_joint: spine1}
-  - {name: spine2_back, parent_joint: spine2}
-  - {name: chest_R, parent_joint: spine2}
-  - {name: chest_L, parent_joint: spine2}
+  - {name: spine1_back, parent_joint: spine1, along: 0.5}
+  - {name: spine2_back, parent_joint: spine2, along: 0.5}
+  - {name: chest_R, parent_joint: spine2, along: 0.7}
+  - {name: chest_L, parent_joint: spine2, along: 0.7}
   # Neck: single back marker.
-  - {name: neck_back, parent_joint: neck1}
+  - {name: neck_back, parent_joint: neck1, along: 0.5}
   # Shoulder girdle (clavicle attachment), front.
-  - {name: clavicle_R, parent_joint: shoulder.R, mirror: true}
+  - {name: clavicle_R, parent_joint: shoulder.R, along: 0.8, mirror: true}

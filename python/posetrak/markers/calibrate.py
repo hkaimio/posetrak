@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from scipy.optimize import linear_sum_assignment
+
 from app.setup.extrinsics_solver import CamCalibState
 from posetrak.calibration.session_cameras import load_camera_states, load_sync_table
 from posetrak.markers.bones import BodyPose, fit_bones, marker_observations, marker_track
@@ -193,3 +195,96 @@ def cluster_tests(tests: list[tuple[GroupTrack, list[SlotTest]]], offset_tol_m: 
         else:
             clusters.append(MarkerCandidate(best.joint, best.offset.copy(), slots, 1, best.samples, {track.window}))
     return sorted(clusters, key=lambda c: (-len(c.windows), -c.samples))
+
+
+@dataclass
+class Chain:
+    """A marker's 3D track and the windows it comes from."""
+
+    windows: list[tuple[float, float]]
+    members: set[tuple[str, int]]
+    times: np.ndarray
+    points: np.ndarray
+
+
+@dataclass
+class ChainFit:
+    chain: Chain
+    tests: list[SlotTest]       # the slots the track could be, best first
+
+
+@dataclass
+class Placement:
+    """A slot's calibrated place: a bone and an offset, and how sure it is."""
+
+    slot: str
+    joint: str
+    offset: np.ndarray
+    spread_m: float
+    samples: int
+    chains: int
+    runner_up: str | None = None       # the next best slot for the same markers
+    runner_up_margin: float = 0.0      # its extra cost; small means the two are hard to tell apart
+
+
+def fit_tracks(ctx: CalibrationContext, tracks: list[GroupTrack]) -> list[ChainFit]:
+    """Test every track against the slots."""
+    return [
+        ChainFit(Chain([t.window], set(t.members), t.times, t.points), test_track(ctx, t)) for t in tracks
+    ]
+
+
+def assign_slots(ctx: CalibrationContext, fits: list[ChainFit], offset_tol_m: float = 0.03,
+                 unassigned_cost: float = 8.0) -> tuple[list[Placement], list[MarkerCandidate]]:
+    """Give each slot at most one cluster of chains, and each cluster at most one slot.
+
+    Chains are clustered by the bone and offset of their best slot; the clusters are then
+    matched to slots by cost (rigidity on the slot's bone plus distance from its expected
+    place), best overall, so that one marker cannot fill two slots and two markers on one
+    bone take different slots. Returns the placements and the clusters left without a slot.
+    """
+    clusters: list[tuple[MarkerCandidate, dict[str, SlotTest], list[float]]] = []
+    for cf in fits:
+        if not cf.tests:
+            continue
+        best = cf.tests[0]
+        for cand, tests, spreads in clusters:
+            if cand.joint == best.joint and np.linalg.norm(cand.offset - best.offset) <= offset_tol_m:
+                total = cand.samples + best.samples
+                cand.offset = (cand.offset * cand.samples + best.offset * best.samples) / total
+                cand.samples = total
+                cand.votes += 1
+                cand.windows.update(cf.chain.windows)
+                spreads.append(best.spread_m)
+                for t in cf.tests:
+                    if t.slot not in tests or t.cost < tests[t.slot].cost:
+                        tests[t.slot] = t
+                break
+        else:
+            clusters.append((MarkerCandidate(best.joint, best.offset.copy(), set(), 1, best.samples,
+                                              set(cf.chain.windows)),
+                             {t.slot: t for t in cf.tests}, [best.spread_m]))
+    slot_names = [s.name for s in ctx.slots]
+    n_c, n_s = len(clusters), len(slot_names)
+    big = 1e6
+    cost = np.full((n_c, n_s + n_c), big)
+    for i, (cand, tests, _) in enumerate(clusters):
+        for j, name in enumerate(slot_names):
+            if name in tests:
+                cost[i, j] = tests[name].cost / (1.0 + 0.3 * np.log10(max(cand.samples, 100) / 100.0))
+        cost[i, n_s + i] = unassigned_cost            # left without a slot
+    rows, cols = linear_sum_assignment(cost)
+    placements, leftover = [], []
+    for i, j in zip(rows, cols):
+        cand, tests, spreads = clusters[i]
+        if j >= n_s:
+            leftover.append(cand)
+            continue
+        name = slot_names[j]
+        others = sorted((t for t in tests.values() if t.slot != name), key=lambda t: t.cost)
+        placements.append(Placement(
+            name, tests[name].joint, tests[name].offset, tests[name].spread_m, cand.samples, cand.votes,
+            others[0].slot if others else None,
+            (others[0].cost - tests[name].cost) if others else 99.0,
+        ))
+    return sorted(placements, key=lambda p: p.slot), sorted(leftover, key=lambda c: -c.samples)

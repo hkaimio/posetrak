@@ -132,3 +132,28 @@ def test_single_camera_fit_recovers_the_offset_when_the_bone_turns():
     pixels = np.array([_project(state, (pose.joint_frames(t)["moving"] @ np.append(offset, 1.0))[:3]) for t in times])
     fit = fit_offset_from_rays(times, pixels, state, pose, "moving", prior=np.array([0.0, 0.0, 0.0]))
     assert np.linalg.norm(fit.offset - offset) < 0.01 and fit.reproj_rms_px < 0.5
+
+
+def test_one_marker_fills_one_slot_and_two_markers_on_one_bone_take_different_slots():
+    from types import SimpleNamespace
+
+    from posetrak.markers.calibrate import CalibrationContext, Chain, ChainFit, SlotTest, assign_slots
+    from posetrak.markers.catalog import Slot
+
+    ctx = CalibrationContext(None, "", "", {}, None, {}, None, None,
+                             [Slot("knee_lat_R", "shin.R", along=0.0), Slot("knee_med_R", "shin.R", along=0.0),
+                              Slot("hip_R", "thigh.R", along=0.0)])
+
+    def fit(window, tests):
+        return ChainFit(Chain([window], set(), np.zeros(0), np.zeros((0, 3))), tests)
+
+    def test(slot, joint, offset, cost_dist):
+        return SlotTest(slot, joint, 0.005, cost_dist, np.array(offset), 200)
+
+    a = [test("knee_lat_R", "shin.R", [0.05, 0, 0], 0.02), test("knee_med_R", "shin.R", [0.05, 0, 0], 0.03)]
+    b = [test("knee_lat_R", "shin.R", [-0.05, 0, 0], 0.02), test("knee_med_R", "shin.R", [-0.05, 0, 0], 0.025)]
+    c = [test("hip_R", "thigh.R", [0.0, 0.05, 0.0], 0.02), test("knee_lat_R", "thigh.R", [0.0, 0.05, 0.0], 0.1)]
+    placements, left = assign_slots(ctx, [fit((0, 6), a), fit((3, 9), a), fit((0, 6), b), fit((0, 6), c)])
+    got = {p.slot: p.offset[0] for p in placements}
+    assert sorted(got) == ["hip_R", "knee_lat_R", "knee_med_R"]     # every slot once
+    assert got["knee_lat_R"] != got["knee_med_R"] and not left      # the two markers got different slots

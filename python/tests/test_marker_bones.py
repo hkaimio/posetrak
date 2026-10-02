@@ -157,3 +157,39 @@ def test_one_marker_fills_one_slot_and_two_markers_on_one_bone_take_different_sl
     got = {p.slot: p.offset[0] for p in placements}
     assert sorted(got) == ["hip_R", "knee_lat_R", "knee_med_R"]     # every slot once
     assert got["knee_lat_R"] != got["knee_med_R"] and not left      # the two markers got different slots
+
+
+def test_names_ask_for_directions_relative_to_the_limbs_own_side():
+    from posetrak.markers.catalog import Slot
+    from posetrak.markers.naming import role_direction
+
+    assert role_direction(Slot("knee_lat_R", "shin.R")) == (1.0, 0.0)
+    assert role_direction(Slot("knee_lat_L", "shin.L")) == (-1.0, 0.0)     # lateral is away from the midline
+    assert role_direction(Slot("knee_med_L", "shin.L")) == (1.0, 0.0)
+    assert role_direction(Slot("knee_front_R", "shin.R")) == (0.0, 1.0)
+    assert role_direction(Slot("toe_pinky_L", "foot.L")) == (-1.0, 0.0)    # the little toe is lateral
+    assert role_direction(Slot("toe_L", "foot.L")) == (1.0, 0.0)
+    assert role_direction(Slot("temple_L", "head")) == (-1.0, 0.0)
+    assert role_direction(Slot("sacrum", "hips")) == (0.0, -1.0)
+    assert role_direction(Slot("wrist_rad_R", "forearm.R")) is None        # depends on how the hand is held
+
+
+def test_a_disagreeing_direction_costs_and_an_agreeing_one_does_not():
+    from types import SimpleNamespace
+
+    from posetrak.markers.catalog import Slot
+    from posetrak.markers.naming import direction_penalty
+
+    # a pose where the bone stands upright and the body faces +y (right is +x)
+    frames = {"shoulder.R": np.eye(4), "shoulder.L": np.eye(4), "bone": np.eye(4)}
+    frames["shoulder.R"][:3, 3] = [0.2, 0, 1.4]
+    frames["shoulder.L"][:3, 3] = [-0.2, 0, 1.4]
+    up_bone = np.eye(4)
+    up_bone[:3, :3] = [[1, 0, 0], [0, 0, -1], [0, 1, 0]]       # local y -> world z (the bone is upright)
+    frames["bone"] = up_bone
+    pose = SimpleNamespace(times=np.array([0.0]), joint_frames=lambda t: frames)
+    lateral = Slot("knee_lat_R", "bone")
+    assert direction_penalty(pose, lateral, "bone", np.array([0.05, 0.0, 0.0])) < 1e-6       # to the right: yes
+    assert direction_penalty(pose, lateral, "bone", np.array([-0.05, 0.0, 0.0])) > 5.9       # to the left: no
+    assert direction_penalty(pose, lateral, "bone", np.array([0.005, 0.0, 0.0])) == 1.5      # hugs the axis
+    assert direction_penalty(pose, Slot("wrist_rad_R", "bone"), "bone", np.array([-0.05, 0, 0])) == 0.0

@@ -235,13 +235,15 @@ def fit_tracks(ctx: CalibrationContext, tracks: list[GroupTrack]) -> list[ChainF
 
 
 def assign_slots(ctx: CalibrationContext, fits: list[ChainFit], offset_tol_m: float = 0.03,
-                 unassigned_cost: float = 8.0) -> tuple[list[Placement], list[MarkerCandidate]]:
+                 unassigned_cost: float = 8.0, extra_cost=None) -> tuple[list[Placement], list[MarkerCandidate]]:
     """Give each slot at most one cluster of chains, and each cluster at most one slot.
 
     Chains are clustered by the bone and offset of their best slot; the clusters are then
     matched to slots by cost (rigidity on the slot's bone plus distance from its expected
     place), best overall, so that one marker cannot fill two slots and two markers on one
-    bone take different slots. Returns the placements and the clusters left without a slot.
+    bone take different slots. *extra_cost*, if given, is called as ``extra_cost(slot, joint,
+    offset)`` and added to a cluster's cost for a slot (see naming.direction_penalty). Returns
+    the placements and the clusters left without a slot.
     """
     clusters: list[tuple[MarkerCandidate, dict[str, SlotTest], list[float]]] = []
     for cf in fits:
@@ -271,7 +273,9 @@ def assign_slots(ctx: CalibrationContext, fits: list[ChainFit], offset_tol_m: fl
     for i, (cand, tests, _) in enumerate(clusters):
         for j, name in enumerate(slot_names):
             if name in tests:
-                cost[i, j] = tests[name].cost / (1.0 + 0.3 * np.log10(max(cand.samples, 100) / 100.0))
+                t = tests[name]
+                extra = extra_cost(ctx.slots[j], t.joint, t.offset) if extra_cost else 0.0
+                cost[i, j] = (t.cost + extra) / (1.0 + 0.3 * np.log10(max(cand.samples, 100) / 100.0))
         cost[i, n_s + i] = unassigned_cost            # left without a slot
     rows, cols = linear_sum_assignment(cost)
     placements, leftover = [], []

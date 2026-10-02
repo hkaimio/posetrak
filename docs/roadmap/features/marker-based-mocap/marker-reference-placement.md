@@ -42,7 +42,16 @@ Code: `posetrak/markers/reference.py` (frames, conversion, writing into modules)
    the files' comments. Left twins are compared with the mirror image of the right-hand
    placement and a difference above 2 cm is reported.
 
-The round trip through Blender reproduces a placement to better than a millimetre.
+The bones' positions come from the armature's *current pose*, not its rest pose, so an
+armature that was posed or animated onto the model (a BVH of a tracking run, aligned to the
+character) works even when its rest pose is not a standing one. The body's right, front and up
+are worked out from the bones, so a scene's axes do not matter (a Blender scene facing -Y with the
+subject's right towards -X is fine).
+
+The round trip through Blender reproduces a placement to better than a millimetre. Placements
+made from a calibration also give a check against the model: the calibrated markers of the first
+full-body calibration lay a median of 1.6 cm from the skin of a Character Creator model of the
+performer, and all but a handful within 4 cm.
 
 ## Use
 

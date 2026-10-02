@@ -13,13 +13,14 @@ file, or a template armature already aligned to the character.
 
 Commands (run inside Blender; arguments follow a ``--``)::
 
-    blender --python blender_marker_reference.py -- build   reference.json [--armature NAME]
-    blender --python blender_marker_reference.py -- snap    MESH_OBJECT
+    blender --python blender_marker_reference.py -- build   reference.json [--armature NAME] [--frame N]
+    blender --python blender_marker_reference.py -- snap    MESH_OBJECT[,MESH_OBJECT...]
     blender --python blender_marker_reference.py -- export  placements.json [--armature NAME]
 
 build
     Makes an armature from the document's bones if the scene has none named *NAME* (default
-    ``PosetrakReference``), and one marker per slot: a sphere empty at the marker with an arrow
+    ``PosetrakReference``; in a scene with an armature already posed onto the model, pass its name),
+    and one marker per slot: a sphere empty at the marker with an arrow
     along its normal, both under the empty ``mk_<slot>``.
 snap
     Moves every marker to the nearest point of the mesh surface and turns its arrow along the
@@ -29,7 +30,15 @@ export
     Writes each marker's placement on its parent bone: ``along``, ``lateral``, ``anterior``
     and ``normal``, ready for ``posetrak.markers.reference``.
 
-In an interactive session the functions can also be called directly.
+In an interactive session call the functions from Blender's Python console::
+
+    import sys; sys.path.insert(0, r"D:/mocap/posetrak/python/tools/blender")
+    import blender_marker_reference as bmr
+    bmr.snap_to_surface("CC_Body,Boxers")
+    bmr.export("placements.json", "NAME-OF-ARMATURE")
+
+The bones' positions are taken from the armature's current pose, so a BVH of a tracking run posed
+onto the model works as the armature.
 """
 import json
 import sys
@@ -49,10 +58,14 @@ MARKER_PREFIX = "mk_"
 # --------------------------------------------------------------------------------------
 
 def bone_ends(arm, name):
-    """World head and tail of a bone in the armature's rest pose."""
-    bone = arm.data.bones[name]
+    """World head and tail of a bone in the armature's current pose (its rest pose if it has none).
+
+    The pose is what matches the model when the armature was posed or animated onto it (a BVH
+    of a tracking run, say), and the rest pose of such an armature need not be a standing one.
+    """
+    bone = arm.pose.bones[name]
     m = arm.matrix_world
-    return m @ bone.head_local, m @ bone.tail_local
+    return m @ bone.head, m @ bone.tail
 
 
 def body_axes(arm):
@@ -163,20 +176,39 @@ def markers():
     return [o for o in bpy.data.objects if o.name.startswith(MARKER_PREFIX) and not o.name.endswith(".dot")]
 
 
-def snap_to_surface(mesh_name):
-    """Move each marker to the nearest surface point and point its arrow outwards along the normal."""
-    bpy.context.view_layer.update()
-    mesh = bpy.data.objects[mesh_name]
-    to_local = mesh.matrix_world.inverted()
+def nearest_surface(mesh_names, location):
+    """(distance, point, outward normal) of the surface point nearest *location* over the meshes."""
     graph = bpy.context.evaluated_depsgraph_get()
-    for m in markers():
-        ok, point, normal, _ = mesh.closest_point_on_mesh(to_local @ m.matrix_world.translation, depsgraph=graph)
+    best = None
+    for name in mesh_names:
+        mesh = bpy.data.objects[name]
+        to_local = mesh.matrix_world.inverted()
+        ok, point, normal, _ = mesh.closest_point_on_mesh(to_local @ location, depsgraph=graph)
         if not ok:
             continue
-        m.location = mesh.matrix_world @ point
-        world_normal = (mesh.matrix_world.to_3x3() @ normal).normalized()
+        world_point = mesh.matrix_world @ point
+        distance = (world_point - location).length
+        if best is None or distance < best[0]:
+            best = (distance, world_point, (mesh.matrix_world.to_3x3() @ normal).normalized())
+    return best
+
+
+def snap_to_surface(mesh_names):
+    """Move each marker to the nearest surface point of the meshes (a name or a list of names) and
+    point its arrow outwards along the normal. Returns each marker's distance moved."""
+    bpy.context.view_layer.update()
+    if isinstance(mesh_names, str):
+        mesh_names = [n for n in mesh_names.split(",") if n]
+    moved = {}
+    for m in markers():
+        hit = nearest_surface(mesh_names, m.matrix_world.translation)
+        if hit is None:
+            continue
+        moved[m.name[len(MARKER_PREFIX):]] = hit[0]
+        m.location = hit[1]
         m.rotation_mode = "QUATERNION"
-        m.rotation_quaternion = world_normal.to_track_quat("Z", "Y")
+        m.rotation_quaternion = hit[2].to_track_quat("Z", "Y")
+    return moved
 
 
 def export(path, armature_name=DEFAULT_ARMATURE):
@@ -205,12 +237,17 @@ def export(path, armature_name=DEFAULT_ARMATURE):
 def main(argv):
     args = argv[argv.index("--") + 1:] if "--" in argv else []
     if not args:
-        raise SystemExit(__doc__)
+        print(__doc__)           # run from Blender's text editor: the functions above are for the console
+        return
     command, rest = args[0], args[1:]
     name = DEFAULT_ARMATURE
     if "--armature" in rest:
         i = rest.index("--armature")
         name = rest[i + 1]
+        rest = rest[:i] + rest[i + 2:]
+    if "--frame" in rest:
+        i = rest.index("--frame")
+        bpy.context.scene.frame_set(int(rest[i + 1]))
         rest = rest[:i] + rest[i + 2:]
     if command == "build":
         build(rest[0], name)

@@ -36,30 +36,52 @@ def confidence(placement: Placement) -> str:
 def attachment_document(
     placements: list[Placement], pose: BodyPose, *, module: str, topology: str | None,
     topology_hash: str | None, calibration: dict,
+    normals: dict[str, np.ndarray] | None = None,
+    nominal: dict[str, tuple[str, np.ndarray, np.ndarray | None]] | None = None,
+    extras: dict[str, dict] | None = None,
 ) -> str:
-    """The attachment set as YAML text."""
+    """The attachment set as YAML text.
+
+    *normals* gives a marker's outward normal in its bone's frame (from the catalog); a marker
+    without one gets the direction from its bone's axis to it, if it is far enough off the axis.
+    *nominal* gives, for every marker the calibration did not find, its bone, offset and normal as
+    the catalog expects them: they are written with ``confidence: nominal`` so the skeleton still
+    has the marker. *extras* adds fields to a marker's entry.
+    """
     markers = []
-    for p in sorted(placements, key=lambda p: p.slot):
-        offset = np.asarray(p.offset, float)
-        length = bone_length(pose, p.joint)
+    entries = [(p.slot, p.joint, np.asarray(p.offset, float), p) for p in placements]
+    entries += [(name, joint, np.asarray(offset, float), None)
+                for name, (joint, offset, _) in (nominal or {}).items()
+                if name not in {p.slot for p in placements}]
+    for name, joint, offset, p in sorted(entries, key=lambda e: e[0]):
+        length = bone_length(pose, joint)
         across = np.array([offset[0], 0.0, offset[2]])         # a bone runs along its local y
         entry = {
-            "name": p.slot,
-            "parent_joint": p.joint,
+            "name": name,
+            "parent_joint": joint,
             "along": round(float(offset[1] / length), 4),
             "lateral": round(float(offset[0]), 4),
             "anterior": round(float(offset[2]), 4),
             "offset": [round(float(v), 4) for v in offset],
         }
-        if np.linalg.norm(across) >= _MIN_NORMAL_OFFSET_M:
+        normal = (normals or {}).get(name)
+        if normal is None and p is None:
+            normal = nominal[name][2]
+        if normal is not None:
+            entry["normal"] = [round(float(v), 3) for v in np.asarray(normal) / np.linalg.norm(normal)]
+        elif np.linalg.norm(across) >= _MIN_NORMAL_OFFSET_M:
             entry["normal"] = [round(float(v), 3) for v in across / np.linalg.norm(across)]
-        entry.update({
-            "n_samples": int(p.samples),
-            "n_windows": int(p.chains),
-            "spread_mm": round(1000 * float(p.spread_m), 1),
-            "confidence": confidence(p),
-            "runner_up": p.runner_up,
-        })
+        if p is not None:
+            entry.update({
+                "n_samples": int(p.samples),
+                "n_windows": int(p.chains),
+                "spread_mm": round(1000 * float(p.spread_m), 1),
+                "confidence": confidence(p),
+                "runner_up": p.runner_up,
+            })
+        else:
+            entry.update({"n_samples": 0, "confidence": "nominal"})
+        entry.update((extras or {}).get(name, {}))
         markers.append(entry)
     doc = {
         "module": module,

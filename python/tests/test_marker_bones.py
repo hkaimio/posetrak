@@ -264,3 +264,24 @@ def test_a_slot_with_a_full_placement_is_expected_where_the_reference_body_has_i
     # half way down the bone, 6 cm in front of it: in the bone's own frame 0.25 m along y
     assert abs(offset[1] - 0.25) < 1e-9 and abs(np.linalg.norm(offset) - np.hypot(0.25, 0.06)) < 1e-9
     assert abs(np.linalg.norm(normal) - 1.0) < 1e-9
+
+
+def test_the_attachment_set_keeps_markers_the_calibration_did_not_find_at_their_reference_place():
+    import yaml
+    from types import SimpleNamespace
+
+    from posetrak.markers.attachment import attachment_document
+    from posetrak.markers.calibrate import Placement
+
+    layout = SimpleNamespace(joints=[SimpleNamespace(name="shin.R", parent="thigh.R", bone_tip_offset=np.array([0, 0.4, 0]),
+                                                      offset=np.zeros(3))])
+    pose = SimpleNamespace(layout=layout)
+    found = Placement("knee_lat_R", "shin.R", np.array([0.05, 0.02, 0.0]), 0.004, 800, 5)
+    nominal = {"knee_lat_R": ("shin.R", np.array([0.04, 0.0, 0.0]), None),
+               "knee_front_R": ("shin.R", np.array([0.0, 0.0, 0.06]), np.array([0.0, 0.0, 1.0]))}
+    doc = yaml.safe_load(attachment_document([found], pose, module="m", topology=None, topology_hash=None,
+                                             calibration={}, nominal=nominal,
+                                             normals={"knee_lat_R": np.array([1.0, 0.0, 0.0])}))
+    by_name = {m["name"]: m for m in doc["markers"]}
+    assert by_name["knee_lat_R"]["offset"] == [0.05, 0.02, 0.0] and by_name["knee_lat_R"]["confidence"] == "high"
+    assert by_name["knee_front_R"]["confidence"] == "nominal" and by_name["knee_front_R"]["normal"] == [0.0, 0.0, 1.0]

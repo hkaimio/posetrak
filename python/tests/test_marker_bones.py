@@ -193,3 +193,47 @@ def test_a_disagreeing_direction_costs_and_an_agreeing_one_does_not():
     assert direction_penalty(pose, lateral, "bone", np.array([-0.05, 0.0, 0.0])) > 5.9       # to the left: no
     assert direction_penalty(pose, lateral, "bone", np.array([0.005, 0.0, 0.0])) == 1.5      # hugs the axis
     assert direction_penalty(pose, Slot("wrist_rad_R", "bone"), "bone", np.array([-0.05, 0, 0])) == 0.0
+
+
+def test_reference_placement_round_trips_and_mirroring_negates_the_lateral_part():
+    from posetrak.markers.reference import body_axes, from_reference, to_reference
+
+    right, front, up = body_axes(np.array([0.2, 0, 1.4]), np.array([-0.2, 0, 1.4]), np.array([0, 0.05, 0.6]))
+    assert np.allclose(right, [1, 0, 0]) and np.allclose(front @ up, 0, atol=1e-9)
+    head_r, tail_r = np.array([0.1, 0, 0.9]), np.array([0.1, 0.0, 0.45])          # right shin, pointing down
+    head_l, tail_l = np.array([-0.1, 0, 0.9]), np.array([-0.1, 0.0, 0.45])        # its mirror image
+    position = np.array([0.16, 0.03, 0.8])                                         # outside and in front of it
+    normal = np.array([1.0, 0.2, 0.0])
+    placement = to_reference(head_r, tail_r, front, up, position, normal)
+    back, back_normal = from_reference(head_r, tail_r, front, up, placement)
+    assert np.allclose(back, position) and np.allclose(back_normal, normal / np.linalg.norm(normal))
+    mirrored = to_reference(head_l, tail_l, front, up, position * [-1, 1, 1], normal * [-1, 1, 1])
+    assert np.isclose(mirrored["along"], placement["along"]) and np.isclose(mirrored["anterior"], placement["anterior"])
+    assert np.isclose(mirrored["lateral"], -placement["lateral"])
+    assert np.isclose(mirrored["normal"][1], -placement["normal"][1])
+
+
+def test_a_bone_pointing_forward_uses_up_as_its_anterior_direction():
+    from posetrak.markers.reference import bone_frame
+
+    front, up = np.array([0, 1.0, 0]), np.array([0, 0, 1.0])
+    frame = bone_frame(np.zeros(3), np.array([0, 0.15, -0.03]), front, up)          # a foot
+    assert frame[:, 2] @ up > 0.9                                                    # anterior is dorsal
+
+
+def test_placements_are_written_into_a_module_keeping_its_comments_and_other_markers():
+    from posetrak.markers.catalog import load_marker_module
+    from posetrak.markers.reference import apply_placements
+
+    text = (
+        "# a comment\nmodule: m\nmarkers:\n"
+        "  - {name: knee_R, parent_joint: shin.R, along: 0.0, mirror: true}   # lateral\n"
+        "  - {name: nose, parent_joint: head}\n"
+    )
+    new, changed = apply_placements(text, {"knee_R": {"along": 0.05, "lateral": 0.06, "anterior": -0.01,
+                                                      "normal": [0.0, 1.0, 0.1]}})
+    assert changed == ["knee_R"] and "# a comment" in new and "# lateral" in new and "{name: nose, parent_joint: head}" in new
+    module = load_marker_module(new)
+    knee_r, knee_l = module.slots[0], module.slots[1]
+    assert (knee_r.along, knee_r.lateral, knee_r.anterior, knee_r.normal) == (0.05, 0.06, -0.01, (0.0, 1.0, 0.1))
+    assert (knee_l.lateral, knee_l.normal) == (-0.06, (0.0, -1.0, 0.1))        # the mirror image

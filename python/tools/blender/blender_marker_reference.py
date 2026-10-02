@@ -137,6 +137,7 @@ def make_marker(name, location, normal, parent_joint, confidence=None, size=0.01
     dot.empty_display_type = "SPHERE"
     dot.empty_display_size = size
     dot.parent = arrow
+    dot.hide_select = True        # only the arrow is moved; the sphere is just where it is
     bpy.context.scene.collection.objects.link(dot)
     return arrow
 

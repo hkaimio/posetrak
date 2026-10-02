@@ -227,6 +227,7 @@ def export(path, armature_name=DEFAULT_ARMATURE):
             "name": m.name[len(MARKER_PREFIX):],
             "parent_joint": joint,
             "along": p.dot(d) / length,
+            "bone_length": length,
             "lateral": p.dot(lateral),
             "anterior": p.dot(anterior),
             "normal": [n.dot(d), n.dot(lateral), n.dot(anterior)],

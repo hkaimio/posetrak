@@ -21,12 +21,12 @@ requires_topology_hash: c962335e1aa10ef711c13f4a082ba1c188f726e9ce20afc0c542ef70
 requires_joints: [thigh, shin, foot]
 
 markers:
-  - {name: hip_R, parent_joint: thigh.R, along: 0.05, reach: 0.16, mirror: true}
-  - {name: knee_lat_R, parent_joint: shin.R, along: 0.0, mirror: true}
-  - {name: knee_med_R, parent_joint: shin.R, along: 0.0, mirror: true}
-  - {name: knee_front_R, parent_joint: shin.R, along: 0.0, mirror: true}
-  - {name: ankle_lat_R, parent_joint: shin.R, along: 0.93, mirror: true}
-  - {name: ankle_med_R, parent_joint: shin.R, along: 0.93, mirror: true}
-  - {name: heel_R, parent_joint: foot.R, along: -0.3, mirror: true}
-  - {name: toe_R, parent_joint: foot.R, along: 1.0, mirror: true}
-  - {name: toe_pinky_R, parent_joint: foot.R, along: 0.9, mirror: true}
+  - {name: hip_R, parent_joint: thigh.R, along: -0.0132, lateral: 0.0733, anterior: 0.0055, normal: [-0.056, 0.998, 0.002], mirror: true}
+  - {name: knee_lat_R, parent_joint: shin.R, along: 0.0003, lateral: 0.0574, anterior: -0.0099, normal: [0.02, 0.991, 0.129], mirror: true}
+  - {name: knee_med_R, parent_joint: shin.R, along: 0.0049, lateral: -0.0601, anterior: -0.0064, normal: [0.061, -0.997, 0.045], mirror: true}
+  - {name: knee_front_R, parent_joint: shin.R, along: 0.1136, lateral: 0.0044, anterior: 0.0508, normal: [0.271, 0.005, 0.963], mirror: true}
+  - {name: ankle_lat_R, parent_joint: shin.R, along: 0.9787, lateral: 0.0327, anterior: 0.0022, normal: [-0.052, 0.966, -0.253], mirror: true}
+  - {name: ankle_med_R, parent_joint: shin.R, along: 0.9751, lateral: -0.0365, anterior: 0.0037, normal: [-0.059, -0.932, -0.358], mirror: true}
+  - {name: heel_R, parent_joint: foot.R, along: -0.1853, lateral: -0.0168, anterior: -0.0513, normal: [-0.994, 0.04, -0.104], mirror: true}
+  - {name: toe_R, parent_joint: foot.R, along: 1.114, lateral: -0.0392, anterior: 0.0085, normal: [0.046, 0.179, 0.983], mirror: true}
+  - {name: toe_pinky_R, parent_joint: foot.R, along: 1.0324, lateral: 0.0073, anterior: -0.0168, normal: [0.141, 0.703, 0.697], mirror: true}

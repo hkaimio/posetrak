@@ -24,10 +24,10 @@ requires_topology_hash: c962335e1aa10ef711c13f4a082ba1c188f726e9ce20afc0c542ef70
 requires_joints: [upper_arm, forearm, hand]
 
 markers:
-  - {name: shoulder_R, parent_joint: upper_arm.R, along: 0.0, reach: 0.16, mirror: true}
-  - {name: elbow_lat_R, parent_joint: forearm.R, along: 0.0, mirror: true}
-  - {name: elbow_med_R, parent_joint: forearm.R, along: 0.0, mirror: true}
-  - {name: wrist_rad_R, parent_joint: forearm.R, along: 0.95, mirror: true}
-  - {name: wrist_uln_R, parent_joint: forearm.R, along: 0.95, mirror: true}
-  - {name: index_R, parent_joint: hand.R, along: 0.9, mirror: true}
-  - {name: pinky_R, parent_joint: hand.R, along: 0.9, mirror: true}
+  - {name: shoulder_R, parent_joint: upper_arm.R, along: -0.0024, lateral: 0.0482, anterior: -0.0082, normal: [0.03, 0.981, 0.192], mirror: true}
+  - {name: elbow_lat_R, parent_joint: forearm.R, along: 0.0528, lateral: 0.0346, anterior: -0.0009, normal: [-0.153, 0.958, 0.242], mirror: true}
+  - {name: elbow_med_R, parent_joint: forearm.R, along: 0.077, lateral: -0.0482, anterior: -0.001, normal: [-0.135, -0.991, 0.021], mirror: true}
+  - {name: wrist_rad_R, parent_joint: forearm.R, along: 1.1028, lateral: -0.0086, anterior: 0.0393, normal: [-0.324, 0.061, 0.944], mirror: true}
+  - {name: wrist_uln_R, parent_joint: forearm.R, along: 1.1736, lateral: -0.0121, anterior: -0.0243, normal: [-0.014, 0.017, -1.0], mirror: true}
+  - {name: index_R, parent_joint: hand.R, along: 1.4782, lateral: 0.0099, anterior: 0.0262, normal: [0.029, 1.0, 0.003], mirror: true}
+  - {name: pinky_R, parent_joint: hand.R, along: 1.2417, lateral: 0.0075, anterior: -0.0248, normal: [0.05, 0.868, -0.494], mirror: true}

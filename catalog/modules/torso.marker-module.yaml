@@ -30,16 +30,16 @@ requires_joints: [hips, spine1, spine2, neck1, shoulder]
 
 markers:
   # Pelvis: front-left, front-right and a back midline marker.
-  - {name: asis_R, parent_joint: hips, along: 0.4, reach: 0.2}
-  - {name: asis_L, parent_joint: hips, along: 0.4, reach: 0.2}
-  - {name: sacrum, parent_joint: hips, along: 0.3, reach: 0.2}
+  - {name: asis_R, parent_joint: hips, along: 0.2635, lateral: -0.0948, anterior: 0.097, normal: [0.03, -0.428, 0.903]}
+  - {name: asis_L, parent_joint: hips, along: 0.237, lateral: 0.0924, anterior: 0.0963, normal: [0.14, 0.517, 0.844]}
+  - {name: sacrum, parent_joint: hips, along: -0.0947, lateral: -0.0015, anterior: -0.1215, normal: [0.34, 0.137, -0.93]}
   # Spine: one back midline marker per segment, plus a front chest pair on
   # spine2 (spine1 has no front marker -- unreachable/not worn there).
-  - {name: spine1_back, parent_joint: spine1, along: 0.5, reach: 0.22}
-  - {name: spine2_back, parent_joint: spine2, along: 0.5, reach: 0.24}
-  - {name: chest_R, parent_joint: spine2, along: 0.7, reach: 0.24}
-  - {name: chest_L, parent_joint: spine2, along: 0.7, reach: 0.24}
+  - {name: spine1_back, parent_joint: spine1, along: 0.8276, lateral: 0.0002, anterior: -0.1054, normal: [-0.167, -0.039, -0.985]}
+  - {name: spine2_back, parent_joint: spine2, along: 0.4416, lateral: -0.0037, anterior: -0.1282, normal: [-0.169, 0.061, -0.984]}
+  - {name: chest_R, parent_joint: spine2, along: 0.5839, lateral: -0.0901, anterior: 0.1037, normal: [0.19, -0.214, 0.958]}
+  - {name: chest_L, parent_joint: spine2, along: 0.5942, lateral: 0.0853, anterior: 0.1035, normal: [0.2, 0.201, 0.959]}
   # Neck: single back marker.
-  - {name: neck_back, parent_joint: neck1, along: 0.5, reach: 0.15}
+  - {name: neck_back, parent_joint: neck1, along: 0.3332, lateral: -0.0023, anterior: -0.0783, normal: [0.237, 0.009, -0.971]}
   # Shoulder girdle (clavicle attachment), front.
-  - {name: clavicle_R, parent_joint: shoulder.R, along: 0.8, reach: 0.16, mirror: true}
+  - {name: clavicle_R, parent_joint: shoulder.R, along: -0.1206, lateral: -0.0132, anterior: 0.0592, normal: [-0.109, 0.679, 0.726], mirror: true}

@@ -30,10 +30,11 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from posetrak.db.skeleton_layout import SkeletonLayout  # noqa: E402
 from posetrak.markers.bones import BodyPose  # noqa: E402
 from posetrak.markers.catalog import catalog_dir, load_marker_module  # noqa: E402
 from posetrak.markers.reference import (  # noqa: E402
-    apply_placements, placements_from_attachment_set, reference_document, rest_bones,
+    apply_placements, bone_lengths, placements_from_attachment_set, reference_document, rescale_along, rest_bones,
 )
 
 MIRROR_TOLERANCE_M = 0.02
@@ -55,6 +56,11 @@ def make(args) -> None:
 
 def apply(args) -> None:
     placements = {m["name"]: m for m in json.loads(Path(args.placements).read_text(encoding="utf-8"))["markers"]}
+    if args.session:
+        conn = sqlite3.connect(f"file:{args.session}?mode=ro", uri=True)
+        yaml_text = conn.execute("SELECT yaml_content FROM skeletons WHERE id LIKE ?", (args.skeleton + "%",)).fetchone()[0]
+        lengths = bone_lengths(SkeletonLayout(yaml_text))
+        placements = {n: rescale_along(p, lengths[p["parent_joint"]]) for n, p in placements.items()}
     directory = Path(args.catalog_dir) if args.catalog_dir else catalog_dir()
     total, missing = 0, set(placements)
     for path in sorted(directory.glob("*.marker-module.yaml")):
@@ -88,6 +94,9 @@ def main() -> None:
     p.set_defaults(func=make)
     p = sub.add_parser("apply")
     p.add_argument("placements")
+    p.add_argument("--session", default=None, help="With --skeleton: re-express 'along' on this skeleton's bone lengths "
+                   "(needed when the placements carry the armature's bone_length).")
+    p.add_argument("--skeleton", default=None, help="Skeleton id (prefix) in the session.")
     p.add_argument("--catalog-dir", default=None)
     p.set_defaults(func=apply)
     args = parser.parse_args()

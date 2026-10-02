@@ -128,6 +128,34 @@ def rest_bones(layout, decoded_state: dict) -> tuple[dict[str, tuple[np.ndarray,
     return bones, {n: to_body @ f for n, f in frames.items()}
 
 
+def bone_lengths(layout) -> dict[str, float]:
+    """Length of every bone of a skeleton: its tip offset, and for the pelvis (which has none)
+    the distance to its first child."""
+    first_child = {}
+    for j in layout.joints:
+        first_child.setdefault(j.parent, j)
+    out = {j.name: float(np.linalg.norm(j.bone_tip_offset)) for j in layout.joints if j.bone_tip_offset is not None}
+    for parent, child in first_child.items():
+        out.setdefault(parent, float(np.linalg.norm(child.offset)))
+    return out
+
+
+def rescale_along(placement: dict, skeleton_length: float) -> dict:
+    """The placement with ``along`` re-expressed on a bone of another length.
+
+    A placement made on an armature whose bone (this one) has ``bone_length`` metres puts the marker
+    ``along * bone_length`` metres from the joint; on the skeleton's bone of *skeleton_length* it is
+    the same distance from the joint, hence a different fraction. Armatures differ in where they
+    end a bone (the pelvis, a bone with several children), so the distance, not the fraction,
+    is what carries over.
+    """
+    if not placement.get("bone_length"):
+        return placement
+    out = dict(placement)
+    out["along"] = placement["along"] * placement["bone_length"] / skeleton_length
+    return out
+
+
 def reference_document(
     bones: dict[str, tuple[np.ndarray, np.ndarray]], parents: dict[str, str | None],
     markers: list[dict],

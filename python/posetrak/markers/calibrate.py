@@ -28,13 +28,17 @@ from scipy.optimize import linear_sum_assignment
 
 from app.setup.extrinsics_solver import CamCalibState
 from posetrak.calibration.session_cameras import load_camera_states, load_sync_table
-from posetrak.markers.bones import BodyPose, fit_bones, marker_observations, marker_track
+from posetrak.markers.bones import BodyPose, fit_bones, marker_observations, marker_track_with_cameras
 from posetrak.markers.catalog import MarkerModule, Slot
+from posetrak.markers.reference import bone_frame, rest_bones
 from posetrak.markers.grouping import build_groups
 from posetrak.markers.tracklets import SubjectMasks, collect_tracklets, filter_tracklets
 
 MAX_SPREAD_M = 0.03      # a track this loose in a bone's frame is not rigid on that bone
 MAX_ANCHOR_DIST_M = 0.12  # nor a slot this far from where it is expected, unless the slot gives its own reach
+MAX_NOMINAL_DIST_M = 0.08  # the same when the slot has a full placement on the reference body
+MIN_VISIBLE_COSINE = -0.2  # a camera this far behind the way a marker faces cannot have seen it
+MAX_VIOLATIONS = 0.5       # a track seen mostly from behind its normal is not that slot
 
 
 def slots_of(modules: list[MarkerModule]) -> list[Slot]:
@@ -68,6 +72,7 @@ class GroupTrack:
     members: list[tuple[str, int]]
     times: np.ndarray
     points: np.ndarray
+    cameras: list | None = None     # the cameras that saw the marker at each sample, if known
 
 
 @dataclass
@@ -81,6 +86,8 @@ class CalibrationContext:
     masks: SubjectMasks
     pose: BodyPose
     slots: list[Slot]
+    rest_bones: dict | None = None      # the skeleton's bones in its rest pose, upright (reference.rest_bones)
+    rest_frames: dict | None = None
 
 
 def open_context(
@@ -99,9 +106,11 @@ def open_context(
         )
     }
     masks = SubjectMasks(conn, seg_run_id, mask_label, mask_margin_px, native)
+    pose = BodyPose(conn, tracking_run_id)
+    bones, frames = rest_bones(pose.layout, pose.layout.decode_state_blob(pose._blobs[0]))
     return CalibrationContext(
-        conn, shot_id, detection_run_id, states, sync_table, svid_by_cam, masks,
-        BodyPose(conn, tracking_run_id), slots_of(modules),
+        conn, shot_id, detection_run_id, states, sync_table, svid_by_cam, masks, pose, slots_of(modules),
+        bones, frames,
     )
 
 
@@ -120,9 +129,9 @@ def window_tracks(ctx: CalibrationContext, t0: float, t1: float, *, min_samples:
     out = []
     for group in groups:
         observations = marker_observations(group["members"], filtered, ctx.sync_table, ctx.svid_by_cam)
-        times, points = marker_track(observations, ctx.states)
+        times, points, cameras = marker_track_with_cameras(observations, ctx.states)
         if len(times) >= min_samples:
-            out.append(GroupTrack((t0, t1), group["members"], times, points))
+            out.append(GroupTrack((t0, t1), group["members"], times, points, cameras))
     return out
 
 
@@ -142,6 +151,40 @@ class SlotTest:
         return self.spread_m / 0.01 + self.anchor_dist_m / 0.05
 
 
+def nominal_placement(ctx: CalibrationContext, slot: Slot) -> tuple[np.ndarray, np.ndarray | None]:
+    """Where the slot is expected, and the way it faces, in its parent bone's frame.
+
+    From the slot's full placement on the reference body when it has one (along, lateral,
+    anterior and normal, see reference.py), otherwise just its place along the bone.
+    """
+    if slot.lateral is None or ctx.rest_bones is None:
+        return anchor(ctx.pose, slot), None
+    head, tail = ctx.rest_bones[slot.parent_joint]
+    frame = bone_frame(head, tail, np.array([0.0, 1.0, 0.0]), np.array([0.0, 0.0, 1.0]))
+    rotation = ctx.rest_frames[slot.parent_joint][:3, :3]
+    length = float(np.linalg.norm(tail - head))
+    offset = rotation.T @ (frame @ np.array([slot.along * length, slot.lateral, slot.anterior]))
+    normal = rotation.T @ (frame @ np.asarray(slot.normal, float)) if slot.normal else None
+    return offset, normal
+
+
+def visibility_violations(ctx: CalibrationContext, track: GroupTrack, joint: str, normal_local: np.ndarray) -> float:
+    """Fraction of the sightings of the marker made from a camera behind the way it faces."""
+    bad = total = 0
+    for t, X, cams in zip(track.times, track.points, track.cameras):
+        frames = ctx.pose.joint_frames(float(t))
+        if frames is None:
+            continue
+        n = frames[joint][:3, :3] @ normal_local
+        for cam in cams:
+            state = ctx.states[cam]
+            to_camera = -state.R.T @ state.t.ravel() - X
+            total += 1
+            if (n @ to_camera) / (np.linalg.norm(n) * np.linalg.norm(to_camera)) < MIN_VISIBLE_COSINE:
+                bad += 1
+    return bad / total if total else 0.0
+
+
 def test_track(ctx: CalibrationContext, track: GroupTrack) -> list[SlotTest]:
     """The slots the track could be, best first."""
     by_joint: dict[str, object] = {}
@@ -153,9 +196,17 @@ def test_track(ctx: CalibrationContext, track: GroupTrack) -> list[SlotTest]:
         fit = by_joint[slot.parent_joint]
         if fit is None or fit.spread_m > MAX_SPREAD_M:
             continue
-        dist = float(np.linalg.norm(fit.offset - anchor(ctx.pose, slot)))
-        if dist <= (slot.reach or MAX_ANCHOR_DIST_M):
-            tests.append(SlotTest(slot.name, slot.parent_joint, fit.spread_m, dist, fit.offset, fit.n))
+        expected, normal = nominal_placement(ctx, slot)
+        dist = float(np.linalg.norm(fit.offset - expected))
+        if dist > (MAX_NOMINAL_DIST_M if normal is not None else (slot.reach or MAX_ANCHOR_DIST_M)):
+            continue
+        violations = 0.0
+        if normal is not None and track.cameras:
+            violations = visibility_violations(ctx, track, slot.parent_joint, normal)
+            if violations > MAX_VIOLATIONS:
+                continue
+        # being seen now and then from behind the normal costs a little, like a position error
+        tests.append(SlotTest(slot.name, slot.parent_joint, fit.spread_m, dist + 0.1 * violations, fit.offset, fit.n))
     return sorted(tests, key=lambda t: t.cost)
 
 

@@ -92,13 +92,22 @@ def triangulate(observations: list[tuple[str, tuple[float, float]]], states: dic
 
 def marker_track(observations: Observations, states: dict[str, CamCalibState]) -> tuple[np.ndarray, np.ndarray]:
     """Times (s) and 3D points of a marker, for the moments two cameras saw it."""
-    times, points = [], []
+    times, points, _ = marker_track_with_cameras(observations, states)
+    return times, points
+
+
+def marker_track_with_cameras(
+    observations: Observations, states: dict[str, CamCalibState],
+) -> tuple[np.ndarray, np.ndarray, list[tuple[str, ...]]]:
+    """Like :func:`marker_track`, and the cameras that saw the marker at each of those moments."""
+    times, points, cameras = [], [], []
     for bucket in sorted(observations):
         X = triangulate(observations[bucket], states)
         if X is not None:
             times.append(bucket / TIME_BUCKETS_PER_SECOND)
             points.append(X)
-    return np.array(times), np.array(points).reshape(-1, 3)
+            cameras.append(tuple(sorted({cam for cam, _ in observations[bucket]})))
+    return np.array(times), np.array(points).reshape(-1, 3), cameras
 
 
 @dataclass

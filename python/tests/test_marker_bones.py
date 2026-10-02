@@ -237,3 +237,30 @@ def test_placements_are_written_into_a_module_keeping_its_comments_and_other_mar
     knee_r, knee_l = module.slots[0], module.slots[1]
     assert (knee_r.along, knee_r.lateral, knee_r.anterior, knee_r.normal) == (0.05, 0.06, -0.01, (0.0, 1.0, 0.1))
     assert (knee_l.lateral, knee_l.normal) == (-0.06, (0.0, -1.0, 0.1))        # the mirror image
+
+
+def test_along_is_kept_as_a_distance_when_the_armature_ends_its_bone_elsewhere():
+    from posetrak.markers.reference import rescale_along
+
+    placement = {"along": 2.5, "bone_length": 0.024}                 # 6 cm up a pelvis bone the armature made short
+    assert abs(rescale_along(placement, 0.12)["along"] - 0.5) < 1e-9  # half of a 12 cm pelvis bone
+    assert rescale_along({"along": 0.3}, 0.12)["along"] == 0.3        # nothing to rescale from
+
+
+def test_a_slot_with_a_full_placement_is_expected_where_the_reference_body_has_it():
+    from types import SimpleNamespace
+
+    from posetrak.markers.calibrate import CalibrationContext, nominal_placement
+    from posetrak.markers.catalog import Slot
+
+    # a bone from (0,0,1) down to (0,0,0.5); the joint frame is rotated so that its local y runs down
+    bones = {"bone": (np.array([0.0, 0, 1.0]), np.array([0.0, 0, 0.5]))}
+    frame = np.eye(4)
+    frame[:3, :3] = [[1, 0, 0], [0, 0, 1], [0, -1, 0]]   # local y -> world -z, local z -> world +y... (front)
+    frame[:3, 3] = [0, 0, 1.0]
+    ctx = CalibrationContext(None, "", "", {}, None, {}, None, SimpleNamespace(layout=None), [], bones, {"bone": frame})
+    slot = Slot("s", "bone", along=0.5, lateral=0.0, anterior=0.06, normal=(0.0, 0.0, 1.0))
+    offset, normal = nominal_placement(ctx, slot)
+    # half way down the bone, 6 cm in front of it: in the bone's own frame 0.25 m along y
+    assert abs(offset[1] - 0.25) < 1e-9 and abs(np.linalg.norm(offset) - np.hypot(0.25, 0.06)) < 1e-9
+    assert abs(np.linalg.norm(normal) - 1.0) < 1e-9

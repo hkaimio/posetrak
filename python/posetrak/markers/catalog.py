@@ -35,7 +35,9 @@ where on the parent bone the marker sits (0 at the bone's joint, 1 at its far en
 and is enough for a calibration to tell the markers of one bone apart. ``lateral``
 and ``anterior`` refine it and come together with ``along``. A module authored
 without nominal geometry still fixes the slot names, their order and their parent
-joints.
+joints. ``reach`` (metres) says how far from the ``along`` point on the bone axis the
+marker may lie: a few centimetres for a marker on a limb, more for one on the chest or
+back, where the skin is far from the bone.
 """
 from __future__ import annotations
 
@@ -65,6 +67,7 @@ class Slot:
     lateral: float | None = None
     anterior: float | None = None
     normal: tuple[float, float, float] | None = None
+    reach: float | None = None   # how far from the `along` point on the bone axis the marker may be, metres
 
 
 @dataclass(frozen=True)
@@ -220,6 +223,7 @@ def _slot(entry: dict, source: str) -> Slot:
         name=str(name), parent_joint=str(joint),
         along=_float(entry.get("along")), lateral=_float(entry.get("lateral")), anterior=_float(entry.get("anterior")),
         normal=tuple(float(v) for v in normal) if normal else None,
+        reach=_float(entry.get("reach")),
     )
 
 
@@ -236,6 +240,7 @@ def _mirrored(slot: Slot, source: str) -> Slot:
         lateral=None if slot.lateral is None else -slot.lateral,
         anterior=slot.anterior,
         normal=None if slot.normal is None else (slot.normal[0], -slot.normal[1], slot.normal[2]),
+        reach=slot.reach,
     )
 
 

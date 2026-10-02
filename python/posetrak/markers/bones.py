@@ -124,3 +124,70 @@ def fit_bones(times: np.ndarray, points: np.ndarray, pose: BodyPose, joints: lis
         mean = local.mean(axis=0)
         fits.append(BoneFit(name, float(np.sqrt(np.mean(np.sum((local - mean) ** 2, axis=1)))), mean, len(local)))
     return sorted(fits, key=lambda f: f.spread_m)
+
+
+@dataclass
+class RayFit:
+    """Offset of a marker in a bone's frame fitted to one camera's 2D track."""
+
+    joint: str
+    offset: np.ndarray
+    reproj_rms_px: float
+    n: int
+    weakest_direction: np.ndarray   # offset direction (bone frame) the track constrains least
+    weakest_strength: float         # m^-2 summed over samples; small = depth still undetermined
+
+
+def fit_offset_from_rays(
+    times: np.ndarray, pixels: np.ndarray, state: CamCalibState, pose: BodyPose, joint: str,
+    prior: np.ndarray, prior_weight: float = 1.0,
+) -> RayFit | None:
+    """Fit a marker's offset in *joint*'s frame to its 2D track in a single camera.
+
+    Each frame says the marker lies on a ray through the camera centre; with the bone
+    moving, the offset in the bone's frame is the point closest to all those rays. A
+    track in one camera leaves the offset undetermined along the ray directions when the
+    bone does not turn, so the fit is pulled towards *prior* with a small weight
+    (*prior_weight*, in units of the per-sample information) and the weakest direction is
+    reported, to tell a fit that is anchored by the data from one held by the prior.
+    """
+    centre = -state.R.T @ state.t.ravel()
+    rays = _unit_rays(pixels, state)
+    A = prior_weight * np.eye(3) * 1e-2
+    b = prior_weight * 1e-2 * prior.copy()
+    A_data = np.zeros((3, 3))
+    frames = []
+    for t, ray in zip(times, rays):
+        F = pose.joint_frames(t)
+        if F is None or joint not in F:
+            continue
+        R, c = F[joint][:3, :3], F[joint][:3, 3]
+        M = R.T @ (np.eye(3) - np.outer(ray, ray)) @ R
+        A_data += M
+        b += R.T @ (np.eye(3) - np.outer(ray, ray)) @ (centre - c)
+        frames.append((F[joint], ray))
+    if len(frames) < 10:
+        return None
+    A += A_data
+    offset = np.linalg.solve(A, b)
+    errors = []
+    for F, ray in frames:
+        X = (F @ np.append(offset, 1.0))[:3]
+        v = X - centre
+        errors.append(np.degrees(np.arccos(np.clip(v @ ray / np.linalg.norm(v), -1, 1))))
+    # angle to pixels: about focal length * tan(angle)
+    f_px = float(state.K_orig[0, 0])
+    rms_px = float(np.sqrt(np.mean((f_px * np.tan(np.radians(errors))) ** 2)))
+    w, V = np.linalg.eigh(A_data)
+    return RayFit(joint, offset, rms_px, len(frames), V[:, 0], float(w[0] / len(frames)))
+
+
+def _unit_rays(pixels: np.ndarray, state: CamCalibState) -> np.ndarray:
+    undistorted = _undistort_pts(np.asarray(pixels, float), state)
+    cam = np.column_stack([
+        (undistorted[:, 0] - state.K[0, 2]) / state.K[0, 0],
+        (undistorted[:, 1] - state.K[1, 2]) / state.K[1, 1],
+        np.ones(len(undistorted)),
+    ])
+    world = (state.R.T @ cam.T).T
+    return world / np.linalg.norm(world, axis=1, keepdims=True)

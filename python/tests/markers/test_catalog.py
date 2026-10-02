@@ -255,3 +255,8 @@ class TestSkeletonFit:
     def test_a_skeleton_without_joints_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="no joints"):
             skeleton_topology("name: x\n")
+
+
+def test_a_marker_may_give_how_far_from_its_place_on_the_bone_it_can_lie():
+    module = load_marker_module("module: m\nmarkers: [{name: a_R, parent_joint: j.R, along: 0.5, reach: 0.2, mirror: true}]")
+    assert [(s.name, s.along, s.reach) for s in module.slots] == [("a_R", 0.5, 0.2), ("a_L", 0.5, 0.2)]

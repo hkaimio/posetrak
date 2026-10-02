@@ -32,7 +32,7 @@ from posetrak.markers.grouping import build_groups
 from posetrak.markers.tracklets import SubjectMasks, collect_tracklets, filter_tracklets
 
 MAX_SPREAD_M = 0.03      # a track this loose in a bone's frame is not rigid on that bone
-MAX_ANCHOR_DIST_M = 0.12  # nor can it be a slot this far from where the slot is expected
+MAX_ANCHOR_DIST_M = 0.12  # nor a slot this far from where it is expected, unless the slot gives its own reach
 
 
 def slots_of(modules: list[MarkerModule]) -> list[Slot]:
@@ -152,7 +152,7 @@ def test_track(ctx: CalibrationContext, track: GroupTrack) -> list[SlotTest]:
         if fit is None or fit.spread_m > MAX_SPREAD_M:
             continue
         dist = float(np.linalg.norm(fit.offset - anchor(ctx.pose, slot)))
-        if dist <= MAX_ANCHOR_DIST_M:
+        if dist <= (slot.reach or MAX_ANCHOR_DIST_M):
             tests.append(SlotTest(slot.name, slot.parent_joint, fit.spread_m, dist, fit.offset, fit.n))
     return sorted(tests, key=lambda t: t.cost)
 

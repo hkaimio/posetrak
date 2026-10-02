@@ -120,3 +120,15 @@ def test_a_track_must_be_rigid_on_the_bone_and_near_where_the_slot_is_expected()
     tests = test_track(ctx, GroupTrack((0, 2), [], times, points))
     assert [t.slot for t in tests] == ["knee"]            # the ankle is 0.4 m further along the bone
     assert tests[0].spread_m < 1e-9
+
+
+def test_single_camera_fit_recovers_the_offset_when_the_bone_turns():
+    from posetrak.markers.bones import fit_offset_from_rays
+
+    state = _camera(np.array([3.0, 0.0, 1.5]), np.array([0.0, 0.0, 1.0]))
+    pose = _FakePose()
+    offset = np.array([0.2, 0.05, 0.1])
+    times = pose.times
+    pixels = np.array([_project(state, (pose.joint_frames(t)["moving"] @ np.append(offset, 1.0))[:3]) for t in times])
+    fit = fit_offset_from_rays(times, pixels, state, pose, "moving", prior=np.array([0.0, 0.0, 0.0]))
+    assert np.linalg.norm(fit.offset - offset) < 0.01 and fit.reproj_rms_px < 0.5

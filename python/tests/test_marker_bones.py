@@ -285,3 +285,20 @@ def test_the_attachment_set_keeps_markers_the_calibration_did_not_find_at_their_
     by_name = {m["name"]: m for m in doc["markers"]}
     assert by_name["knee_lat_R"]["offset"] == [0.05, 0.02, 0.0] and by_name["knee_lat_R"]["confidence"] == "high"
     assert by_name["knee_front_R"]["confidence"] == "nominal" and by_name["knee_front_R"]["normal"] == [0.0, 0.0, 1.0]
+
+
+def test_a_slot_is_taken_by_one_tracklet_at_a_time_in_a_camera_and_the_loser_takes_its_next_slot():
+    from posetrak.markers.autolabel import TrackletScore, assign
+
+    inf = np.inf
+
+    def score(tid, first, last, cost):
+        return TrackletScore("cam", tid, first, last, np.array(cost, float))
+
+    a = score(1, 0, 100, [10.0, 30.0, inf])        # slot 0 clearly
+    b = score(2, 50, 150, [12.0, 40.0, inf])       # also slot 0, but overlaps a: takes slot 1
+    c = score(3, 200, 300, [11.0, 90.0, inf])      # slot 0 again, later: free again
+    d = score(4, 0, 50, [inf, inf, 200.0])         # nothing within the gate
+    assign([a, b, c, d])
+    assert (a.slot, b.slot, c.slot, d.slot) == (0, 1, 0, None)
+    assert a.margin == 20.0 and c.margin == 79.0   # distance to the next best slot

@@ -5,7 +5,7 @@
 """proposals.py — run the automatic dot-to-slot assignment over a time range and store it.
 
     python -m posetrak.markers.proposals SESSION_DB SHOT DETECTION_RUN SEG_RUN POSE_RUN ATTACHMENT.yaml T0 T1
-        [--mask-label 1] [--skip-camera SUBSTRING ...]
+        [--mask-label 1] [--skip-camera SUBSTRING ...] [--extend]
 
 Run ids may be given as unique prefixes. The proposals of the newest run of the pass are what
 the review tools show (see review.py).
@@ -81,6 +81,7 @@ def main() -> None:
     ap.add_argument("t1", type=float)
     ap.add_argument("--mask-label", type=int, default=1)
     ap.add_argument("--skip-camera", action="append", default=[])
+    ap.add_argument("--extend", action="store_true", help="add the rows to the newest proposal set of the run (another time range) instead of starting a new set")
     a = ap.parse_args()
     from posetrak.db.db import open_session
     conn = open_session(Path(a.session_db))
@@ -90,7 +91,9 @@ def main() -> None:
     rows = propose(conn, shot, det, seg, pose, a.attachment, a.t0, a.t1,
                    mask_label=a.mask_label, skip_cameras=tuple(a.skip_camera))
     conn.row_factory = None
-    print(f"stored proposal set {save_proposals(conn, det, pose, rows)}: {len(rows)} tracklets")
+    newest = conn.execute("SELECT proposal_set FROM dot_assignment_proposals WHERE detection_run_id=?"
+                          " ORDER BY created_at DESC LIMIT 1", (det,)).fetchone() if a.extend else None
+    print(f"stored proposal set {save_proposals(conn, det, pose, rows, proposal_set=newest[0] if newest else None)}: {len(rows)} tracklets")
 
 
 if __name__ == "__main__":

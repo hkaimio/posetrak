@@ -51,9 +51,10 @@ class Proposal:
 
 
 def save_proposals(conn: sqlite3.Connection, detection_run_id: str, pose_run_id: str | None,
-                   rows: list[Proposal], subject_id: str | None = None) -> str:
-    """Write *rows* as a new proposal set; returns the set's id."""
-    proposal_set = str(uuid.uuid4())
+                   rows: list[Proposal], subject_id: str | None = None, proposal_set: str | None = None) -> str:
+    """Write *rows* as a new proposal set, or add them to *proposal_set* (a further time range of the
+    same set); returns the set's id."""
+    proposal_set = proposal_set or str(uuid.uuid4())
     conn.executemany(
         "INSERT INTO dot_assignment_proposals (id, detection_run_id, subject_id, camera_instance_id, tracklet_id,"
         " first_frame, last_frame, slot_name, cost_px, margin_px, support, confidence, pose_run_id, proposal_set)"

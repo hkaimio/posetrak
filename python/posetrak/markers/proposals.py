@@ -28,6 +28,7 @@ from posetrak.markers.tracklets import SubjectMasks, collect_tracklets, filter_t
 
 MASK_GROW_PX = 8.0       # a marker lies on the person: the mask is barely grown
 MIN_ON_MASK = 0.5
+MAX_COST_PX = 120.0      # a looser limit than autolabel's: the confidence tag, not the limit, separates sure from doubtful
 
 
 def _full_id(conn: sqlite3.Connection, table: str, prefix: str) -> str:
@@ -35,7 +36,8 @@ def _full_id(conn: sqlite3.Connection, table: str, prefix: str) -> str:
 
 
 def propose(conn: sqlite3.Connection, shot_id: str, detection_run: str, seg_run: str, pose_run: str,
-            attachment: str, t0: float, t1: float, *, mask_label: int = 1, skip_cameras: tuple[str, ...] = ()) -> list[Proposal]:
+            attachment: str, t0: float, t1: float, *, mask_label: int = 1, skip_cameras: tuple[str, ...] = (),
+            max_cost_px: float = MAX_COST_PX) -> list[Proposal]:
     """Assign the dot tracklets of the person in [t0, t1] and return the proposals (not stored)."""
     conn.row_factory = sqlite3.Row
     states = load_camera_states(conn, shot_id)
@@ -54,7 +56,7 @@ def propose(conn: sqlite3.Connection, shot_id: str, detection_run: str, seg_run:
         tracklets = collect_tracklets(conn, detection_run, svid, sync.lookup(t0, svid), sync.lookup(t1, svid))
         tracklets, _ = filter_tracklets(tracklets, svid, masks, min_on_subject=MIN_ON_MASK)
         cam_scores = score_tracklets(tracklets, cam, svid, predictor, sync)
-        assign(cam_scores)
+        assign(cam_scores, max_cost=max_cost_px)
         scores += cam_scores
     check_consistency(scores, predictor, svid_by_cam, sync)
     return [Proposal(s.cam_id, s.tracklet_id, s.first_frame, s.last_frame,

@@ -342,3 +342,15 @@ def test_confidence_without_partners():
     unassigned = TrackletScore("a", 3, 0, 9, np.array([np.inf, np.inf]))
     check_consistency([clear, close_call, unassigned], None, {}, None)
     assert (clear.confidence, close_call.confidence, unassigned.confidence) == ("high", "review", "none")
+
+
+def test_effective_slot_edits_override_proposal():
+    from posetrak.markers.review import Edit, Proposal, effective_slot
+    p = Proposal("c", 1, 0, 99, "wrist_rad_L", 10.0, 30.0, "alone", "high")
+    assert effective_slot(p, [], 5) == ("wrist_rad_L", "proposal")
+    forbid = Edit("c", 1, "forbid", "wrist_rad_L")
+    assert effective_slot(p, [forbid], 5) == (None, "none")
+    assign = Edit("c", 1, "assign", "wrist_uln_L", 0, 49)
+    assert effective_slot(p, [forbid, assign], 5) == ("wrist_uln_L", "edit")
+    assert effective_slot(p, [assign], 60) == ("wrist_rad_L", "proposal")      # outside the edit's range
+    assert effective_slot(p, [assign, Edit("c", 1, "reject", None)], 5) == (None, "edit")

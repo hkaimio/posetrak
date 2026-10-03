@@ -14,7 +14,7 @@ selected one, with their slots; clicking a ring selects that tracklet. Right-cli
 or ring to assign it to a slot, forbid its slot, mark it as not a marker, or clear the
 edits made to it. Edits are stored per trial (posetrak.markers.review).
 
-Keys: N next tracklet to review, A accept the proposal, Delete reject, Ctrl+Z undo,
+Keys: N next tracklet to review, Z whole frame / zoom to the selection, A accept the proposal, Delete reject, Ctrl+Z undo,
 Left/Right step a frame.
 """
 from __future__ import annotations
@@ -42,7 +42,7 @@ from posetrak.markers.tracklets import collect_tracklets
 ROW_H = 18
 LABEL_W = 170
 RULER_H = 22
-NONE_LANE = "(no slot)"
+UNASSIGNED = "Unassigned"
 PROPOSAL_COLOURS = {"high": "#46a05a", "medium": "#c8aa32", "review": "#d25a3c", "none": "#787878"}
 EDIT_COLOUR = "#2f6fe0"
 
@@ -149,7 +149,8 @@ class DopeSheet(QWidget):
         super().__init__()
         self.data, self.camera = data, None
         self.collapsed: set[str] = set()
-        self.show_none = False
+        self.show_none = True
+        self._lane_of: dict[tuple[int, int], int] = {}     # (tracklet id, first frame of segment) -> lane
         self.playhead = 0.0
         self.t_left, self.px_per_s, self.y_off = 0.0, 40.0, 0
         self.selection: Tracklet | None = None
@@ -172,13 +173,41 @@ class DopeSheet(QWidget):
             self._rows.append(("group", group))
             if group not in self.collapsed:
                 self._rows += [("slot", s) for s in slots]
+        lanes = self._pack_unassigned()
         if self.show_none:
-            self._rows.append(("slot", NONE_LANE))
+            self._rows.append(("group", UNASSIGNED))
+            if UNASSIGNED not in self.collapsed:
+                self._rows += [("lane", str(i)) for i in range(lanes)]
 
-    def _row_of(self, slot: str | None) -> int | None:
-        key = NONE_LANE if slot is None else slot
-        for i, (kind, name) in enumerate(self._rows):
-            if kind == "slot" and name == key:
+    def _pack_unassigned(self) -> int:
+        """Stack the segments without a slot into as few lanes as hold them without overlap."""
+        segs = sorted((self.data.time_of(self.camera, f0), self.data.time_of(self.camera, f1 + 1), t.tracklet_id, f0)
+                      for t in self.data.tracklets[self.camera].values()
+                      for f0, f1, slot, _ in self.data.segments_of(t) if slot is None)
+        ends: list[float] = []
+        self._lane_of = {}
+        for start, end, tid, f0 in segs:
+            lane = next((i for i, e in enumerate(ends) if e <= start), None)
+            if lane is None:
+                ends.append(end); lane = len(ends) - 1
+            else:
+                ends[lane] = end
+            self._lane_of[(tid, f0)] = lane
+        return len(ends)
+
+    def refresh(self) -> None:
+        """Rebuild the rows after edits changed which tracklets lack a slot."""
+        self._build_rows()
+        self.update()
+
+    def _row_of(self, slot: str | None, t: Tracklet | None = None, f0: int = 0) -> int | None:
+        if slot is None:
+            lane = self._lane_of.get((t.tracklet_id, f0)) if t is not None else None
+            key = ("lane", str(lane))
+        else:
+            key = ("slot", slot)
+        for i, row in enumerate(self._rows):
+            if row == key:
                 return i
         return None
 
@@ -198,7 +227,9 @@ class DopeSheet(QWidget):
             y = top + i * ROW_H - self.y_off
             if y + ROW_H < top or y > self.height():
                 continue
-            if kind == "group":
+            if kind == "lane":
+                p.setPen(QColor("#2f3136")); p.drawLine(LABEL_W, y + ROW_H, self.width(), y + ROW_H)
+            elif kind == "group":
                 p.fillRect(0, y, self.width(), ROW_H, QColor("#2b2d31"))
                 p.setPen(QColor("#d0d0d0"))
                 p.drawText(6, y, LABEL_W, ROW_H, Qt.AlignVCenter, ("▸ " if name in self.collapsed else "▾ ") + name)
@@ -207,7 +238,7 @@ class DopeSheet(QWidget):
                 p.setPen(QColor("#a0a0a0")); p.drawText(18, y, LABEL_W - 18, ROW_H, Qt.AlignVCenter, name)
         for t in self.data.tracklets[self.camera].values():
             for f0, f1, slot, origin in self.data.segments_of(t):
-                row = self._row_of(slot)
+                row = self._row_of(slot, t, f0)
                 if row is None:
                     continue
                 y = top + row * ROW_H - self.y_off
@@ -262,7 +293,7 @@ class DopeSheet(QWidget):
             return
         if t is not None:
             self.select(t)
-        if pos.y() < RULER_H or t is None:
+        if pos.x() >= LABEL_W:
             self.time_picked.emit(max(self.t_of(pos.x()), 0.0))
 
     def select(self, t: Tracklet | None) -> None:
@@ -286,10 +317,10 @@ class DopeSheet(QWidget):
     def reveal(self, t: Tracklet) -> None:
         """Scroll so the tracklet's first segment is in view."""
         slot = self.data.slot_at(t, t.first_frame)[0]
-        group = self.data.group_of.get(slot)
+        group = self.data.group_of.get(slot, UNASSIGNED)
         if group in self.collapsed:
             self.collapsed.discard(group); self._build_rows()
-        row = self._row_of(slot)
+        row = self._row_of(slot, t, t.first_frame)
         if row is not None:
             self.y_off = max(0, row * ROW_H - (self.height() - RULER_H) // 2)
         start = self.data.time_of(t.camera_id, t.first_frame)
@@ -308,6 +339,7 @@ class FramePane(QWidget):
         super().__init__()
         self.data, self.service = data, service
         self.camera, self.t, self.selection = None, 0.0, None
+        self.zoomed = True               # around the selected tracklet, or the whole frame
         self._rings: list[tuple[QPointF, Tracklet]] = []
         self.setMinimumSize(420, 420)
 
@@ -334,7 +366,7 @@ class FramePane(QWidget):
         svid = self.data.svid_by_cam[self.camera]
         frame = self.data.frame_at(self.camera, self.t)
         got = self.service.get(svid, frame)
-        focus = self._nearest_position(self.selection, frame) if self.selection else None
+        focus = self._nearest_position(self.selection, frame) if self.selection and self.zoomed else None
         if focus is not None and got is not None:
             r = self.CROP
             self.service.request_region(svid, frame, (focus[0] - r / 2, focus[1] - r / 2, focus[0] + r / 2, focus[1] + r / 2), 1.0)
@@ -402,7 +434,8 @@ class ReviewWindow(QMainWindow):
             self.camera_box.addItem(data.labels.get(cam, cam), cam)
         self.apply_box = QComboBox()
         self.apply_box.addItems(["whole tracklet", "from playhead on", "until playhead"])
-        none_box = QCheckBox("show tracklets without a slot")
+        none_box = QCheckBox("show unassigned")
+        none_box.setChecked(True)
         next_btn = QPushButton("Next to review (N)")
         accept_btn = QPushButton("Accept (A)")
         accept_all = QPushButton("Accept all high confidence")
@@ -425,7 +458,7 @@ class ReviewWindow(QMainWindow):
         self.frame.tracklet_picked.connect(self._pick_from_frame)
         self.frame.context_requested.connect(self.context_menu)
         for key, fn in (("N", self.next_to_review), ("A", self.accept_selected), ("Delete", self.reject_selected),
-                        ("Ctrl+Z", self.undo), ("Left", lambda: self.step(-1)), ("Right", lambda: self.step(1))):
+                        ("Ctrl+Z", self.undo), ("Z", self.toggle_zoom), ("Left", lambda: self.step(-1)), ("Right", lambda: self.step(1))):
             QShortcut(QKeySequence(key), self, activated=fn)
         self.sheet.playhead = self.sheet.t_left + 0.5
         self._refresh_status()
@@ -445,7 +478,7 @@ class ReviewWindow(QMainWindow):
 
     def _toggle_none(self, on: bool) -> None:
         self.sheet.show_none = on
-        self.sheet._build_rows(); self.sheet.update()
+        self.sheet.refresh()
 
     def _selected(self, t: Tracklet | None) -> None:
         self.frame.show_at(self.camera, self.sheet.playhead, t)
@@ -469,13 +502,17 @@ class ReviewWindow(QMainWindow):
         return (None, None) if mode == 0 else (frame, t.last_frame) if mode == 1 else (t.first_frame, frame)
 
     def _changed(self) -> None:
-        self.sheet.update(); self.frame.update(); self._refresh_status()
+        self.sheet.refresh(); self.frame.update(); self._refresh_status()
 
     def _refresh_status(self) -> None:
         mine = list(self.data.tracklets[self.camera].values())
         todo = sum(1 for t in mine if self.data.needs_review(t))
         done = sum(1 for t in mine if self.data.edits_of(t))
         self.status.setText(f"{self.camera_box.currentText()}: {len(mine)} tracklets, {done} with a decision, {todo} left to review")
+
+    def toggle_zoom(self) -> None:
+        self.frame.zoomed = not self.frame.zoomed
+        self.frame.update()
 
     def accept_selected(self) -> None:
         t = self.sheet.selection

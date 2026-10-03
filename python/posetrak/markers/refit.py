@@ -131,3 +131,63 @@ def refit_attachment(conn, shot_id: str, detection_run: str, pose_run: str, trut
         f.write("# SPDX-FileCopyrightText: 2026 Harri Kaimio\n#\n# SPDX-License-Identifier: Apache-2.0\n\n")
         yaml.safe_dump(doc, f, sort_keys=False)
     return changed
+
+
+def median_attachment(conn, shot_id: str, detection_run: str, pose_run: str, truth_path: str, attachment_in: str,
+                      attachment_out: str, *, min_samples: int = 30, before_s: float | None = None) -> dict:
+    """Write *attachment_out*: *attachment_in* with offsets set to where the labelled dots sit.
+
+    The dots of a slot that two or more cameras saw are triangulated; the offset becomes their median
+    position in the slot's bone frame *of the given pose run*. That is the offset that predicts the dots
+    from that pose, whatever the pose's own bias or the marker's attachment asymmetry; slots with fewer than
+    *min_samples* triangulated samples keep their offset. Returns {marker: (offset, samples, spread_m)}.
+    """
+    import collections
+
+    import yaml
+
+    from posetrak.calibration.session_cameras import load_camera_states, load_sync_table
+    from posetrak.markers.attachment import bone_length
+    from posetrak.markers.bones import marker_observations, marker_track
+    from posetrak.markers.evaluate import load_frozen
+    from posetrak.markers.tracklets import collect_tracklets
+
+    states = load_camera_states(conn, shot_id)
+    sync, svid_by_cam = load_sync_table(conn, shot_id)
+    pose = BodyPose(conn, pose_run)
+    doc = yaml.safe_load(open(attachment_in, encoding="utf-8"))
+    truth = [r for r in load_frozen(truth_path)
+             if before_s is None or sync.frame_to_global_time(r[2], svid_by_cam[r[0]]) < before_s]
+    tracklets = {cam: collect_tracklets(conn, detection_run, svid_by_cam[cam], min(r[2] for r in truth if r[0] == cam),
+                                        max(r[3] for r in truth if r[0] == cam)) for cam in {r[0] for r in truth}}
+    changed = {}
+    for m in doc["markers"]:
+        rows = [r for r in truth if r[4] == m["name"]]
+        members = [(r[0], r[1]) for r in rows]
+        sub = {cam: {tid: {f: xy for f, xy in tracklets[cam][tid].items()
+                           if any(f0 <= f <= f1 for c2, t2, f0, f1, _ in rows if c2 == cam and t2 == tid)}
+                     for c2, tid in members if c2 == cam} for cam in tracklets}
+        times, points = marker_track(marker_observations(members, sub, sync, svid_by_cam), states) if rows else ([], [])
+        local = []
+        for t, X in zip(times, points):
+            frames = pose.joint_frames(t)
+            if frames is not None and m["parent_joint"] in frames:
+                local.append((np.linalg.inv(frames[m["parent_joint"]]) @ np.append(X, 1.0))[:3])
+        if len(local) < min_samples:
+            continue
+        local = np.array(local)
+        offset, spread = np.median(local, 0), float(np.linalg.norm(local.std(0)))
+        length = bone_length(pose, m["parent_joint"])
+        m.update({"offset": [round(float(v), 4) for v in offset], "along": round(float(offset[1] / length), 4),
+                  "lateral": round(float(offset[0]), 4), "anterior": round(float(offset[2]), 4),
+                  "median_fit": {"n_samples": len(local), "spread_m": round(spread, 3)}})
+        changed[m["name"]] = (offset, len(local), spread)
+    doc.setdefault("calibration", {})["ground_truth_median_fit"] = {
+        "truth": str(truth_path), "pose_run": pose_run, "min_samples": min_samples, "fitted_before_s": before_s,
+        "method": "median position of the triangulated labelled dots in the bone frame of the pose run; "
+                  "offsets are expressed in that pose's frames",
+    }
+    with open(attachment_out, "w", encoding="utf-8") as f:
+        f.write("# SPDX-FileCopyrightText: 2026 Harri Kaimio\n#\n# SPDX-License-Identifier: Apache-2.0\n\n")
+        yaml.safe_dump(doc, f, sort_keys=False)
+    return changed

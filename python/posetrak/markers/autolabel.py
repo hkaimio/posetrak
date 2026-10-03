@@ -21,11 +21,13 @@ The stored poses are only as good as the run they come from; the confidence of a
 """
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
 import yaml
+from scipy.optimize import least_squares
 
 from posetrak.markers.bones import BodyPose
 from posetrak.markers.tracklets import Tracklets
@@ -54,25 +56,42 @@ def load_placements(path: str) -> list[SlotPlacement]:
 
 
 class Predictor:
-    """Where each slot appears in a camera at a time, from a stored pose."""
+    """Where each slot appears in a camera at a time, from a stored pose.
 
-    def __init__(self, pose: BodyPose, placements: list[SlotPlacement], states: dict) -> None:
+    *corrections* maps (joint, window index) to a 4x4 transform in the joint's own frame
+    that adjusts the stored pose in that window (see :func:`refit_bones`); windows are
+    *window_s* seconds long from *t_origin*.
+    """
+
+    def __init__(self, pose: BodyPose, placements: list[SlotPlacement], states: dict,
+                 t_origin: float = 0.0, window_s: float = 4.0) -> None:
         self.pose, self.placements, self.states = pose, placements, states
         self.names = [p.name for p in placements]
         self._joints = [p.joint for p in placements]
+        self.t_origin, self.window_s = t_origin, window_s
+        self.corrections: dict[tuple[str, int], np.ndarray] = {}
+
+    def window(self, t: float) -> int:
+        return int((t - self.t_origin) // self.window_s)
+
+    def joint_frame(self, t: float, joint: str, frames: dict) -> np.ndarray:
+        """The joint's world frame at *t* with the window's correction, if any, applied."""
+        delta = self.corrections.get((joint, self.window(t)))
+        return frames[joint] if delta is None else frames[joint] @ delta
 
     def pixels(self, t: float, cam_id: str) -> tuple[np.ndarray, np.ndarray] | None:
         """(distorted pixels (N, 2), visible (N,)) of the slots, or None without a pose at *t*."""
         frames = self.pose.joint_frames(t)
         if frames is None:
             return None
-        points = np.array([(frames[j] @ np.append(p.offset, 1.0))[:3] for j, p in zip(self._joints, self.placements)])
+        placed = {j: self.joint_frame(t, j, frames) for j in set(self._joints)}
+        points = np.array([(placed[j] @ np.append(p.offset, 1.0))[:3] for j, p in zip(self._joints, self.placements)])
         state = self.states[cam_id]
         centre = -state.R.T @ state.t.ravel()
         visible = np.ones(len(points), bool)
         for i, (j, p) in enumerate(zip(self._joints, self.placements)):
             if p.normal is not None:
-                n = frames[j][:3, :3] @ p.normal
+                n = placed[j][:3, :3] @ p.normal
                 to_camera = centre - points[i]
                 visible[i] = (n @ to_camera) / (np.linalg.norm(n) * np.linalg.norm(to_camera)) >= VISIBLE_COSINE
         rvec = cv2.Rodrigues(state.R)[0]
@@ -152,3 +171,78 @@ def _best_two(cost: np.ndarray) -> tuple[float, float]:
     if len(finite) == 0:
         return float("inf"), float("inf")
     return float(finite[0]), float(finite[1]) if len(finite) > 1 else float("inf")
+
+
+# --- refitting the bone poses from confident assignments ----------------------------------
+
+ROTATION_PRIOR_RAD = 0.1      # how far a window's correction of a bone's pose is expected to be
+TRANSLATION_PRIOR_M = 0.04
+MIN_OBSERVATIONS = 12
+MIN_TRACKLETS = 2
+
+
+def _correction(x: np.ndarray) -> np.ndarray:
+    delta = np.eye(4)
+    delta[:3, :3] = cv2.Rodrigues(x[:3])[0]
+    delta[:3, 3] = x[3:]
+    return delta
+
+
+def refit_bones(
+    scores: list[TrackletScore], predictor: Predictor, svid_by_cam: dict, sync_table, *,
+    max_cost: float = 45.0, min_margin: float = 10.0, per_tracklet: int = 8,
+) -> dict:
+    """Refit each bone's pose in each window from the tracklets assigned with confidence.
+
+    A bone's correction is a small rigid transform in its own frame, chosen to bring the
+    confidently assigned dots of its slots onto their predictions in all cameras (robust
+    loss, pulled towards no correction). It replaces ``predictor.corrections`` and its
+    summary is returned: per (joint, window), observations, tracklets and the median
+    residual in pixels before and after.
+    """
+    groups: dict[tuple[str, int], list] = defaultdict(list)
+    for score in scores:
+        if score.slot is None or score.cost[score.slot] > max_cost or score.margin < min_margin:
+            continue
+        slot = predictor.placements[score.slot]
+        order = sorted(score.frames)
+        for frame in order[:: max(1, len(order) // per_tracklet)]:
+            t = sync_table.frame_to_global_time(frame, svid_by_cam[score.cam_id])
+            if t is not None:
+                groups[(slot.joint, predictor.window(t))].append(
+                    (score.cam_id, score.tracklet_id, t, np.array(score.frames[frame]), slot.offset))
+    corrections, summary = {}, {}
+    for (joint, window), items in groups.items():
+        if len(items) < MIN_OBSERVATIONS or len({(c, t) for c, t, *_ in items}) < MIN_TRACKLETS:
+            continue
+        frames = [predictor.pose.joint_frames(t) for _, _, t, _, _ in items]
+        keep = [i for i, f in enumerate(frames) if f is not None]
+        items, frames = [items[i] for i in keep], [frames[i] for i in keep]
+        base = [f[joint] for f in frames]
+        offsets = np.array([np.append(o, 1.0) for *_, o in items])
+        pixels = np.array([px for *_, px, _ in items])
+        cams = [c for c, *_ in items]
+
+        def residual(x, apply=True):
+            delta = _correction(x) if apply else np.eye(4)
+            world = np.array([(b @ delta @ o)[:3] for b, o in zip(base, offsets)])
+            out = np.zeros((len(items), 2))
+            for cam in set(cams):
+                rows = [i for i, c in enumerate(cams) if c == cam]
+                state = predictor.states[cam]
+                project = cv2.fisheye.projectPoints if state.fisheye else cv2.projectPoints
+                px, _ = project(world[rows].reshape(-1, 1, 3), cv2.Rodrigues(state.R)[0], state.t.reshape(3, 1),
+                                state.K_orig, state.dist)
+                out[rows] = px.reshape(-1, 2) - pixels[rows]
+            return out.ravel()
+
+        def objective(x):
+            return np.concatenate([residual(x), x[:3] / ROTATION_PRIOR_RAD * 10.0, x[3:] / TRANSLATION_PRIOR_M * 10.0])
+
+        fit = least_squares(objective, np.zeros(6), loss="soft_l1", f_scale=15.0)
+        corrections[(joint, window)] = _correction(fit.x)
+        before = np.median(np.hypot(*residual(np.zeros(6), False).reshape(-1, 2).T))
+        after = np.median(np.hypot(*residual(fit.x).reshape(-1, 2).T))
+        summary[(joint, window)] = (len(items), len({(c, t) for c, t, *_ in items}), float(before), float(after))
+    predictor.corrections = corrections
+    return summary

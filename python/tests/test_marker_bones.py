@@ -302,3 +302,33 @@ def test_a_slot_is_taken_by_one_tracklet_at_a_time_in_a_camera_and_the_loser_tak
     assign([a, b, c, d])
     assert (a.slot, b.slot, c.slot, d.slot) == (0, 1, 0, None)
     assert a.margin == 20.0 and c.margin == 79.0   # distance to the next best slot
+
+
+def test_refit_pulls_a_wrongly_stored_bone_pose_towards_the_dots_assigned_to_it():
+    from posetrak.markers.autolabel import Predictor, SlotPlacement, TrackletScore, refit_bones
+
+    true_pose = _FakePose()
+    wrong = _FakePose()
+    shift = np.eye(4)
+    shift[:3, 3] = [0.04, 0.0, 0.03]                                    # the stored pose is 5 cm off
+    wrong.joint_frames = lambda t, p=true_pose: {k: shift @ v for k, v in p.joint_frames(t).items()}
+    state = _camera(np.array([3.0, 0.0, 1.5]), np.array([0.0, 0.0, 1.0]))
+    placements = [SlotPlacement("a", "moving", np.array([0.2, 0.05, 0.1]), None),
+                  SlotPlacement("b", "moving", np.array([-0.1, 0.2, -0.05]), None)]
+    predictor = Predictor(wrong, placements, {"c": state}, t_origin=0.0, window_s=4.0)
+
+    class Sync:
+        def frame_to_global_time(self, frame, svid):
+            return frame / 20.0
+
+    scores = []
+    for k, placement in enumerate(placements):
+        frames = {f: _project(state, (true_pose.joint_frames(f / 20.0)["moving"] @ np.append(placement.offset, 1.0))[:3])
+                  for f in range(0, 39)}
+        s = TrackletScore("c", k, 0, 38, np.array([20.0, 25.0]) if k == 0 else np.array([25.0, 20.0]), frames=frames)
+        s.slot, s.margin = k, 30.0
+        scores.append(s)
+    summary = refit_bones(scores, predictor, {"c": "v"}, Sync())
+    (n, tracklets, before, after), = summary.values()
+    assert tracklets == 2 and after < 0.4 * before
+    assert ("moving", 0) in predictor.corrections

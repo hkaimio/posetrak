@@ -332,3 +332,13 @@ def test_refit_pulls_a_wrongly_stored_bone_pose_towards_the_dots_assigned_to_it(
     (n, tracklets, before, after), = summary.values()
     assert tracklets == 2 and after < 0.4 * before
     assert ("moving", 0) in predictor.corrections
+
+
+def test_confidence_without_partners():
+    import numpy as np
+    from posetrak.markers.autolabel import TrackletScore, check_consistency
+    clear = TrackletScore("a", 1, 0, 9, np.array([20.0, 60.0]), slot=0, margin=40.0)
+    close_call = TrackletScore("a", 2, 0, 9, np.array([30.0, 32.0]), slot=0, margin=2.0)
+    unassigned = TrackletScore("a", 3, 0, 9, np.array([np.inf, np.inf]))
+    check_consistency([clear, close_call, unassigned], None, {}, None)
+    assert (clear.confidence, close_call.confidence, unassigned.confidence) == ("high", "review", "none")

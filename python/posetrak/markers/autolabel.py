@@ -29,7 +29,7 @@ import numpy as np
 import yaml
 from scipy.optimize import least_squares
 
-from posetrak.markers.bones import BodyPose
+from posetrak.markers.bones import BodyPose, triangulate
 from posetrak.markers.tracklets import Tracklets
 
 MAX_COST_PX = 60.0         # a tracklet further than this from a slot (median) is not that slot
@@ -109,6 +109,8 @@ class TrackletScore:
     cost: np.ndarray                     # median pixel distance per slot, inf if not visible / no pose
     slot: int | None = None              # index of the assigned slot
     margin: float = 0.0                  # extra cost of the next best slot
+    support: str = "alone"               # see check_consistency
+    confidence: str = "none"
     frames: dict = field(default_factory=dict, repr=False)
 
 
@@ -246,3 +248,82 @@ def refit_bones(
         summary[(joint, window)] = (len(items), len({(c, t) for c, t, *_ in items}), float(before), float(after))
     predictor.corrections = corrections
     return summary
+
+
+# --- cross-camera consistency and confidence ----------------------------------------------
+
+AGREE_PX = 8.0             # two cameras' dots of one marker reproject this close to their triangulation
+CONFLICT_PX = 25.0         # ... and this far means they are not the same physical dot
+MIN_COMMON_SAMPLES = 4
+MAX_SKEW_S = 0.012        # frames of two cameras this close in time show the same moment
+CONFIDENT_COST_PX = 45.0
+CONFIDENT_MARGIN_PX = 10.0
+
+
+def check_consistency(scores: list[TrackletScore], predictor: Predictor, svid_by_cam: dict, sync_table) -> None:
+    """Set ``support`` (``corroborated``, ``conflict`` or ``alone``) and ``confidence`` of the assigned tracklets.
+
+    Tracklets given the same slot in two cameras while overlapping in time are the same
+    physical dot: their rays must meet. They are *corroborated* when they do and in
+    *conflict* when they do not (one of them is the wrong slot, or clutter). A tracklet with
+    no partner is *alone*. Confidence is ``high`` when the tracklet is near its slot with a
+    clear margin and is not in conflict, ``review`` when it is in conflict or ambiguous,
+    ``medium`` otherwise.
+    """
+    by_slot: dict[int, list[TrackletScore]] = defaultdict(list)
+    for score in scores:
+        score.support = "alone"
+        if score.slot is not None:
+            by_slot[score.slot].append(score)
+    for members in by_slot.values():
+        for i, a in enumerate(members):
+            for b in members[i + 1:]:
+                if a.cam_id == b.cam_id:
+                    continue
+                verdict = _pair_verdict(a, b, predictor, svid_by_cam, sync_table)
+                if verdict is None:
+                    continue
+                for x in (a, b):
+                    if verdict == "conflict" or x.support == "alone":
+                        x.support = verdict
+    for score in scores:
+        if score.slot is None:
+            score.confidence = "none"
+        elif score.support == "conflict" or score.margin < 0.5 * CONFIDENT_MARGIN_PX:
+            score.confidence = "review"
+        elif (score.cost[score.slot] <= CONFIDENT_COST_PX and score.margin >= CONFIDENT_MARGIN_PX) or score.support == "corroborated":
+            score.confidence = "high"
+        else:
+            score.confidence = "medium"
+
+
+def _pair_verdict(a: TrackletScore, b: TrackletScore, predictor: Predictor, svid_by_cam: dict, sync_table) -> str | None:
+    """corroborated / conflict from the frames both tracklets are alive in, None without enough common time."""
+    stamped = [(t, f) for f in sorted(a.frames) if (t := sync_table.frame_to_global_time(f, svid_by_cam[a.cam_id])) is not None]
+    if not stamped:
+        return None
+    times_a = np.array([t for t, _ in stamped])
+    errors = []
+    for frame_b in sorted(b.frames)[::3]:
+        t = sync_table.frame_to_global_time(frame_b, svid_by_cam[b.cam_id])
+        if t is None:
+            continue
+        k = int(np.argmin(np.abs(times_a - t)))
+        if abs(times_a[k] - t) > MAX_SKEW_S:
+            continue
+        frame_a = stamped[k][1]
+        pair = [(a.cam_id, a.frames[frame_a]), (b.cam_id, b.frames[frame_b])]
+        X = triangulate(pair, predictor.states)
+        if X is None:
+            continue
+        err = 0.0
+        for cam, xy in pair:
+            state = predictor.states[cam]
+            project = cv2.fisheye.projectPoints if state.fisheye else cv2.projectPoints
+            px, _ = project(X.reshape(1, 1, 3), cv2.Rodrigues(state.R)[0], state.t.reshape(3, 1), state.K_orig, state.dist)
+            err = max(err, float(np.linalg.norm(px.ravel() - np.array(xy))))
+        errors.append(err)
+    if len(errors) < MIN_COMMON_SAMPLES:
+        return None
+    median = float(np.median(errors))
+    return "corroborated" if median <= AGREE_PX else "conflict" if median >= CONFLICT_PX else None

@@ -222,6 +222,9 @@ def _copy_remaining_config_columns(
 @click.option("--seg-run", "seg_run", default=None, help="Segmentation (seg_quality_runs) ID (prefix accepted) whose masks gate dot-assignment trust for the tracked subject; needs the tracker config's dot_seg_mask_enabled. The subject's mask label is looked up in the subject registry.")
 @click.option("--trace-steps", "trace_steps", nargs=2, type=int, default=None, metavar="FIRST LAST", help="Record the full dot-assignment decision trace (every candidate considered per marker slot, its cost, what excluded it, whether it won) for tracker steps FIRST..LAST (inclusive) into tracking_assignment_trace. Keep the range narrow. Step 0 is the run's start time; steps follow the tracker frame rate.")
 @click.option("--seg-label", "seg_label", default=None, type=int, help="Override the mask label looked up for --seg-run (e.g. for a label not yet mapped to a subject).")
+@click.option("--dot-detection-run", "dot_detection_run", default=None, help="Detection run (prefix accepted) whose dot tracklet ids the decisions below refer to; needed with --dot-edits-trial or --dot-proposals.")
+@click.option("--dot-edits-trial", "dot_edits_trial", default=None, help="Trial ID (prefix accepted) whose dot-assignment review decisions (assign / forbid / reject / other, from the review tool) the tracker follows for whole dot tracklets.")
+@click.option("--dot-proposals", "dot_proposals", is_flag=True, default=False, help="Also use the newest automatic dot-to-slot proposals of --dot-detection-run: a high-confidence proposal is followed like a review decision, any other makes its slot cheaper; a review decision overrides a proposal.")
 # Config parameter overrides
 @click.option("--process-noise-std", default=None, type=float, help="Process noise std (rad/s²). Default 0.1.")
 @click.option("--process-vel-noise-std", default=None, type=float, help="Velocity process noise std. Default 0.5.")
@@ -250,6 +253,9 @@ def cmd_run(
     seg_run: str | None,
     trace_steps: tuple[int, int] | None,
     seg_label: int | None,
+    dot_detection_run: str | None,
+    dot_edits_trial: str | None,
+    dot_proposals: bool,
     process_noise_std: float | None,
     process_vel_noise_std: float | None,
     vel_half_life: float | None,
@@ -375,6 +381,24 @@ def cmd_run(
     elif seg_label is not None:
         fail("--seg-label needs --seg-run.")
 
+    rules_path: Path | None = None
+    if dot_edits_trial is not None or dot_proposals:
+        if dot_detection_run is None:
+            fail("--dot-edits-trial and --dot-proposals need --dot-detection-run.")
+        try:
+            detection_run_id = resolve_id_prefix(conn, "detection_runs", dot_detection_run)
+            edits_trial_id = (resolve_id_prefix(conn, "trials", dot_edits_trial)
+                              if dot_edits_trial is not None else None)
+        except ValueError as exc:
+            fail(str(exc))
+        from posetrak.markers.review import export_tracklet_rules
+
+        out_path.mkdir(parents=True, exist_ok=True)
+        rules_path = out_path / "tracklet_assignments.csv"
+        n_rules = export_tracklet_rules(conn, edits_trial_id, detection_run_id, rules_path,
+                                        use_proposals=dot_proposals)
+        click.echo(f"Tracklet decisions: {n_rules} rules -> {rules_path}", err=True)
+
     out_path.mkdir(parents=True, exist_ok=True)
     conn.close()
 
@@ -406,6 +430,7 @@ def cmd_run(
         smooth=not no_smooth,
         seg_run_id=seg_run_id,
         seg_mask_label=seg_label,
+        tracklet_assignments_path=rules_path,
         trace_assignment_steps=trace_steps,
         on_progress=lambda line: click.echo(line, err=True),
     )

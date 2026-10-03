@@ -98,6 +98,7 @@ def run_tracker(
     smooth: bool = True,
     seg_run_id: str | None = None,
     seg_mask_label: int | None = None,
+    tracklet_assignments_path: Path | None = None,
     trace_assignment_steps: tuple[int, int] | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> TrackerResult:
@@ -171,6 +172,8 @@ def run_tracker(
         args.append("--smooth")
     if seg_run_id is not None and seg_mask_label is not None:
         args += ["--seg-run-id", seg_run_id, "--seg-mask-label", str(seg_mask_label)]
+    if tracklet_assignments_path is not None:
+        args += ["--tracklet-assignments", str(tracklet_assignments_path)]
     if trace_assignment_steps is not None:
         args += [
             "--trace-assignment-start", str(trace_assignment_steps[0]),

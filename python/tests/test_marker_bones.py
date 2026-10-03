@@ -425,3 +425,23 @@ def test_refit_offset_recovers_a_known_offset():
             obs.append((float(t), name, tuple(px.ravel())))
     fit = refit_offset(obs, pose, "j", states, prior=np.zeros(3))
     assert np.linalg.norm(fit.offset - truth) < 0.005 and fit.rms_px < 1.0
+
+
+def test_export_tracklet_rules_writes_edits_after_proposals(tmp_path):
+    import sqlite3
+    from posetrak.db.db import _migrate_session_v61_to_v62
+    from posetrak.markers.review import Edit, Proposal, add_edit, export_tracklet_rules, save_proposals
+
+    conn = sqlite3.connect(":memory:")
+    _migrate_session_v61_to_v62(conn)
+    conn.execute("CREATE TABLE camera_instances (id TEXT PRIMARY KEY, label TEXT)")
+    conn.execute("INSERT INTO camera_instances VALUES ('cam-uuid', 'gopro_1')")
+    save_proposals(conn, "det", None, [Proposal("cam-uuid", 1, 0, 9, "wrist", 5.0, 20.0, "alone", "high"),
+                                       Proposal("cam-uuid", 2, 0, 9, "knee", 5.0, 3.0, "alone", "review"),
+                                       Proposal("cam-uuid", 3, 0, 9, None, 99.0, 0.0, "alone", "none")])
+    add_edit(conn, "trial", "det", Edit("cam-uuid", 2, "reject", None, 4, 6))
+    path = tmp_path / "rules.csv"
+    assert export_tracklet_rules(conn, "trial", "det", path, use_proposals=True) == 3
+    assert path.read_text().splitlines() == [
+        "camera_label,tracklet_id,first_frame,last_frame,kind,marker_name",
+        "gopro_1,1,,,assign,wrist", "gopro_1,2,,,suggest,knee", "gopro_1,2,4,6,reject,"]

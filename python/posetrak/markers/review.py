@@ -122,6 +122,34 @@ def effective_slot(proposal: Proposal | None, edits: list[Edit], frame: int) -> 
     return None, "none"
 
 
+def export_tracklet_rules(conn: sqlite3.Connection, trial_id: str | None, detection_run_id: str, path,
+                          *, use_proposals: bool = False) -> int:
+    """Write the decisions about the tracklets of a detection run as the CSV the tracker reads
+    (``posetrak-tracker track --tracklet-assignments``); returns the number of rows.
+
+    Human edits of *trial_id* (if given) become assign / forbid / reject / other rules in the order
+    they were made. With *use_proposals* the slots of the newest proposal set are written first, so that
+    an edit overrides them: a high-confidence proposal as an ``assign`` rule (the tracker follows it),
+    any other as a ``suggest`` rule (its slot only gets cheaper).
+    """
+    labels = {r[0]: r[1] for r in conn.execute("SELECT id, label FROM camera_instances")}
+    rows: list[tuple] = []
+    if use_proposals:
+        for p in load_proposals(conn, detection_run_id):
+            if p.slot is not None:
+                kind = "assign" if p.confidence == "high" else "suggest"
+                rows.append((labels[p.camera_id], p.tracklet_id, "", "", kind, p.slot))
+    if trial_id is not None:
+        for e in load_edits(conn, trial_id, detection_run_id):
+            rows.append((labels[e.camera_id], e.tracklet_id, "" if e.first_frame is None else e.first_frame,
+                         "" if e.last_frame is None else e.last_frame, e.kind, e.slot or ""))
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write("camera_label,tracklet_id,first_frame,last_frame,kind,marker_name\n")
+        for r in rows:
+            f.write(",".join(str(v) for v in r) + "\n")
+    return len(rows)
+
+
 def segments(first_frame: int, last_frame: int, proposal: Proposal | None, edits: list[Edit]) -> list[tuple[int, int, str | None, str]]:
     """The tracklet split into runs of frames with one effective slot: (first, last, slot, origin).
 

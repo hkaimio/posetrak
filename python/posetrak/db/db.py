@@ -25,7 +25,7 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 16
-SESSION_SCHEMA_VERSION: Final[int] = 61
+SESSION_SCHEMA_VERSION: Final[int] = 62
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -1981,6 +1981,17 @@ def _migrate_session_v60_to_v61(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v61_to_v62(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 61 to 62.
+
+    v62 adds dot_assignment_proposals (automatic dot tracklet to marker slot
+    proposals) and dot_assignment_edits (human assign/forbid/reject decisions
+    on them, per trial). See 029_dot_assignment.sql.
+    """
+    sql = (_DB_DIR / "migrations" / "029_dot_assignment.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+
+
 def _migrate_session_v57_to_v58(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 57 to 58.
 
@@ -2323,6 +2334,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 60
     if actual == 60:
         _migrate_session_v60_to_v61(conn)
+        actual = 61
+    if actual == 61:
+        _migrate_session_v61_to_v62(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

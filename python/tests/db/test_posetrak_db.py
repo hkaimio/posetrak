@@ -1573,3 +1573,16 @@ def test_copy_rows_if_missing_missing_row_raises(
         _copy_rows_if_missing(
             registry_db, session_db, "camera_models", ["nonexistent-uuid"]
         )
+
+
+def test_session_v61_to_v62_adds_dot_assignment_tables_and_is_repeatable():
+    import sqlite3
+
+    from posetrak.db.db import _migrate_session_v61_to_v62
+
+    conn = sqlite3.connect(":memory:")
+    _migrate_session_v61_to_v62(conn)
+    _migrate_session_v61_to_v62(conn)
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"dot_assignment_proposals", "dot_assignment_edits"} <= tables
+    assert get_schema_version(conn) == 62

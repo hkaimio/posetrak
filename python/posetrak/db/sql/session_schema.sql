@@ -455,6 +455,79 @@ CREATE TABLE IF NOT EXISTS tracking_assignment_trace (
 CREATE INDEX IF NOT EXISTS idx_tracking_assignment_trace_lookup
     ON tracking_assignment_trace (run_id, person_id, tracker_step);
 
+-- Automatic proposals of which marker slot each dot tracklet is, made without the
+-- tracker from the stored poses of a tracking run (posetrak.markers.autolabel).
+-- One row per assigned tracklet; a tracklet no slot fitted has no row. Written
+-- by the proposal pass, one proposal_set per execution, and only read by the
+-- review tools; a re-run adds a new set, it never rewrites an old one.
+CREATE TABLE IF NOT EXISTS dot_assignment_proposals (
+    -- unique id of the proposal (generate_id)
+    id                 TEXT    PRIMARY KEY,
+    -- the detection run whose dot candidates carry the tracklet
+    detection_run_id   TEXT    NOT NULL REFERENCES detection_runs(id),
+    -- capture_subjects.id of the person or object the slot belongs to; NULL if the capture has a single subject
+    subject_id         TEXT,
+    -- the camera that saw the tracklet; references registry: camera_instances(id)
+    camera_instance_id TEXT    NOT NULL,
+    -- detector tracklet id, unique per detection run and camera
+    tracklet_id        INTEGER NOT NULL,
+    -- first video frame (of that camera's video) of the tracklet
+    first_frame        INTEGER NOT NULL,
+    -- last video frame of the tracklet
+    last_frame         INTEGER NOT NULL,
+    -- the proposed marker: a Marker name of the skeleton, e.g. wrist_rad_L
+    slot_name          TEXT    NOT NULL,
+    -- median distance in distorted pixels between the tracklet and the slot's predicted position
+    cost_px            REAL    NOT NULL,
+    -- extra cost in pixels of the next best free slot; large means unambiguous
+    margin_px          REAL    NOT NULL,
+    -- cross-camera check: 'corroborated', 'conflict' or 'alone'
+    support            TEXT    NOT NULL,
+    -- 'high', 'medium' or 'review': how far the proposal can be trusted without a human
+    confidence         TEXT    NOT NULL,
+    -- the tracking run whose stored poses predicted the slots; NULL if unknown
+    pose_run_id        TEXT    REFERENCES tracking_runs(id),
+    -- groups the rows of one execution of the proposal pass
+    proposal_set       TEXT    NOT NULL,
+    -- UTC time the row was written
+    created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_dot_assignment_proposals_lookup
+    ON dot_assignment_proposals (detection_run_id, camera_instance_id, tracklet_id);
+
+-- Human decisions about dot tracklets, made in the dot-assignment review and kept per
+-- trial like keypoint edits. 'assign' says the tracklet is slot_name, 'forbid' that it
+-- is not slot_name (many forbids may apply to one tracklet), 'reject' that it is not
+-- a marker at all (slot_name NULL). The frame range limits an edit to part of a
+-- tracklet, whose identity can jump between dots; NULL range means the whole tracklet.
+-- A later row overrides an earlier one for the same tracklet, slot and frames.
+CREATE TABLE IF NOT EXISTS dot_assignment_edits (
+    -- unique id of the edit (generate_id)
+    id                 TEXT    PRIMARY KEY,
+    -- the trial the edit belongs to
+    trial_id           TEXT    NOT NULL REFERENCES trials(id),
+    -- the detection run whose tracklet ids the edit refers to
+    detection_run_id   TEXT    NOT NULL REFERENCES detection_runs(id),
+    -- capture_subjects.id the slot belongs to; NULL if the capture has a single subject
+    subject_id         TEXT,
+    -- the camera that saw the tracklet; references registry: camera_instances(id)
+    camera_instance_id TEXT    NOT NULL,
+    -- detector tracklet id, unique per detection run and camera
+    tracklet_id        INTEGER NOT NULL,
+    -- video frame range the edit covers, inclusive; both NULL for the whole tracklet
+    first_frame        INTEGER,
+    -- last frame of the range, inclusive; NULL with first_frame
+    last_frame         INTEGER,
+    -- 'assign', 'forbid' or 'reject'
+    kind               TEXT    NOT NULL CHECK (kind IN ('assign', 'forbid', 'reject')),
+    -- Marker name the edit is about; NULL for 'reject'
+    slot_name          TEXT,
+    -- UTC time the edit was made; the latest edit wins
+    created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_dot_assignment_edits_lookup
+    ON dot_assignment_edits (trial_id, detection_run_id, camera_instance_id, tracklet_id);
+
 -- Hierarchical body/hand solver: one row per (run, person, skeleton group)
 -- the solver treats as its own filter pass (e.g. "main", "HandL", "HandR").
 -- Every stage read-modify-writes the same tracking_results/

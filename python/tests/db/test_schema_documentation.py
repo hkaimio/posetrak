@@ -25,6 +25,8 @@ SQL_DIR = Path(__file__).resolve().parents[2] / "posetrak" / "db" / "sql"
 # (schema file, table). Tables that are fully column-documented.
 DOCUMENTED_TABLES = [
     ("session_schema.sql", "capture_subjects"),
+    ("session_schema.sql", "dot_assignment_edits"),
+    ("session_schema.sql", "dot_assignment_proposals"),
     ("session_schema.sql", "seg_quality_run_subjects"),
     ("session_schema.sql", "seg_quality_runs"),
     ("session_schema.sql", "sequence_persons"),

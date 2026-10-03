@@ -38,6 +38,7 @@
 #include "posetrak/tracking/seg_mask.hpp"
 #include "posetrak/tracking/streak_k_accumulator.hpp"
 #include "posetrak/tracking/tracker.hpp"
+#include "posetrak/tracking/tracklet_assignment.hpp"
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -286,6 +287,16 @@ struct DotAssignmentContext {
     /// it has a track record" reasoning that keeps a single bad frame from
     /// excluding an established one).
     TrackletMaskState* tracklet_mask_state = nullptr;
+
+    /// Decisions about whole tracklets made outside the tracker (see
+    /// TrackletAssignmentModifier). nullptr or empty means no tracklet has one, and the
+    /// modifier is not registered.
+    TrackletAssignments const* tracklet_assignments = nullptr;
+    /// Cost divisor for a pair an ASSIGN rule names: large enough that the pair passes the
+    /// gate whatever the prediction error of the frame, which the rule exists to overrule.
+    double dot_assigned_factor = 1000.0;
+    /// Cost divisor for a pair a SUGGEST rule (an automatic proposal) names.
+    double dot_suggested_factor = 3.0;
 };
 
 /// @brief One (subject, camera, marker) slot as a cost modifier sees it.
@@ -466,13 +477,34 @@ class SegmentationMaskModifier final : public CostModifier {
     const char* name() const override { return "segmentation_mask"; }
 };
 
+/// @brief Applies decisions made about whole tracklets
+/// (DotAssignmentContext::tracklet_assignments).
+///
+/// For a candidate with a tracklet id, in the frame it was detected in:
+///  - an ASSIGN rule makes the pair with the named marker cheaper by dot_assigned_factor and
+///    excludes the candidate from every other marker of the camera, so the tracker takes the
+///    decision even when this frame's prediction is too far off to pass the gate;
+///  - REJECT and OTHER exclude the candidate from every marker;
+///  - a FORBID rule excludes the pair with the named marker;
+///  - a SUGGEST rule makes the pair with the named marker cheaper by dot_suggested_factor and
+///    leaves the others alone.
+/// A candidate without a tracklet id, or whose tracklet has no rule covering its frame, is not
+/// touched. See tracklet_assignment.hpp for how a later rule overrides an earlier one.
+class TrackletAssignmentModifier final : public CostModifier {
+   public:
+    CostSupport apply(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
+                      DotAssignmentContext const& context) const override;
+    const char* name() const override { return "tracklet_assignment"; }
+};
+
 /// @brief The modifiers a context asks for, in the order they apply: tracklet
 /// continuity (only when its multiplier is above 1 and there are previous
 /// tracklet ids), then candidate ownership, then cross-view corroboration
 /// (only when dot_cross_view_corroboration_px and dot_corroboration_gate_
 /// multiplier are both set to have an effect and camera_fundamentals is not
 /// empty), then the reacquisition gate (only when dot_reacquire_gap_frames is
-/// above 0).
+/// above 0), then the segmentation-mask trust, then the decisions about whole tracklets (only when
+/// DotAssignmentContext::tracklet_assignments has rules).
 ///
 /// @param context The frame's context.
 /// @return Owning pointers to the modifiers.
@@ -659,11 +691,14 @@ std::string find_dot_config_disagreement(std::vector<TrackerConfig const*> const
 ///        forwarded unchanged to DotAssignmentContext::tracklet_mask_state.
 ///        nullptr (the default) disables the tracklet-history signal -- see
 ///        that field's own doc comment.
+/// @param tracklet_assignments Decisions about whole tracklets, forwarded to
+///        DotAssignmentContext::tracklet_assignments. nullptr (the default) means none.
 std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     std::vector<DotAssignmentSubject> const& subjects,
     std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
     TrackerConfig const& config, int frame_idx, double timestamp, AssignmentTrace* trace = nullptr,
     std::unordered_map<int, DecodedSegMask> const& seg_masks_by_camera = {},
-    TrackletMaskState* tracklet_mask_state = nullptr);
+    TrackletMaskState* tracklet_mask_state = nullptr,
+    TrackletAssignments const* tracklet_assignments = nullptr);
 
 }  // namespace posetrak

@@ -70,6 +70,7 @@ test_sources = files(
   'test_marker_prediction.cpp',
   'test_tracker_predict_update_split.cpp',
   'test_dot_assignment.cpp',
+  'test_tracklet_assignment.cpp',
   'test_streak_k_accumulator.cpp',
   'test_seg_mask.cpp',
 )

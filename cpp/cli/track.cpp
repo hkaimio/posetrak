@@ -25,6 +25,7 @@
 #include "posetrak/tracking/hierarchical_solver.hpp"
 #include "posetrak/tracking/multi_person_tracker.hpp"
 #include "posetrak/tracking/tracker.hpp"
+#include "posetrak/tracking/tracklet_assignment.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -966,7 +967,8 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                              double override_end_time = std::numeric_limits<double>::quiet_NaN(),
                              std::optional<Eigen::Vector3d> const& seed_position = std::nullopt,
                              int trace_assignment_start = -1, int trace_assignment_end = -1,
-                             std::string const& seg_run_id = "", int seg_mask_label = 0) {
+                             std::string const& seg_run_id = "", int seg_mask_label = 0,
+                             std::string const& tracklet_assignments_path = "") {
     try {
         PersonSpec spec;
         spec.sequence_id = sequence_id;
@@ -1008,6 +1010,27 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
             seg_mask_reader = std::make_unique<SessionReader>(db_path);
             camera_shot_video_ids =
                 seg_mask_reader->load_camera_shot_video_ids(ctx->sync_config_id);
+        }
+
+        // Decisions about whole dot tracklets made outside the tracker (a review of the capture,
+        // or an automatic pass over the tracklets), as a CSV keyed by camera label and marker
+        // name -- see tracklet_assignment.hpp.
+        TrackletAssignmentFile tracklet_assignments;
+        if (!tracklet_assignments_path.empty()) {
+            std::unordered_map<std::string, int> camera_ids;
+            for (auto const& [name, camera] : ctx->cameras_by_name)
+                camera_ids[name] = camera.id();
+            std::unordered_map<std::string, int> marker_ids;
+            auto const& markers = ctx->skeleton.markers();
+            for (size_t i = 0; i < markers.size(); ++i)
+                marker_ids[markers[i].name] = static_cast<int>(i);
+            tracklet_assignments =
+                load_tracklet_assignments(tracklet_assignments_path, camera_ids, marker_ids);
+            if (!quiet) {
+                fmt::print("Tracklet assignments: {} rules from {} rows ({} rows skipped)\n",
+                           tracklet_assignments.assignments.size(), tracklet_assignments.rows_read,
+                           tracklet_assignments.rows_skipped);
+            }
         }
 
         step_person_context_frame0(*ctx);
@@ -1075,7 +1098,8 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
 
                     auto assignment = resolve_shared_dot_assignment(
                         subjects, candidates_by_camera, ctx->tracker_config, step, t_effective,
-                        &trace, seg_masks_by_camera, &tracklet_mask_state);
+                        &trace, seg_masks_by_camera, &tracklet_mask_state,
+                        &tracklet_assignments.assignments);
                     frame_step_profile::add_dot_assignment_total_ms(
                         Ms(Clock::now() - t_assign0).count());
                     frame_step_profile::add_step();
@@ -1211,6 +1235,7 @@ int main(int argc, char* argv[]) {
     int db_trace_assignment_end = -1;
     std::string db_seg_run_id;
     int db_seg_mask_label = 0;
+    std::string db_tracklet_assignments;
     // Per-subject seeds for --person mode: repeated 4-value groups (person index, x, y, z).
     std::vector<double> db_subject_seeds;
     // Multi-person mode: repeated 4-value groups (sequence, skeleton, tracker_config,
@@ -1278,6 +1303,11 @@ int main(int argc, char* argv[]) {
         "This subject's own label (1..N) within --seg-run-id's masks -- resolve this from the "
         "subject's name against seg_quality_runs.persons_json before invoking the tracker; "
         "C++ does no name resolution of its own.");
+    track_cmd->add_option(
+        "--tracklet-assignments", db_tracklet_assignments,
+        "CSV file of decisions about whole dot tracklets (camera_label,tracklet_id,first_frame,"
+        "last_frame,kind,marker_name; kind assign|forbid|reject|other|suggest) that the shared "
+        "dot assignment follows -- see tracklet_assignment.hpp. Single-subject DB mode only.");
     track_cmd
         ->add_option("--seed-position", db_seed_position,
                      "Externally-supplied initial root position (x y z, meters), bypassing "
@@ -1380,12 +1410,12 @@ int main(int argc, char* argv[]) {
                            "Error: --seg-run-id and --seg-mask-label must be given together\n");
                 return 1;
             }
-            return run_track_from_db(db_path, db_sequence_id, db_skeleton_id, db_config_id,
-                                     db_output_dir, verbose, quiet, smooth_output, debug_output,
-                                     debug_init, db_min_confidence, db_person_id,
-                                     db_active_joint_groups, db_start_time, db_end_time,
-                                     seed_position, db_trace_assignment_start,
-                                     db_trace_assignment_end, db_seg_run_id, db_seg_mask_label);
+            return run_track_from_db(
+                db_path, db_sequence_id, db_skeleton_id, db_config_id, db_output_dir, verbose,
+                quiet, smooth_output, debug_output, debug_init, db_min_confidence, db_person_id,
+                db_active_joint_groups, db_start_time, db_end_time, seed_position,
+                db_trace_assignment_start, db_trace_assignment_end, db_seg_run_id,
+                db_seg_mask_label, db_tracklet_assignments);
         } else {
             if (track_config.empty()) {
                 fmt::print(stderr, "Error: config file required when not using --session-db\n");

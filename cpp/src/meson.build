@@ -47,6 +47,7 @@ posetrak_sources = files(
   'tracking/hierarchical_solver.cpp',
   'tracking/marker_prediction.cpp',
   'tracking/dot_assignment.cpp',
+  'tracking/tracklet_assignment.cpp',
   'tracking/streak_k_accumulator.cpp',
   'tracking/seg_mask.cpp',
   'tracking/dot_predict_profile.cpp',

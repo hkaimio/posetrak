@@ -90,6 +90,32 @@ CostSupport CandidateOwnershipModifier::apply(DotSlotRef const& slot,
     return {1.0, !owned};
 }
 
+CostSupport TrackletAssignmentModifier::apply(DotSlotRef const& slot,
+                                              UnlabeledCandidate const& candidate,
+                                              DotAssignmentContext const& context) const {
+    if (context.tracklet_assignments == nullptr || candidate.tracklet_id < 0)
+        return {};
+    auto const verdict = context.tracklet_assignments->verdict(
+        candidate.camera_id, candidate.tracklet_id, candidate.frame_idx);
+    switch (verdict.kind) {
+        case TrackletVerdict::Kind::EXCLUDED:
+            return {1.0, true};
+        case TrackletVerdict::Kind::ASSIGNED:
+            if (verdict.assigned_marker == slot.marker_id)
+                return {context.dot_assigned_factor, false};
+            return {1.0, true};
+        case TrackletVerdict::Kind::NONE:
+            break;
+    }
+    for (int const forbidden : verdict.forbidden_markers) {
+        if (forbidden == slot.marker_id)
+            return {1.0, true};
+    }
+    if (verdict.suggested_marker == slot.marker_id)
+        return {context.dot_suggested_factor, false};
+    return {};
+}
+
 CostSupport ReacquisitionGateModifier::apply(DotSlotRef const& slot,
                                              UnlabeledCandidate const& candidate,
                                              DotAssignmentContext const& context) const {
@@ -203,6 +229,8 @@ default_cost_modifiers(DotAssignmentContext const& context) {
     if (context.dot_seg_mask_enabled && !context.seg_mask_subject.empty() &&
         context.tracklet_mask_state != nullptr)
         modifiers.push_back(std::make_unique<SegmentationMaskModifier>());
+    if (context.tracklet_assignments != nullptr && !context.tracklet_assignments->empty())
+        modifiers.push_back(std::make_unique<TrackletAssignmentModifier>());
     return modifiers;
 }
 
@@ -625,7 +653,7 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
     TrackerConfig const& config, int frame_idx, double timestamp, AssignmentTrace* trace,
     std::unordered_map<int, DecodedSegMask> const& seg_masks_by_camera,
-    TrackletMaskState* tracklet_mask_state) {
+    TrackletMaskState* tracklet_mask_state, TrackletAssignments const* tracklet_assignments) {
     std::vector<SubjectDotPredictions> predictions;
     predictions.reserve(subjects.size());
     PrevDotPositions prev_positions;
@@ -701,6 +729,7 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     context.seg_mask_subject = std::move(seg_mask_subject);
     context.seg_masks_by_camera = seg_masks_by_camera;
     context.tracklet_mask_state = tracklet_mask_state;
+    context.tracklet_assignments = tracklet_assignments;
     // Fundamental matrices are pure geometry from the calibrated cameras, so any
     // subject's own Tracker gives the same answer -- same "first subject" precedent
     // as streak_k_state above (every dot-bearing subject here is assumed built

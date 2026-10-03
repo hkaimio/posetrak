@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS dot_assignment_proposals (
     tracklet_id        INTEGER NOT NULL,
     first_frame        INTEGER NOT NULL,
     last_frame         INTEGER NOT NULL,
-    slot_name          TEXT    NOT NULL,
+    slot_name          TEXT,
     cost_px            REAL    NOT NULL,
     margin_px          REAL    NOT NULL,
     support            TEXT    NOT NULL,

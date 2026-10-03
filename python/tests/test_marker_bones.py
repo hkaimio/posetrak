@@ -354,3 +354,28 @@ def test_effective_slot_edits_override_proposal():
     assert effective_slot(p, [forbid, assign], 5) == ("wrist_uln_L", "edit")
     assert effective_slot(p, [assign], 60) == ("wrist_rad_L", "proposal")      # outside the edit's range
     assert effective_slot(p, [assign, Edit("c", 1, "reject", None)], 5) == (None, "edit")
+
+
+def test_segments_split_at_edit_ranges():
+    from posetrak.markers.review import Edit, Proposal, segments
+    p = Proposal("c", 1, 0, 99, "a", 1.0, 1.0, "alone", "high")
+    assert segments(0, 99, p, []) == [(0, 99, "a", "proposal")]
+    got = segments(0, 99, p, [Edit("c", 1, "assign", "b", 40, 59)])
+    assert got == [(0, 39, "a", "proposal"), (40, 59, "b", "edit"), (60, 99, "a", "proposal")]
+
+
+def test_edits_round_trip_through_the_session_tables():
+    import sqlite3
+    from posetrak.db.db import _migrate_session_v61_to_v62
+    from posetrak.markers.review import Edit, Proposal, add_edit, load_edits, load_proposals, remove_edit, save_proposals
+    conn = sqlite3.connect(":memory:")
+    _migrate_session_v61_to_v62(conn)
+    save_proposals(conn, "det", None, [Proposal("c", 1, 0, 9, None, 99.0, 0.0, "alone", "none"),
+                                       Proposal("c", 2, 0, 9, "a", 5.0, 20.0, "corroborated", "high")])
+    assert {p.slot for p in load_proposals(conn, "det")} == {None, "a"}
+    first = add_edit(conn, "trial", "det", Edit("c", 2, "forbid", "a"))
+    add_edit(conn, "trial", "det", Edit("c", 2, "assign", "b", 3, 5))
+    assert [e.kind for e in load_edits(conn, "trial", "det")] == ["forbid", "assign"]
+    remove_edit(conn, first)
+    assert [e.kind for e in load_edits(conn, "trial", "det")] == ["assign"]
+    assert load_edits(conn, "other-trial", "det") == []

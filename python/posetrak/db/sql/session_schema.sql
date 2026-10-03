@@ -457,7 +457,7 @@ CREATE INDEX IF NOT EXISTS idx_tracking_assignment_trace_lookup
 
 -- Automatic proposals of which marker slot each dot tracklet is, made without the
 -- tracker from the stored poses of a tracking run (posetrak.markers.autolabel).
--- One row per assigned tracklet; a tracklet no slot fitted has no row. Written
+-- One row per tracklet lying on the subject, assigned or not. Written
 -- by the proposal pass, one proposal_set per execution, and only read by the
 -- review tools; a re-run adds a new set, it never rewrites an old one.
 CREATE TABLE IF NOT EXISTS dot_assignment_proposals (
@@ -475,15 +475,16 @@ CREATE TABLE IF NOT EXISTS dot_assignment_proposals (
     first_frame        INTEGER NOT NULL,
     -- last video frame of the tracklet
     last_frame         INTEGER NOT NULL,
-    -- the proposed marker: a Marker name of the skeleton, e.g. wrist_rad_L
-    slot_name          TEXT    NOT NULL,
+    -- the proposed marker: a Marker name of the skeleton, e.g. wrist_rad_L; NULL for a tracklet on
+    -- the person that no slot fitted (confidence 'none'), kept so that it can be assigned by hand
+    slot_name          TEXT,
     -- median distance in distorted pixels between the tracklet and the slot's predicted position
     cost_px            REAL    NOT NULL,
     -- extra cost in pixels of the next best free slot; large means unambiguous
     margin_px          REAL    NOT NULL,
     -- cross-camera check: 'corroborated', 'conflict' or 'alone'
     support            TEXT    NOT NULL,
-    -- 'high', 'medium' or 'review': how far the proposal can be trusted without a human
+    -- 'high', 'medium' or 'review': how far the proposal can be trusted without a human; 'none' without a slot
     confidence         TEXT    NOT NULL,
     -- the tracking run whose stored poses predicted the slots; NULL if unknown
     pose_run_id        TEXT    REFERENCES tracking_runs(id),

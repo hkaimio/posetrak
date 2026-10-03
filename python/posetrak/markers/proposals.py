@@ -16,6 +16,8 @@ import argparse
 import sqlite3
 from pathlib import Path
 
+import numpy as np
+
 from posetrak.calibration.session_cameras import load_camera_states, load_sync_table
 from posetrak.markers.autolabel import (
     Predictor, assign, check_consistency, load_placements, score_tracklets,
@@ -55,9 +57,16 @@ def propose(conn: sqlite3.Connection, shot_id: str, detection_run: str, seg_run:
         assign(cam_scores)
         scores += cam_scores
     check_consistency(scores, predictor, svid_by_cam, sync)
-    return [Proposal(s.cam_id, s.tracklet_id, s.first_frame, s.last_frame, predictor.names[s.slot],
-                     float(s.cost[s.slot]), float(s.margin), s.support, s.confidence)
-            for s in scores if s.slot is not None]
+    return [Proposal(s.cam_id, s.tracklet_id, s.first_frame, s.last_frame,
+                     None if s.slot is None else predictor.names[s.slot],
+                     float(s.cost[s.slot]) if s.slot is not None else _best_cost(s.cost),
+                     float(s.margin), s.support, s.confidence)
+            for s in scores]
+
+
+def _best_cost(cost: np.ndarray) -> float:
+    """The cost of the closest slot, a large number if none is visible."""
+    return float(cost[np.isfinite(cost)].min()) if np.isfinite(cost).any() else 1e9
 
 
 def main() -> None:

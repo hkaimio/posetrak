@@ -24,6 +24,7 @@ class Edit:
     first_frame: int | None = None
     last_frame: int | None = None
     created_at: str = ""
+    id: str = ""                   # the stored row's id; empty for an edit not stored yet
 
     def covers(self, frame: int) -> bool:
         return self.first_frame is None or self.first_frame <= frame <= (self.last_frame or self.first_frame)
@@ -35,7 +36,7 @@ class Proposal:
     tracklet_id: int
     first_frame: int
     last_frame: int
-    slot: str
+    slot: str | None            # None: on the subject but no slot fitted
     cost_px: float
     margin_px: float
     support: str
@@ -70,19 +71,27 @@ def load_proposals(conn: sqlite3.Connection, detection_run_id: str, proposal_set
 
 
 def add_edit(conn: sqlite3.Connection, trial_id: str, detection_run_id: str, edit: Edit,
-             subject_id: str | None = None) -> None:
+             subject_id: str | None = None) -> str:
+    """Store *edit* and return its id."""
+    edit_id = str(uuid.uuid4())
     conn.execute(
         "INSERT INTO dot_assignment_edits (id, trial_id, detection_run_id, subject_id, camera_instance_id,"
         " tracklet_id, first_frame, last_frame, kind, slot_name) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (str(uuid.uuid4()), trial_id, detection_run_id, subject_id, edit.camera_id, edit.tracklet_id,
+        (edit_id, trial_id, detection_run_id, subject_id, edit.camera_id, edit.tracklet_id,
          edit.first_frame, edit.last_frame, edit.kind, edit.slot))
+    conn.commit()
+    return edit_id
+
+
+def remove_edit(conn: sqlite3.Connection, edit_id: str) -> None:
+    conn.execute("DELETE FROM dot_assignment_edits WHERE id=?", (edit_id,))
     conn.commit()
 
 
 def load_edits(conn: sqlite3.Connection, trial_id: str, detection_run_id: str) -> list[Edit]:
     """All edits of the trial for the run, oldest first."""
     return [Edit(*r) for r in conn.execute(
-        "SELECT camera_instance_id, tracklet_id, kind, slot_name, first_frame, last_frame, created_at"
+        "SELECT camera_instance_id, tracklet_id, kind, slot_name, first_frame, last_frame, created_at, id"
         " FROM dot_assignment_edits WHERE trial_id=? AND detection_run_id=? ORDER BY created_at, rowid",
         (trial_id, detection_run_id))]
 
@@ -101,3 +110,23 @@ def effective_slot(proposal: Proposal | None, edits: list[Edit], frame: int) -> 
     if proposal is not None and not any(e.kind == "forbid" and e.slot == proposal.slot for e in covering):
         return proposal.slot, "proposal"
     return None, "none"
+
+
+def segments(first_frame: int, last_frame: int, proposal: Proposal | None, edits: list[Edit]) -> list[tuple[int, int, str | None, str]]:
+    """The tracklet split into runs of frames with one effective slot: (first, last, slot, origin).
+
+    Edits with a frame range can change the slot part way through a tracklet.
+    """
+    cuts = {first_frame, last_frame + 1}
+    for e in edits:
+        if e.first_frame is not None:
+            cuts.update((max(first_frame, e.first_frame), min(last_frame, e.last_frame or e.first_frame) + 1))
+    bounds = sorted(c for c in cuts if first_frame <= c <= last_frame + 1)
+    out: list[tuple[int, int, str | None, str]] = []
+    for a, b in zip(bounds, bounds[1:]):
+        slot, origin = effective_slot(proposal, edits, a)
+        if out and out[-1][2:] == (slot, origin):
+            out[-1] = (out[-1][0], b - 1, slot, origin)
+        else:
+            out.append((a, b - 1, slot, origin))
+    return out

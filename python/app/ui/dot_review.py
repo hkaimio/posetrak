@@ -401,13 +401,18 @@ class FramePane(QWidget):
         self.service.request(self.data.svid_by_cam[camera], self.data.frame_at(camera, t))
         self.update()
 
-    def _nearest_position(self, tr: Tracklet, frame: int):
+    def _nearest_position(self, tr: Tracklet, frame: int, extend: bool = False):
+        """Where the tracklet's dot is at *frame*: the detection itself, or across a dropout of up to
+        three frames the nearest one. Outside the frames the tracklet was detected in there is none,
+        unless *extend* (to keep the view on the selection when the playhead is past its ends)."""
         frames = tr.frames
         if frame in frames:
             return frames[frame]
         order = sorted(frames)
+        if not order or not (extend or order[0] <= frame <= order[-1]):
+            return None
         k = bisect.bisect_left(order, frame)
-        near = [order[i] for i in (k - 1, k) if 0 <= i < len(order) and abs(order[i] - frame) <= 3]
+        near = [order[i] for i in (k - 1, k) if 0 <= i < len(order) and (extend or abs(order[i] - frame) <= 3)]
         return frames[min(near, key=lambda f: abs(f - frame))] if near else None
 
     def paintEvent(self, _event) -> None:
@@ -419,7 +424,7 @@ class FramePane(QWidget):
         svid = self.data.svid_by_cam[self.camera]
         frame = self.data.frame_at(self.camera, self.t)
         got = self.service.get(svid, frame)
-        focus = self._nearest_position(self.selection, frame) if self.selection and self.zoomed else None
+        focus = self._nearest_position(self.selection, frame, extend=True) if self.selection and self.zoomed else None
         if focus is not None and got is not None:
             r = self.CROP
             self.service.request_region(svid, frame, (focus[0] - r / 2, focus[1] - r / 2, focus[0] + r / 2, focus[1] + r / 2), 1.0)
@@ -438,13 +443,13 @@ class FramePane(QWidget):
                      view * scale_img, view * scale_img)
         p.drawImage(QRectF(0, 0, side, side), image, src)
         for tr in self.data.tracklets[self.camera].values():
-            xy = self._nearest_position(tr, frame) if tr.first_frame - 3 <= frame <= tr.last_frame + 3 else None
+            xy = self._nearest_position(tr, frame)
             if xy is None:
                 continue
             pt = QPointF((xy[0] - cx) * zoom + side / 2, (xy[1] - cy) * zoom + side / 2)
             if not (0 <= pt.x() <= side and 0 <= pt.y() <= side):
                 continue
-            slot, origin = self.data.slot_at(tr, min(max(frame, tr.first_frame), tr.last_frame))
+            slot, origin = self.data.slot_at(tr, frame)
             colour = QColor(EDIT_COLOUR if origin == "edit" else PROPOSAL_COLOURS[tr.proposal.confidence])
             chosen = tr is self.selection
             p.setPen(QPen(QColor("#ffe040") if chosen else colour, 3 if chosen else 2)); p.setBrush(Qt.NoBrush)

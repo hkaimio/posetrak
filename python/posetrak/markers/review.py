@@ -5,8 +5,11 @@
 """review.py — storage of dot-assignment proposals and the human edits made over them.
 
 A proposal says which slot a dot tracklet probably is (see autolabel.py); an edit is a
-human decision. :func:`effective_slot` combines them: the latest assign edit covering a
-frame wins, then a reject, then the proposal unless a forbid edit rules it out.
+human decision. :func:`effective_slot` combines them: the latest assign, reject or other edit
+covering a frame wins, then the proposal unless a forbid edit rules it out.
+
+A tracklet a human has classed as clutter or as another subject's marker has the pseudo-slot
+:data:`NOT_A_MARKER` or :data:`OTHER_SUBJECT`; one nobody has decided about has no slot.
 """
 from __future__ import annotations
 
@@ -15,11 +18,15 @@ import uuid
 from dataclasses import dataclass
 
 
+NOT_A_MARKER = "<not a marker>"
+OTHER_SUBJECT = "<other subject>"
+
+
 @dataclass(frozen=True)
 class Edit:
     camera_id: str
     tracklet_id: int
-    kind: str                      # assign | forbid | reject
+    kind: str                      # assign | forbid | reject | other
     slot: str | None
     first_frame: int | None = None
     last_frame: int | None = None
@@ -106,7 +113,9 @@ def effective_slot(proposal: Proposal | None, edits: list[Edit], frame: int) -> 
         if e.kind == "assign":
             return e.slot, "edit"
         if e.kind == "reject":
-            return None, "edit"
+            return NOT_A_MARKER, "edit"
+        if e.kind == "other":
+            return OTHER_SUBJECT, "edit"
     if proposal is not None and not any(e.kind == "forbid" and e.slot == proposal.slot for e in covering):
         return proposal.slot, "proposal"
     return None, "none"

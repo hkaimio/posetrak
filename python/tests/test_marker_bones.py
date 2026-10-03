@@ -345,7 +345,7 @@ def test_confidence_without_partners():
 
 
 def test_effective_slot_edits_override_proposal():
-    from posetrak.markers.review import Edit, Proposal, effective_slot
+    from posetrak.markers.review import NOT_A_MARKER, OTHER_SUBJECT, Edit, Proposal, effective_slot
     p = Proposal("c", 1, 0, 99, "wrist_rad_L", 10.0, 30.0, "alone", "high")
     assert effective_slot(p, [], 5) == ("wrist_rad_L", "proposal")
     forbid = Edit("c", 1, "forbid", "wrist_rad_L")
@@ -353,7 +353,8 @@ def test_effective_slot_edits_override_proposal():
     assign = Edit("c", 1, "assign", "wrist_uln_L", 0, 49)
     assert effective_slot(p, [forbid, assign], 5) == ("wrist_uln_L", "edit")
     assert effective_slot(p, [assign], 60) == ("wrist_rad_L", "proposal")      # outside the edit's range
-    assert effective_slot(p, [assign, Edit("c", 1, "reject", None)], 5) == (None, "edit")
+    assert effective_slot(p, [assign, Edit("c", 1, "reject", None)], 5) == (NOT_A_MARKER, "edit")
+    assert effective_slot(p, [Edit("c", 1, "other", None)], 5) == (OTHER_SUBJECT, "edit")
 
 
 def test_segments_split_at_edit_ranges():
@@ -379,3 +380,18 @@ def test_edits_round_trip_through_the_session_tables():
     remove_edit(conn, first)
     assert [e.kind for e in load_edits(conn, "trial", "det")] == ["assign"]
     assert load_edits(conn, "other-trial", "det") == []
+
+
+def test_duplicate_slot_overlap_detected():
+    from types import SimpleNamespace
+    from posetrak.markers.review import Proposal
+    from app.ui.dot_review import ReviewData, Tracklet
+
+    def tracklet(tid, first, last, slot):
+        return Tracklet("c", tid, first, last, {}, Proposal("c", tid, first, last, slot, 1.0, 1.0, "alone", "high"))
+
+    fake = SimpleNamespace(
+        tracklets={"c": {t.tracklet_id: t for t in (tracklet(1, 0, 9, "a"), tracklet(2, 5, 14, "a"), tracklet(3, 20, 29, "a"), tracklet(4, 0, 9, "b"))}},
+        time_of=lambda cam, f: f / 10.0, edits_of=lambda t: [])
+    fake.segments_of = lambda t: ReviewData.segments_of(fake, t)
+    assert ReviewData.duplicates(fake, "c") == [("a", 0.5, 1.0)]

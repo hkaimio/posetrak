@@ -14,7 +14,7 @@ selected one, with their slots; clicking a ring selects that tracklet. Right-cli
 or ring to assign it to a slot, forbid its slot, mark it as not a marker, or clear the
 edits made to it. Edits are stored per trial (posetrak.markers.review).
 
-Keys: N next tracklet to review, Z whole frame / zoom to the selection, A accept the proposal, Delete reject, Ctrl+Z undo,
+Keys: N next tracklet to review, Z whole frame / zoom to the selection, A accept the proposal, Delete not a marker, O marker of another subject, Ctrl+Z undo,
 Left/Right step a frame.
 """
 from __future__ import annotations
@@ -35,14 +35,19 @@ from PySide6.QtWidgets import (
 from app.pose.frame_service import FrameService
 from posetrak.calibration.session_cameras import load_sync_table
 from posetrak.markers.review import (
-    Edit, Proposal, add_edit, effective_slot, load_edits, load_proposals, remove_edit, segments,
+    NOT_A_MARKER, OTHER_SUBJECT, Edit, Proposal, add_edit, effective_slot, load_edits, load_proposals, remove_edit, segments,
 )
 from posetrak.markers.tracklets import collect_tracklets
 
 ROW_H = 18
 LABEL_W = 170
 RULER_H = 22
-UNASSIGNED = "Unassigned"
+UNASSIGNED = "Unassigned"           # tracklets nobody has decided about
+CLUTTER = "Not a marker"
+OTHER = "Other subject"
+SECTION_OF = {None: UNASSIGNED, NOT_A_MARKER: CLUTTER, OTHER_SUBJECT: OTHER}
+SECTIONS = (UNASSIGNED, CLUTTER, OTHER)
+DUPLICATE_COLOUR = "#ff2fd0"
 PROPOSAL_COLOURS = {"high": "#46a05a", "medium": "#c8aa32", "review": "#d25a3c", "none": "#787878"}
 EDIT_COLOUR = "#2f6fe0"
 
@@ -108,6 +113,23 @@ class ReviewData:
     def slot_at(self, t: Tracklet, frame: int) -> tuple[str | None, str]:
         return effective_slot(t.proposal, self.edits_of(t), frame)
 
+    def duplicates(self, cam: str) -> list[tuple[str, float, float]]:
+        """Where two tracklets of the camera have the same slot at the same time: (slot, from, to) in seconds."""
+        by_slot: dict[str, list[tuple[float, float]]] = {}
+        for t in self.tracklets[cam].values():
+            for f0, f1, slot, _ in self.segments_of(t):
+                if slot is not None and slot not in SECTION_OF:
+                    by_slot.setdefault(slot, []).append((self.time_of(cam, f0), self.time_of(cam, f1 + 1)))
+        out = []
+        for slot, spans in by_slot.items():
+            spans.sort()
+            for i, (a0, a1) in enumerate(spans):
+                for b0, b1 in spans[i + 1:]:
+                    if b0 >= a1:
+                        break
+                    out.append((slot, b0, min(a1, b1)))
+        return out
+
     def needs_review(self, t: Tracklet) -> bool:
         return not self.edits_of(t) and t.proposal.confidence != "high" and t.proposal.slot is not None
 
@@ -148,9 +170,12 @@ class DopeSheet(QWidget):
     def __init__(self, data: ReviewData) -> None:
         super().__init__()
         self.data, self.camera = data, None
-        self.collapsed: set[str] = set()
+        self.collapsed: set[str] = {CLUTTER, OTHER}
         self.show_none = True
-        self._lane_of: dict[tuple[int, int], int] = {}     # (tracklet id, first frame of segment) -> lane
+        self._lane_of: dict[tuple[int, int], tuple[str, int]] = {}   # (tracklet id, first frame of segment) -> (section, lane)
+        self._section_count: dict[str, int] = {}
+        self._dups: list[tuple[str, float, float]] = []    # slot, from, to: two tracklets of the camera on one slot
+        self._dup_groups: set[str] = set()
         self.playhead = 0.0
         self.t_left, self.px_per_s, self.y_off = 0.0, 40.0, 0
         self.selection: Tracklet | None = None
@@ -169,31 +194,42 @@ class DopeSheet(QWidget):
 
     def _build_rows(self) -> None:
         self._rows = []
+        lanes = self._pack_sections()
+        self._dups = self.data.duplicates(self.camera)
+        self._dup_groups = {self.data.group_of[slot] for slot, _, _ in self._dups}
         for group, slots in self.data.groups.items():
             self._rows.append(("group", group))
             if group not in self.collapsed:
                 self._rows += [("slot", s) for s in slots]
-        lanes = self._pack_unassigned()
         if self.show_none:
-            self._rows.append(("group", UNASSIGNED))
-            if UNASSIGNED not in self.collapsed:
-                self._rows += [("lane", str(i)) for i in range(lanes)]
+            for title in SECTIONS:
+                self._rows.append(("group", title))
+                if title not in self.collapsed:
+                    self._rows += [("lane", f"{title}|{i}") for i in range(lanes[title])]
 
-    def _pack_unassigned(self) -> int:
-        """Stack the segments without a slot into as few lanes as hold them without overlap."""
-        segs = sorted((self.data.time_of(self.camera, f0), self.data.time_of(self.camera, f1 + 1), t.tracklet_id, f0)
-                      for t in self.data.tracklets[self.camera].values()
-                      for f0, f1, slot, _ in self.data.segments_of(t) if slot is None)
-        ends: list[float] = []
-        self._lane_of = {}
-        for start, end, tid, f0 in segs:
-            lane = next((i for i, e in enumerate(ends) if e <= start), None)
-            if lane is None:
-                ends.append(end); lane = len(ends) - 1
-            else:
-                ends[lane] = end
-            self._lane_of[(tid, f0)] = lane
-        return len(ends)
+    def _pack_sections(self) -> dict[str, int]:
+        """Stack the segments without a slot (undecided, clutter, other subject) into as few lanes
+        per section as hold them without overlap."""
+        by_section: dict[str, list] = {title: [] for title in SECTIONS}
+        for t in self.data.tracklets[self.camera].values():
+            for f0, f1, slot, _ in self.data.segments_of(t):
+                if slot is None or slot in SECTION_OF:
+                    by_section[SECTION_OF[slot]].append(
+                        (self.data.time_of(self.camera, f0), self.data.time_of(self.camera, f1 + 1), t.tracklet_id, f0))
+        self._lane_of, lanes = {}, {}
+        for title, segs in by_section.items():
+            ends: list[float] = []
+            for start, end, tid, f0 in sorted(segs):
+                lane = next((i for i, e in enumerate(ends) if e <= start), None)
+                if lane is None:
+                    ends.append(end)
+                    lane = len(ends) - 1
+                else:
+                    ends[lane] = end
+                self._lane_of[(tid, f0)] = (title, lane)
+            lanes[title] = len(ends)
+            self._section_count[title] = len(segs)
+        return lanes
 
     def refresh(self) -> None:
         """Rebuild the rows after edits changed which tracklets lack a slot."""
@@ -201,9 +237,9 @@ class DopeSheet(QWidget):
         self.update()
 
     def _row_of(self, slot: str | None, t: Tracklet | None = None, f0: int = 0) -> int | None:
-        if slot is None:
+        if slot is None or slot in SECTION_OF:
             lane = self._lane_of.get((t.tracklet_id, f0)) if t is not None else None
-            key = ("lane", str(lane))
+            key = ("lane", f"{lane[0]}|{lane[1]}") if lane else None
         else:
             key = ("slot", slot)
         for i, row in enumerate(self._rows):
@@ -232,7 +268,13 @@ class DopeSheet(QWidget):
             elif kind == "group":
                 p.fillRect(0, y, self.width(), ROW_H, QColor("#2b2d31"))
                 p.setPen(QColor("#d0d0d0"))
-                p.drawText(6, y, LABEL_W, ROW_H, Qt.AlignVCenter, ("▸ " if name in self.collapsed else "▾ ") + name)
+                label = ("▸ " if name in self.collapsed else "▾ ") + name
+                if name in SECTIONS:
+                    label += f" ({self._section_count.get(name, 0)})"
+                if name in self._dup_groups:
+                    p.setPen(QColor(DUPLICATE_COLOUR))
+                    label += "  ⚠ duplicate"
+                p.drawText(6, y, LABEL_W + 60, ROW_H, Qt.AlignVCenter, label)
             else:
                 p.setPen(QColor("#2f3136")); p.drawLine(LABEL_W, y + ROW_H, self.width(), y + ROW_H)
                 p.setPen(QColor("#a0a0a0")); p.drawText(18, y, LABEL_W - 18, ROW_H, Qt.AlignVCenter, name)
@@ -258,6 +300,17 @@ class DopeSheet(QWidget):
                 if rect.width() > 36:
                     p.setPen(QColor("#ffffff")); p.drawText(rect, Qt.AlignCenter, str(t.tracklet_id))
                 self._hits.append((rect, t))
+        for slot, ta, tb in self._dups:           # two tracklets claim one slot at once
+            row = self._row_of(slot)
+            if row is None:
+                continue
+            y = top + row * ROW_H - self.y_off
+            x0, x1 = max(self.x_of(ta), LABEL_W), self.x_of(tb)
+            if x1 < LABEL_W or x0 > self.width() or y + ROW_H < top or y > self.height():
+                continue
+            p.setPen(QPen(QColor(DUPLICATE_COLOUR), 2))
+            p.setBrush(QBrush(QColor(DUPLICATE_COLOUR), Qt.BDiagPattern))
+            p.drawRect(QRectF(x0, y + 1, max(x1 - x0, 3.0), ROW_H - 2))
         p.fillRect(0, 0, self.width(), RULER_H, QColor("#2b2d31"))
         p.setPen(QColor("#c0c0c0"))
         step = 1 if self.px_per_s >= 30 else 5 if self.px_per_s >= 6 else 20
@@ -317,7 +370,7 @@ class DopeSheet(QWidget):
     def reveal(self, t: Tracklet) -> None:
         """Scroll so the tracklet's first segment is in view."""
         slot = self.data.slot_at(t, t.first_frame)[0]
-        group = self.data.group_of.get(slot, UNASSIGNED)
+        group = self.data.group_of.get(slot) or SECTION_OF.get(slot, UNASSIGNED)
         if group in self.collapsed:
             self.collapsed.discard(group); self._build_rows()
         row = self._row_of(slot, t, t.first_frame)
@@ -397,7 +450,7 @@ class FramePane(QWidget):
             p.setPen(QPen(QColor("#ffe040") if chosen else colour, 3 if chosen else 2)); p.setBrush(Qt.NoBrush)
             p.drawEllipse(pt, 11, 11)
             p.setPen(QColor("#ffffff"))
-            p.drawText(int(pt.x()) + 14, int(pt.y()) - 6, slot or "?")
+            p.drawText(int(pt.x()) + 14, int(pt.y()) - 6, SECTION_OF[slot] if slot in SECTION_OF else slot)
             self._rings.append((pt, tr))
 
     def _ring_at(self, pos) -> Tracklet | None:
@@ -457,7 +510,7 @@ class ReviewWindow(QMainWindow):
         self.sheet.context_requested.connect(self.context_menu)
         self.frame.tracklet_picked.connect(self._pick_from_frame)
         self.frame.context_requested.connect(self.context_menu)
-        for key, fn in (("N", self.next_to_review), ("A", self.accept_selected), ("Delete", self.reject_selected),
+        for key, fn in (("N", self.next_to_review), ("A", self.accept_selected), ("Delete", self.reject_selected), ("O", self.other_selected),
                         ("Ctrl+Z", self.undo), ("Z", self.toggle_zoom), ("Left", lambda: self.step(-1)), ("Right", lambda: self.step(1))):
             QShortcut(QKeySequence(key), self, activated=fn)
         self.sheet.playhead = self.sheet.t_left + 0.5
@@ -508,7 +561,7 @@ class ReviewWindow(QMainWindow):
         mine = list(self.data.tracklets[self.camera].values())
         todo = sum(1 for t in mine if self.data.needs_review(t))
         done = sum(1 for t in mine if self.data.edits_of(t))
-        self.status.setText(f"{self.camera_box.currentText()}: {len(mine)} tracklets, {done} with a decision, {todo} left to review")
+        self.status.setText(f"{self.camera_box.currentText()}: {len(mine)} tracklets, {done} with a decision, {todo} left to review, {len(self.sheet._dups)} slot overlaps")
 
     def toggle_zoom(self) -> None:
         self.frame.zoomed = not self.frame.zoomed
@@ -524,6 +577,12 @@ class ReviewWindow(QMainWindow):
         t = self.sheet.selection
         if t is not None:
             self.data.add(t, "reject", None, *self._range(t))
+            self._changed()
+
+    def other_selected(self) -> None:
+        t = self.sheet.selection
+        if t is not None:
+            self.data.add(t, "other", None, *self._range(t))
             self._changed()
 
     def accept_all_high(self) -> None:
@@ -571,7 +630,8 @@ class ReviewWindow(QMainWindow):
                 sub.addAction(s, lambda s=s: (self.data.add(t, "assign", s, first, last), self._changed()))
         if current:
             menu.addAction(f"Not {current} (forbid)", lambda: (self.data.add(t, "forbid", current, first, last), self._changed()))
-        menu.addAction("Not a marker (reject)", lambda: (self.data.add(t, "reject", None, first, last), self._changed()))
+        menu.addAction("Not a marker (clutter)", lambda: (self.data.add(t, "reject", None, first, last), self._changed()))
+        menu.addAction("Marker of another subject", lambda: (self.data.add(t, "other", None, first, last), self._changed()))
         if self.data.edits_of(t):
             menu.addAction("Clear my edits", lambda: (self.data.clear(t), self._changed()))
         menu.exec(pos)

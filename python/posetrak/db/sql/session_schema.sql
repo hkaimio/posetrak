@@ -499,7 +499,8 @@ CREATE INDEX IF NOT EXISTS idx_dot_assignment_proposals_lookup
 -- Human decisions about dot tracklets, made in the dot-assignment review and kept per
 -- trial like keypoint edits. 'assign' says the tracklet is slot_name, 'forbid' that it
 -- is not slot_name (many forbids may apply to one tracklet), 'reject' that it is not
--- a marker at all (slot_name NULL). The frame range limits an edit to part of a
+-- a marker at all (clutter, a reflection) and 'other' that it is a marker of another subject
+-- (a prop, another person) and so belongs to no slot of this one; both have slot_name NULL. The frame range limits an edit to part of a
 -- tracklet, whose identity can jump between dots; NULL range means the whole tracklet.
 -- A later row overrides an earlier one for the same tracklet, slot and frames.
 CREATE TABLE IF NOT EXISTS dot_assignment_edits (
@@ -519,9 +520,9 @@ CREATE TABLE IF NOT EXISTS dot_assignment_edits (
     first_frame        INTEGER,
     -- last frame of the range, inclusive; NULL with first_frame
     last_frame         INTEGER,
-    -- 'assign', 'forbid' or 'reject'
-    kind               TEXT    NOT NULL CHECK (kind IN ('assign', 'forbid', 'reject')),
-    -- Marker name the edit is about; NULL for 'reject'
+    -- 'assign', 'forbid', 'reject' or 'other'
+    kind               TEXT    NOT NULL CHECK (kind IN ('assign', 'forbid', 'reject', 'other')),
+    -- Marker name the edit is about; NULL for 'reject' and 'other'
     slot_name          TEXT,
     -- UTC time the edit was made; the latest edit wins
     created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))

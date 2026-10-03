@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS dot_assignment_edits (
     tracklet_id        INTEGER NOT NULL,
     first_frame        INTEGER,
     last_frame         INTEGER,
-    kind               TEXT    NOT NULL CHECK (kind IN ('assign', 'forbid', 'reject')),
+    kind               TEXT    NOT NULL CHECK (kind IN ('assign', 'forbid', 'reject', 'other')),
     slot_name          TEXT,
     created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );

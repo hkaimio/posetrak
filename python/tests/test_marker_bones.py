@@ -395,3 +395,33 @@ def test_duplicate_slot_overlap_detected():
         time_of=lambda cam, f: f / 10.0, edits_of=lambda t: [])
     fake.segments_of = lambda t: ReviewData.segments_of(fake, t)
     assert ReviewData.duplicates(fake, "c") == [("a", 0.5, 1.0)]
+
+
+def test_refit_offset_recovers_a_known_offset():
+    import cv2
+    import numpy as np
+    from app.setup.extrinsics_solver import CamCalibState
+    from posetrak.markers.refit import refit_offset
+
+    K = np.array([[1000.0, 0, 500], [0, 1000.0, 500], [0, 0, 1]])
+    states = {}
+    for name, yaw in (("a", 0.0), ("b", 1.0)):
+        R = cv2.Rodrigues(np.array([0.0, yaw, 0.0]))[0]
+        states[name] = CamCalibState("v", name, K, K, np.zeros(5), False, R=R, t=-R @ np.array([[0.0], [0.0], [-4.0]]) * 0 + np.array([[0.0], [0.0], [4.0]]))
+    truth = np.array([0.05, 0.3, 0.02])
+
+    class Pose:
+        def joint_frames(self, t):
+            F = np.eye(4)
+            F[:3, :3] = cv2.Rodrigues(np.array([0.3 * np.sin(t), 0.5 * t, 0.0]))[0]
+            F[:3, 3] = [0.1 * t, 0.0, 0.0]
+            return {"j": F}
+
+    pose, obs = Pose(), []
+    for t in np.linspace(0, 3, 60):
+        world = (pose.joint_frames(t)["j"] @ np.append(truth, 1.0))[:3]
+        for name, s in states.items():
+            px, _ = cv2.projectPoints(world.reshape(1, 1, 3), cv2.Rodrigues(s.R)[0], s.t, K, np.zeros(5))
+            obs.append((float(t), name, tuple(px.ravel())))
+    fit = refit_offset(obs, pose, "j", states, prior=np.zeros(3))
+    assert np.linalg.norm(fit.offset - truth) < 0.005 and fit.rms_px < 1.0

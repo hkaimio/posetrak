@@ -7,6 +7,7 @@
 #include <fmt/core.h>
 
 #include "posetrak/core/skeleton_layout.hpp"
+#include "posetrak/filters/rts_smoother.hpp"
 #include "posetrak/tracking/relative_observations.hpp"
 #include "posetrak/tracking/trajectory_stream.hpp"
 #include <stdexcept>
@@ -203,17 +204,11 @@ void run_one_stage(PersonContext& parent_ctx, StageConfigOverrides const& overri
     std::vector<std::string> const parent_owned_markers = compute_parent_owned_markers(
         skeleton, parent_ctx.tracker_config.active_joint_groups, *group);
 
-    // child_tracker's RTS smoother cache only accumulates successful track_frame()
-    // calls -- i==0 below uses initialize_with_fixed_root() instead (no track_frame
-    // call at all, see its comment), and any tracking_lost step is `continue`d before
-    // reaching track_frame's smoother push. So child_smoothed[k] (after the loop)
-    // corresponds to child_tracked_steps[k], NOT tracker_step (k+1) -- tracking a
-    // step's own the tracker_step whenever a track_frame() call actually succeeds is
-    // the only way to keep the smoothing-pass merge below aligned when one or more
-    // steps are skipped.
-    std::vector<int> child_tracked_steps;
-    child_tracked_steps.reserve(parent_smoothed.size());
-
+    // child_tracker's RTS smoother cache has one entry per track_frame() call, including a
+    // step without observations (a predicted-only entry, tracked == false) that the loop
+    // below `continue`s past. The smoothing pass therefore maps each entry to its tracker step
+    // by timestamp (smoothed_step()) and skips the predicted-only ones; the entry's position
+    // in the list is no guide.
     // State merge uses build_index_map_from() (storage_index-based); cov_diag
     // merge needs the separate error_index-based map -- see
     // SkeletonLayout::build_error_index_map_from()'s doc comment for why
@@ -289,7 +284,6 @@ void run_one_stage(PersonContext& parent_ctx, StageConfigOverrides const& overri
                 continue;  // leave this step's slots as the parent left them (placeholder/NaN)
             }
             merged_state = &child_tracker.state();
-            child_tracked_steps.push_back(tracker_step);
 
             // ---- Merge obs_blob (forward pass only -- tracking_obs_results has no
             //      is_smoothed dimension). ----
@@ -344,18 +338,17 @@ void run_one_stage(PersonContext& parent_ctx, StageConfigOverrides const& overri
 
     // ---- Smoothing pass: merge into is_smoothed=1 rows. ----
     auto child_smoothed = child_tracker.smooth();
-    if (child_smoothed.size() != child_tracked_steps.size()) {
-        throw std::runtime_error(fmt::format(
-            "run_hierarchical_child_stages: group '{}' smoother returned {} frames but {} "
-            "track_frame() calls succeeded -- child_tracked_steps bookkeeping is out of sync",
-            group->name, child_smoothed.size(), child_tracked_steps.size()));
-    }
     // merge_map/error_map/n_dof_full computed once above the forward-pass loop
     // -- reused here unchanged (both layouts are fixed for the whole stage).
-    for (size_t i = 0; i < child_smoothed.size(); ++i) {
-        int const tracker_step = child_tracked_steps[i];
-        Eigen::VectorXd const& child_angles = child_smoothed[i].state.joint_angles();
-        Eigen::VectorXd const& child_vels = child_smoothed[i].state.joint_velocities();
+    for (auto const& smoothed : child_smoothed) {
+        if (!smoothed.tracked)
+            continue;
+        int const tracker_step =
+            smoothed_step(smoothed.timestamp, parent_ctx.start_time, parent_ctx.dt);
+        if (tracker_step < 1)
+            continue;
+        Eigen::VectorXd const& child_angles = smoothed.state.joint_angles();
+        Eigen::VectorXd const& child_vels = smoothed.state.joint_velocities();
 
         std::vector<int> state_indices;
         std::vector<double> state_values;
@@ -369,7 +362,7 @@ void run_one_stage(PersonContext& parent_ctx, StageConfigOverrides const& overri
             state_values.push_back(child_vels[static_cast<Eigen::Index>(j)]);
         }
 
-        Eigen::VectorXd const child_cov_diag = child_smoothed[i].covariance.diagonal();
+        Eigen::VectorXd const child_cov_diag = smoothed.covariance.diagonal();
         std::vector<int> cov_diag_indices;
         std::vector<double> cov_diag_values;
         cov_diag_indices.reserve(2 * error_map.size());

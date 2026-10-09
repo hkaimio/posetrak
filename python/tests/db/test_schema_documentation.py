@@ -31,6 +31,7 @@ DOCUMENTED_TABLES = [
     ("session_schema.sql", "seg_quality_runs"),
     ("session_schema.sql", "sequence_persons"),
     ("session_schema.sql", "tracking_run_persons"),
+    ("session_schema.sql", "tracking_runs"),
     ("session_schema.sql", "detection_track_assignments"),
     ("session_schema.sql", "tracking_assignment_trace"),
     ("registry_schema.sql", "tracker_configs"),

@@ -1241,7 +1241,7 @@ class TrialPanel(QWidget):
         ).fetchall()
 
         tracking_runs = self._conn.execute(
-            "SELECT tr.id, COALESCE(sp.person_name, 'Unnamed') AS person_name, "
+            "SELECT tr.id, tr.name, COALESCE(sp.person_name, 'Unnamed') AS person_name, "
             "       tr.ran_at "
             "FROM tracking_runs tr "
             "LEFT JOIN pose_observation_sequences pos ON pos.id = tr.observation_sequence_id "
@@ -1374,8 +1374,8 @@ class TrialPanel(QWidget):
             self._trk_list.setAlternatingRowColors(True)
             for r in tracking_runs:
                 label = (
-                    f"{r['person_name']}"
-                    f"  {_fmt_ts(r['ran_at'])}"
+                    f"{r['name'] + '  ' if r['name'] else ''}{r['person_name']}"
+                    f"  {_fmt_ts(r['ran_at'])}  ·{r['id'][:8]}·"
                 )
                 item = QListWidgetItem(label)
                 item.setData(Qt.ItemDataRole.UserRole, r["id"])

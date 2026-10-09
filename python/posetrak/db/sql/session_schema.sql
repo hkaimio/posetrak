@@ -332,24 +332,34 @@ CREATE TABLE IF NOT EXISTS pose_sequence_keypoints (
     PRIMARY KEY (sequence_id, keypoint_idx)
 );
 
--- A single tracker execution record
--- tracker_config_id  -- references registry: tracker_configs(id)
--- skeleton_id        -- references registry: skeletons(id)
--- active_camera_ids  -- JSON array of camera instance ID strings
--- marker_names       -- JSON array of marker name strings (column index in state blobs)
+-- A single tracker execution record: one row per tracker execution, written by posetrak-tracker when it creates the run.
 CREATE TABLE IF NOT EXISTS tracking_runs (
+    -- uuid of the run
     id                       TEXT PRIMARY KEY,
+    -- the pose observations (one person or object) the run tracked: pose_observation_sequences.id
     observation_sequence_id  TEXT NOT NULL REFERENCES pose_observation_sequences(id),
+    -- the tracker configuration used, a copy kept in this database: registry tracker_configs.id
     tracker_config_id        TEXT NOT NULL, -- references registry: tracker_configs(id)
+    -- the skeleton tracked, a copy kept in this database: registry skeletons.id (per-person overrides are in tracking_run_persons)
     skeleton_id              TEXT NOT NULL, -- references registry: skeletons(id)
+    -- the extrinsic calibration (camera poses) the run used
     extrinsic_calibration_id TEXT NOT NULL REFERENCES extrinsic_calibrations(id),
+    -- the sync configuration (camera frame to time mapping) the run used
     sync_config_id           TEXT NOT NULL REFERENCES sync_configs(id),
+    -- when the run was made: UTC timestamp, ISO 8601 with a trailing Z
     ran_at                   TEXT NOT NULL,
+    -- version and build time of the tracker binary that produced the run
     posetrak_version         TEXT NOT NULL,
+    -- JSON array of the camera labels that took part in the run (the order is the camera index in the result blobs)
     active_camera_ids        TEXT NOT NULL,
+    -- JSON array of the marker names of the skeleton (the column order of the marker-indexed blobs)
     marker_names             TEXT NOT NULL,
+    -- free text about the run; NULL when there is none
     notes                    TEXT,
-    trial_id                 TEXT REFERENCES trials(id)
+    -- the trial the run belongs to: trials.id; NULL when it was run on a sequence outside a trial
+    trial_id                 TEXT REFERENCES trials(id),
+    -- display name the user gave the run, shown in the session tree and searched by it; NULL until the run is named
+    name                     TEXT
 );
 
 -- Who a tracking run tracked (one row per tracked person or object in the run) and

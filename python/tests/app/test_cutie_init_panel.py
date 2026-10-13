@@ -497,6 +497,19 @@ def test_global_units_for_local_round_trips(qapp, synced_capture_db):
         panel.shutdown()
 
 
+def test_frame_label_shows_global_capture_time(qapp, synced_capture_db):
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(synced_capture_db, "cap1")
+    try:
+        cam_sv2 = next(c for c in panel._cameras if c["id"] == "sv2")
+        panel._cam_combo.setCurrentIndex(panel._cam_combo.findData(cam_sv2))
+        panel._show_frame(150)  # global 6.0 s, not time from the camera's first tracked frame
+        assert "(00:06.00)" in panel._frame_label.text()
+    finally:
+        panel.shutdown()
+
+
 def test_ensure_seg_run_persists_real_marked_range(qapp, synced_capture_db):
     """With a sync table, seg_quality_runs.time_start_s/time_end_s record
     the actual selected range instead of the 0.0/1e9 "covers everything"

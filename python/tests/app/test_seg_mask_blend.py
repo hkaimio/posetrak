@@ -222,3 +222,16 @@ def test_blend_collects_a_legend_with_subject_names_and_leaves_the_image_alone(q
     # The legend is drawn by the canvas on top of the image, not into it.
     assert np.array_equal(out[0:100, 0:100], crop[0:100, 0:100])
     assert [text for _color, text in w._seg_legend] == ["Harri"]
+
+
+def test_seg_source_prefers_newest_run_among_equal_mask_counts(dummy_db):
+    from app.ui.content_panels import _seg_source_for_video
+
+    for rid, created in (("old", "2026-05-31T10:00:00+00:00"), ("new", "2026-05-31T17:00:00+00:00")):
+        dummy_db.execute("INSERT INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at) VALUES (?, 'sh1', 0, 1, ?)", (rid, created))
+        for f in range(2):
+            dummy_db.execute("INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) VALUES (?, 'sv1', ?, x'00')", (rid, f))
+    assert _seg_source_for_video(dummy_db, "sv1") == "new"
+    dummy_db.execute("INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) VALUES ('old', 'sv1', 5, x'00')")
+    assert _seg_source_for_video(dummy_db, "sv1") == "old"  # more masks wins over newer
+    assert _seg_source_for_video(dummy_db, "nope") is None

@@ -111,3 +111,6 @@ scratch/
 blendcache_*/
 *.blend1
 *.blend2
+
+# Output of python/tools/prototypes/gopro_cohn_probe.py (contains camera credentials)
+gopro_probe/

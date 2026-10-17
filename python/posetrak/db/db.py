@@ -24,8 +24,8 @@ from typing import Final
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 14
-SESSION_SCHEMA_VERSION: Final[int] = 55
+REGISTRY_SCHEMA_VERSION: Final[int] = 15
+SESSION_SCHEMA_VERSION: Final[int] = 56
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -325,6 +325,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 13
     if actual == 13:
         _migrate_registry_v13_to_v14(conn)
+        actual = 14
+    if actual == 14:
+        _migrate_registry_v14_to_v15(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -748,6 +751,18 @@ def _migrate_registry_v13_to_v14(conn: sqlite3.Connection) -> None:
     if "dot_camera_noise_scale" not in existing:
         conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_camera_noise_scale TEXT")
     _set_schema_version(conn, 14)
+    conn.commit()
+
+
+def _migrate_registry_v14_to_v15(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 14 to 15.
+
+    v15 adds control_endpoints, which records how each physical camera is
+    controlled remotely during capture (docs/roadmap/features/camera-control).
+    """
+    sql = (_DB_DIR / "migrations" / "027_control_endpoints.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+    _set_schema_version(conn, 15)
     conn.commit()
 
 
@@ -1878,6 +1893,19 @@ def _migrate_session_v54_to_v55(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v55_to_v56(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 55 to 56.
+
+    v56 adds capture_events, the per-camera capture-control event log, and
+    control_endpoints (the registry table of the same name, which session
+    databases also carry -- see the registry v14->v15 migration).
+    """
+    for name in ("027_control_endpoints.sql", "028_capture_events.sql"):
+        conn.executescript((_DB_DIR / "migrations" / name).read_text(encoding="utf-8"))
+    _set_schema_version(conn, 56)
+    conn.commit()
+
+
 def open_session(path: Path) -> sqlite3.Connection:
     """Open an existing session database and verify its schema version.
 
@@ -2063,6 +2091,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 54
     if actual == 54:
         _migrate_session_v54_to_v55(conn)
+        actual = 55
+    if actual == 55:
+        _migrate_session_v55_to_v56(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

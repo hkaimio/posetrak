@@ -372,6 +372,28 @@ In a tracking run, `tracking_run_persons.capture_object_id` is non-NULL when tha
 is an object; `person_id` remains a subject index within the run either way, and results
 stay keyed `(run_id, person_id)`.
 
+### Capture control: event log per camera, endpoint per camera instance
+
+Remote capture control (`python/pipeline/capture/`, see
+`docs/roadmap/features/camera-control/`) adds two tables.
+
+- `control_endpoints` (registry, also present in session databases) says how a
+  physical `camera_instances` row is driven: `gopro_cohn`, `gopro_ble`,
+  `insta360_ble`, `adb`, `ble_hid` or `manual`. Cameras without a row are
+  operated manually. Secrets (Hero13 COHN logins) are not stored here; the
+  controller keeps them in a local file under the user config directory so that
+  a copied or shared database never carries camera credentials.
+- `capture_events` (session) holds one row per camera per capture with the
+  controller-clock timestamps of the start and stop commands, their execution
+  and their confirmation, plus a `confidence` level (`confirmed`, `commanded`,
+  `manual`). A camera type that cannot confirm leaves the confirm timestamps
+  NULL; the confidence column is what tells a reader whether NULL means "not
+  confirmed" or "not recorded".
+
+The `captures` row is created by the controller at START, so a capture can exist
+with events and no `capture_videos` yet; the videos are registered when the
+files are collected or added by hand afterwards.
+
 ### `PoseObservationSequence` is the atomic tracking input
 A single run of `posetrak track` consumes exactly one sequence.  All relationships required
 to reproduce a tracking run are reachable from `TrackingRun`:

@@ -253,6 +253,7 @@ uv sync --group dev           # pytest, coverage — needed to run Python tests
 uv sync --group segmentation  # torch/torchvision — GPU inference, Cutie segmentation
 uv sync --group analysis      # Marimo + Plotly — for analysis notebooks
 uv sync --group mcp-server    # MCP server — for posetrak-mcp diagnostic tool
+uv sync --group capture       # remote capture control daemon — for posetrak-capture
 uv sync --group tools         # standalone utility scripts in python/tools/
 uv sync --group docs          # MkDocs + Material — to build this site locally
 ```

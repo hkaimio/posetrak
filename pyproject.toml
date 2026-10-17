@@ -35,6 +35,7 @@ posetrak-ui = "app.ui.main:main"
 posetrak-setup = "app.setup.main:main"  # backwards-compat alias
 posetrak-pose = "app.pose.cli:main"
 posetrak-mcp = "app.mcp.server:main"
+posetrak-capture = "pipeline.capture.cli:main"
 
 [build-system]
 requires = ["setuptools>=42"]
@@ -80,6 +81,19 @@ tools = [
 ]
 mcp-server = [
     "mcp>=1.0",
+]
+capture = [
+    # Remote capture control daemon (python/pipeline/capture). The camera
+    # libraries are imported lazily, so the daemon's configuration, event log
+    # and fake-camera tests run without them.
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "websockets>=12",
+    "httpx>=0.27",
+    "open-gopro>=0.22",
+    "bleak>=0.22",
+    "qrcode>=7.4",
+    "zeroconf>=0.132",
 ]
 usd = [
     "usd-core>=24.0",

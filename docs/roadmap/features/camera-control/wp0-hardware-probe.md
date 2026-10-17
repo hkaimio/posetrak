@@ -28,6 +28,26 @@ Prerequisites:
   `GoPro 1234`. `probe scan` lists them.
 - Phone apps (GoPro Quik) must not be connected to the cameras; they hold the BLE link.
 
+## 0. Pair each camera with the PC (once per camera)
+
+`scan` only needs the camera to advertise, but every command after it needs a bonded BLE
+connection, so each camera must be paired with the PC once:
+
+1. On the camera: Preferences → Connections → Connect Device → GoPro Quik App. The camera
+   now waits in pairing mode.
+2. Run `probe networks 1234` for that camera. Windows shows a pairing prompt (usually no PIN)
+   the first time the probe connects; accept it.
+3. From then on the camera can be in its normal state.
+
+If pairing or the first command fails: close GoPro Quik and switch off Bluetooth on phones that
+have been paired with the camera (only one central should hold it); remove "GoPro 1234" from
+Windows Settings → Bluetooth & devices; on the camera choose Preferences → Connections →
+Reset Connections; then repeat from step 1.
+
+On Windows the SDK refuses to use the WiFi adapter unless the system language is US English.
+The probe only uses BLE, so it disables that check
+(`_wifi_adapter.ensure_us_english = lambda: None` near the top of the script).
+
 ## 1. First contact (one camera)
 
 ```bash

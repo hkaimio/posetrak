@@ -35,7 +35,7 @@ repos:
         # format JS/TS in general), but .clang-format here has no
         # JavaScript-compatible config -- first hit when docs/assets/
         # video-embed.js became the repo's first .js file, 2026-08-23.
-        exclude: '\.(json|js)$'
+        exclude: '\.(json|js|mjs)$'
 -   repo: https://github.com/fsfe/reuse-tool
     rev: v6.2.0
     hooks:

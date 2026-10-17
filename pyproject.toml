@@ -47,6 +47,7 @@ where = ["python"]
 [tool.setuptools.package-data]
 "posetrak.data.skeletons" = ["*.yaml"]
 "posetrak.db.sql" = ["*.sql", "migrations/*.sql"]
+"pipeline.capture" = ["web/*", "web/vendor/*"]
 
 [dependency-groups]
 dev = [

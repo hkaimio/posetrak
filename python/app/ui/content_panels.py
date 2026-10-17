@@ -10,6 +10,8 @@ import collections
 import json
 import logging
 import sqlite3
+from posetrak.db.db import _connect
+from posetrak.db.run_status import display_status
 import sys
 import threading
 from pathlib import Path
@@ -266,7 +268,7 @@ def _db_path_of(conn: sqlite3.Connection) -> "str | None":
 
 
 _RUN_INFO_SQL = (
-    "SELECT tr.id AS run_id, tr.ran_at, tr.posetrak_version, "
+    "SELECT tr.id AS run_id, tr.ran_at, tr.posetrak_version, tr.status, tr.failure, "
     "       tr.tracker_config_id, tr.skeleton_id, tr.notes, "
     "       tr.observation_sequence_id, tr.active_camera_ids, "
     "       s.name AS skel_name, "
@@ -1910,8 +1912,7 @@ class CropBackfillWorker(QThread):
 
         _log.info("backfill worker: thread started  db=%s", self._db_path)
         try:
-            conn = sqlite3.connect(self._db_path)
-            conn.row_factory = sqlite3.Row
+            conn = _connect(Path(self._db_path))
         except Exception:
             _log.exception("backfill worker: failed to open DB")
             return
@@ -8325,9 +8326,21 @@ class TrackingRunPanel(QWidget):
         title_row.addWidget(info_title, stretch=1)
         title_row.addWidget(hide_btn)
 
+        # An unfinished run is inspected for diagnosis only: nothing derived from it is offered.
+        shown_status = display_status(self._conn, "tracking_runs", self._run_id, run["status"])
+        complete = shown_status == "complete"
+
         form = QFormLayout()
         form.setHorizontalSpacing(8)
         form.setVerticalSpacing(2)
+        if not complete:
+            warning = QLabel(
+                f"<b>This run is {shown_status}</b> — its results are incomplete and shown "
+                "read-only." + (f"<br>{run['failure']}" if run["failure"] else "")
+            )
+            warning.setWordWrap(True)
+            warning.setStyleSheet("color: #b00020;")
+            form.addRow(warning)
         form.addRow("Ran at:", QLabel(_fmt_ts(run["ran_at"])))
         form.addRow("Frames:", QLabel(f"{n_frames}  |  ver. {run['posetrak_version'] or '—'}"))
         form.addRow("Person:", QLabel(run["person_names"] or "—"))
@@ -8356,7 +8369,7 @@ class TrackingRunPanel(QWidget):
         )
         form.addRow(save_cfg_btn)
         set_trial_default_btn = _action_btn(
-            "Set as trial default", enabled=bool(cfg_id and run["trial_id"])
+            "Set as trial default", enabled=bool(cfg_id and run["trial_id"]) and complete
         )
         set_trial_default_btn.setToolTip(
             "Make this run's tracker configuration the default for its\n"
@@ -8379,19 +8392,16 @@ class TrackingRunPanel(QWidget):
         ids_box, id_widgets = _build_run_ids_group()
         _populate_run_ids(id_widgets, run)
 
-        self._export_bvh_btn = _action_btn("Export BVH…", enabled=bool(self._session_path))
+        can_export = bool(self._session_path) and complete
+        self._export_bvh_btn = _action_btn("Export BVH…", enabled=can_export)
         self._export_bvh_btn.clicked.connect(self._export_bvh)
-        self._export_usd_btn = _action_btn(
-            "Export USD…", enabled=bool(self._session_path) and _USD_AVAILABLE
-        )
+        self._export_usd_btn = _action_btn("Export USD…", enabled=can_export and _USD_AVAILABLE)
         if not _USD_AVAILABLE:
             self._export_usd_btn.setToolTip(_USD_TOOLTIP)
         self._export_usd_btn.clicked.connect(self._export_usd)
-        self._export_gltf_btn = _action_btn(
-            "Export glTF…", enabled=bool(self._session_path)
-        )
+        self._export_gltf_btn = _action_btn("Export glTF…", enabled=can_export)
         self._export_gltf_btn.clicked.connect(self._export_gltf)
-        scale_btn = _action_btn("Scale skeleton…", enabled=bool(self._session_path))
+        scale_btn = _action_btn("Scale skeleton…", enabled=can_export)
         scale_btn.setToolTip("Measure bone lengths from inlier observations and scale the skeleton")
         scale_btn.clicked.connect(self._open_scaling)
 

@@ -8,11 +8,14 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <sqlite3.h>
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <limits>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 using namespace posetrak;
@@ -63,8 +66,12 @@ fs::path make_fixture_db(fs::path const& path, std::string const& run_id, int pe
             tracker_config_id TEXT NOT NULL, skeleton_id TEXT NOT NULL,
             extrinsic_calibration_id TEXT, sync_config_id TEXT,
             ran_at TEXT NOT NULL, posetrak_version TEXT,
-            active_camera_ids TEXT, marker_names TEXT
+            active_camera_ids TEXT, marker_names TEXT,
+            status TEXT NOT NULL DEFAULT 'complete', completed_at TEXT, failure TEXT
         );
+    )");
+    exec_sql(db, R"(
+        CREATE TABLE run_progress (run_id TEXT PRIMARY KEY, updated_at TEXT NOT NULL);
     )");
     exec_sql(db, R"(
         CREATE TABLE tracking_results (
@@ -211,8 +218,12 @@ fs::path make_obs_fixture_db(fs::path const& path, std::string const& run_id, in
             tracker_config_id TEXT NOT NULL, skeleton_id TEXT NOT NULL,
             extrinsic_calibration_id TEXT, sync_config_id TEXT,
             ran_at TEXT NOT NULL, posetrak_version TEXT,
-            active_camera_ids TEXT, marker_names TEXT
+            active_camera_ids TEXT, marker_names TEXT,
+            status TEXT NOT NULL DEFAULT 'complete', completed_at TEXT, failure TEXT
         );
+    )");
+    exec_sql(db, R"(
+        CREATE TABLE run_progress (run_id TEXT PRIMARY KEY, updated_at TEXT NOT NULL);
     )");
     exec_sql(db, R"(
         CREATE TABLE tracking_obs_results (
@@ -744,6 +755,114 @@ TEST_CASE("ResultWriter::set_stage_status tracks stages independently per group_
 
     CHECK(read_stage_row(path, run_id, 0, "HandL").status == "complete");
     CHECK(read_stage_row(path, run_id, 0, "HandR").status == "pending");
+
+    fs::remove(path);
+}
+
+// ---------------------------------------------------------------------------
+// Run status, progress and lock tolerance
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::string query_text(fs::path const& path, std::string const& sql) {
+    sqlite3* db = nullptr;
+    REQUIRE(sqlite3_open_v2(path.string().c_str(), &db, SQLITE_OPEN_READONLY, nullptr) ==
+            SQLITE_OK);
+    sqlite3_stmt* stmt = nullptr;
+    REQUIRE(sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK);
+    std::string out = "<none>";
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        auto const* text = sqlite3_column_text(stmt, 0);
+        out = text ? reinterpret_cast<char const*>(text) : "<null>";
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("finish_tracking_run records the end of a run and drops its progress row",
+          "[result_writer][run_status]") {
+    fs::path path = fs::temp_directory_path() / "test_result_writer_finish.db";
+    make_fixture_db(path, "run1", 0, 1, {1.0}, {0.1});
+    sqlite3* db = nullptr;
+    REQUIRE(sqlite3_open(path.string().c_str(), &db) == SQLITE_OK);
+    exec_sql(db, "UPDATE tracking_runs SET status='running'");
+    exec_sql(db, "INSERT INTO run_progress VALUES ('run1', '2026-01-01T00:00:00Z')");
+    sqlite3_close(db);
+
+    finish_tracking_run(path.string(), "run1", "failed", "boom");
+
+    CHECK(query_text(path, "SELECT status FROM tracking_runs") == "failed");
+    CHECK(query_text(path, "SELECT failure FROM tracking_runs") == "boom");
+    CHECK(query_text(path, "SELECT completed_at IS NOT NULL FROM tracking_runs") == "1");
+    CHECK(query_text(path, "SELECT COUNT(*) FROM run_progress") == "0");
+
+    finish_tracking_run(path.string(), "run1", "complete");
+    CHECK(query_text(path, "SELECT status FROM tracking_runs") == "complete");
+    CHECK(query_text(path, "SELECT failure FROM tracking_runs") == "<null>");
+
+    fs::remove(path);
+}
+
+TEST_CASE("A batch commit holds the write lock briefly and dates the run's progress",
+          "[result_writer][run_status]") {
+    fs::path path = fs::temp_directory_path() / "test_result_writer_batch_lock.db";
+    make_fixture_db(path, "run1", 0, 1000000, {1.0}, {0.1});
+    Eigen::VectorXd const state = Eigen::VectorXd::Constant(60, 0.5);
+
+    double flush_s = 0.0;
+    {
+        ResultWriter writer(path.string(), "run1", 0);
+        for (int step = 0; step < 499; ++step)
+            writer.write_frame(step, step / 30.0, state, Eigen::MatrixXd(), false, 10, 1.0, 1.0,
+                               10);
+        auto const t0 = std::chrono::steady_clock::now();
+        writer.write_frame(499, 499 / 30.0, state, Eigen::MatrixXd(), false, 10, 1.0, 1.0, 10);
+        flush_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    }
+
+    CHECK(flush_s < 0.5);
+    CHECK(query_text(path, "SELECT COUNT(*) FROM tracking_results WHERE tracker_step < 1000") ==
+          "500");
+    CHECK(query_text(path, "SELECT COUNT(*) FROM run_progress WHERE run_id='run1'") == "1");
+
+    fs::remove(path);
+}
+
+TEST_CASE("ResultWriter waits for another connection's write lock instead of failing",
+          "[result_writer][run_status]") {
+    fs::path path = fs::temp_directory_path() / "test_result_writer_lock_wait.db";
+    make_fixture_db(path, "run1", 0, 1000000, {1.0}, {0.1});
+
+    std::atomic<bool> locked{false};
+    std::thread holder([&] {
+        sqlite3* db = nullptr;
+        sqlite3_open(path.string().c_str(), &db);  // Catch2 assertions are not thread-safe
+        sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+        locked = true;
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+        sqlite3_close(db);
+    });
+    while (!locked)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    auto const t0 = std::chrono::steady_clock::now();
+    {
+        ResultWriter writer(path.string(), "run1", 0);
+        writer.write_frame(0, 0.0, Eigen::VectorXd::Constant(3, 1.0), Eigen::MatrixXd(), false, 1,
+                           1.0, 1.0, 1);
+        CHECK_NOTHROW(writer.flush());
+    }
+    double const waited_s =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    holder.join();
+
+    CHECK(waited_s > 1.0);
+    CHECK(query_text(path, "SELECT COUNT(*) FROM tracking_results WHERE tracker_step = 0") == "1");
 
     fs::remove(path);
 }

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <posetrak/db/blob_codec.hpp>
+#include <posetrak/db/busy_timeout.hpp>
 #include <posetrak/db/session_reader.hpp>
 
 #include <Eigen/Geometry>
@@ -86,6 +87,8 @@ SessionReader::SessionReader(std::string const& db_path) {
         db_ = nullptr;
         throw std::runtime_error("Failed to open session DB '" + db_path + "': " + err);
     }
+
+    sqlite3_busy_timeout(db_, kSessionDbBusyTimeoutMs);
 
     // Enable foreign key enforcement (best-effort; read-only so mostly informational)
     sqlite3_exec(db_, "PRAGMA foreign_keys=ON;", nullptr, nullptr, nullptr);

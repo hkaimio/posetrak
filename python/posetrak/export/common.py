@@ -15,6 +15,7 @@ from __future__ import annotations
 import csv
 import math
 import sqlite3
+from posetrak.db.db import _connect
 from collections import defaultdict
 from pathlib import Path
 
@@ -197,8 +198,7 @@ def _detect_fps_from_df(df) -> float:
 def _load_fps_from_db(session_db: str, run_id: str) -> float:
     """Query actual_fps from capture_videos via tracking_run → observation_sequence → capture."""
     try:
-        conn = sqlite3.connect(session_db, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
+        conn = _connect(Path(session_db), check_same_thread=False)
         row = conn.execute(
             """
             SELECT sv.actual_fps

@@ -25,7 +25,11 @@ from typing import Final
 # ---------------------------------------------------------------------------
 
 REGISTRY_SCHEMA_VERSION: Final[int] = 16
-SESSION_SCHEMA_VERSION: Final[int] = 63
+
+#: Seconds a connection waits for another writer's lock before failing. The C++
+#: tracker's connections use the same value.
+BUSY_TIMEOUT_S: Final[float] = 60.0
+SESSION_SCHEMA_VERSION: Final[int] = 64
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -130,7 +134,7 @@ def _apply_schema(conn: sqlite3.Connection, sql_path: Path, version: int) -> Non
 # ---------------------------------------------------------------------------
 
 
-def _connect(path: Path) -> sqlite3.Connection:
+def _connect(path: Path, *, check_same_thread: bool = True) -> sqlite3.Connection:
     """Open a SQLite connection with project-standard settings.
 
     Sets ``row_factory = sqlite3.Row``, enables foreign-key enforcement,
@@ -140,13 +144,18 @@ def _connect(path: Path) -> sqlite3.Connection:
     ----------
     path:
         Filesystem path of the SQLite database file.
+    check_same_thread:
+        Passed to :func:`sqlite3.connect`; False for a connection handed
+        between threads.
 
     Returns
     -------
     sqlite3.Connection
         A configured open connection.
     """
-    conn = sqlite3.connect(path)
+    # Several processes write one session database (GUI, CLI, tracker); a writer
+    # that meets another waits for it instead of failing with "database is locked".
+    conn = sqlite3.connect(path, timeout=BUSY_TIMEOUT_S, check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
@@ -2005,6 +2014,39 @@ def _migrate_session_v62_to_v63(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v63_to_v64(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 63 to 64.
+
+    v64 adds tracking_runs.status / completed_at / failure (existing runs are
+    'complete'), the segmentation columns of tracking_run_persons (left NULL) and
+    the run_progress table that dates the newest activity of a running job.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(tracking_runs)")}
+    if "status" not in columns:
+        conn.execute(
+            "ALTER TABLE tracking_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'complete'"
+            " CHECK (status IN ('running', 'complete', 'failed'))"
+        )
+    if "completed_at" not in columns:
+        conn.execute("ALTER TABLE tracking_runs ADD COLUMN completed_at TEXT")
+    if "failure" not in columns:
+        conn.execute("ALTER TABLE tracking_runs ADD COLUMN failure TEXT")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(tracking_run_persons)")}
+    for name, decl in (
+        ("seg_quality_run_id", "TEXT REFERENCES seg_quality_runs(id)"),
+        ("seg_mask_label", "INTEGER"),
+        ("seg_revision", "INTEGER"),
+    ):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE tracking_run_persons ADD COLUMN {name} {decl}")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS run_progress ("
+        " run_id TEXT PRIMARY KEY, updated_at TEXT NOT NULL)"
+    )
+    _set_schema_version(conn, 64)
+    conn.commit()
+
+
 def _migrate_session_v57_to_v58(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 57 to 58.
 
@@ -2353,6 +2395,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 62
     if actual == 62:
         _migrate_session_v62_to_v63(conn)
+        actual = 63
+    if actual == 63:
+        _migrate_session_v63_to_v64(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

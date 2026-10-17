@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from pathlib import Path
+from posetrak.db.db import _connect
 import warnings
 from typing import Optional
 
@@ -30,10 +32,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 def _open_db(path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+    return _connect(Path(path), check_same_thread=False)
 
 
 # ---------------------------------------------------------------------------

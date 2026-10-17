@@ -17,6 +17,7 @@ import numpy as np
 
 from posetrak.db.db import generate_id
 from posetrak.db.observation_merge import BODY_SOURCE, infer_body_width, merge_observation_sources
+from posetrak.db.run_status import touch_progress
 
 _CROP_JPEG_QUALITY = 75
 _CROP_TARGET_HEIGHT = 240
@@ -174,6 +175,7 @@ def mark_run_complete(session: sqlite3.Connection, run_id: str, status: str = "c
         "UPDATE detection_runs SET status=?, completed_at=? WHERE id=?",
         (status, now, run_id),
     )
+    session.execute("DELETE FROM run_progress WHERE run_id = ?", (run_id,))
     session.commit()
 
 
@@ -319,6 +321,7 @@ class DetectionBatchWriter:
                 self._crop_rows,
             )
             self._crop_rows.clear()
+        touch_progress(self._session, self._run_id)
         self._session.commit()
 
     def finalise(self) -> None:
@@ -423,6 +426,7 @@ class MarkerKeypointWriter:
                 self._rows,
             )
             self._rows.clear()
+            touch_progress(self._session, self._run_id)
             self._session.commit()
 
     def finalise(self) -> None:

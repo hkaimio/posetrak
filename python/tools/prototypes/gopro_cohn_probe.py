@@ -404,11 +404,19 @@ async def cmd_record(args: argparse.Namespace) -> None:
 async def cmd_soak(args: argparse.Namespace) -> None:
     cams = _cams(args)
     args.db_dir.mkdir(parents=True, exist_ok=True)
-    out = args.db_dir / f"soak_{datetime.now():%Y%m%d_%H%M%S}.csv"
+    stamp = f"{datetime.now():%Y%m%d_%H%M%S}"
+    out = args.db_dir / f"soak_{stamp}.csv"
+    # Record what each camera is set to before recording, so a run on the
+    # wrong preset (e.g. timelapse instead of video) is recognisable afterwards.
+    for c, (ok, _, data) in zip(cams, await asyncio.gather(*(c.get_state() for c in cams))):
+        if ok:
+            (args.db_dir / f"soak_{stamp}_{c.camera_id}_state.json").write_text(json.dumps(data, indent=2))
+            log(f"{c.camera_id}: settings before start {data['settings']}")
     _print_fan("START", await _fan(cams, True))
     end = time.monotonic() + args.minutes * 60
     latencies: dict[str, list[float]] = {c.camera_id: [] for c in cams}
     fails: dict[str, int] = {c.camera_id: 0 for c in cams}
+    flags: dict[tuple[str, str], bool] = {}
     with out.open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["time", "camera", "ok", "latency_ms", "encoding", "battery_pct", "hot", "sd_kb"])
@@ -431,10 +439,13 @@ async def cmd_soak(args: argparse.Namespace) -> None:
                     )
                     if ok:
                         latencies[c.camera_id].append(dt * 1000)
-                        if not s.get(ST_ENCODING):
-                            log(f"{c.camera_id}: NOT ENCODING (stopped on its own)")
-                        if s.get(ST_SYSTEM_HOT):
-                            log(f"{c.camera_id}: SYSTEM HOT")
+                        for flag, bad, text in (
+                            ("enc", not s.get(ST_ENCODING), "NOT ENCODING (stopped on its own)"),
+                            ("hot", bool(s.get(ST_SYSTEM_HOT)), "SYSTEM HOT"),
+                        ):
+                            if bad != flags.get((c.camera_id, flag), False):
+                                flags[(c.camera_id, flag)] = bad
+                                log(f"{c.camera_id}: {text if bad else 'no longer ' + text}")
                     else:
                         fails[c.camera_id] += 1
                 f.flush()

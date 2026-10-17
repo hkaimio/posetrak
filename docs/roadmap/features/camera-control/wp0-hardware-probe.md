@@ -202,3 +202,40 @@ Fill this in. Paste the corresponding probe output next to the results where it 
   in the design has plenty of margin.
 - **Status polling** of three cameras every second: 150-250 ms per request, no failures in 30
   polls. Battery on one camera was 12%: cameras must be charged before an acceptance run.
+
+## Soak results, first run (2026-10-17, two Hero13s, home WLAN, 5 s polling)
+
+Camera 4713 recorded video; camera 4243 turned out to be in timelapse mode, so only its link
+statistics are representative.
+
+| | 4713 (video) | 4243 (timelapse) |
+|---|---|---|
+| Polls / failed | 284 ok until shutdown | 385 / 0 over 38 min |
+| State request latency | median 219 ms, p95 290 ms, max 836 ms | median 215 ms, p95 400 ms, max 1.0 s |
+| SD usage | about 2.9 GB per 5 min (9.4 MB/s) | about 35 MB per 5 min |
+| Battery | 64% → 35% in 20 min (about 85% per hour) | 75% → 42% in 35 min (about 56% per hour) |
+| System hot flag | first at 19.9 min | never |
+| Outcome | link lost at 24.8 min: thermal shutdown | still running at 38 min |
+
+- **The COHN link itself is stable.** No failed poll on the surviving camera in 38 minutes, with
+  no reconnects; the only link loss was the camera shutting down.
+- **Thermal limit.** The video camera raised the system-hot flag after about 20 minutes of
+  recording and powered off about 5 minutes later, with WiFi/COHN active and polling. The
+  camera had also been on for roughly an hour beforehand (state polling, short recordings), so
+  the starting temperature was not cold. The preset in use was not recorded in this run (the
+  probe now saves each camera's settings before a soak starts).
+- **Timelapse mode was started silently.** `record` and `soak` send the shutter command to
+  whatever mode the camera is in, and a camera in timelapse mode "records" without complaint.
+  This is exactly the wrong-mode failure the system is meant to catch: the Hero13 driver must
+  push the capture preset and read the mode back at arm time, and refuse to arm on a mismatch.
+
+Consequences for the design:
+
+- The system-hot flag is the only early warning (about 5 minutes) and must raise a high-priority
+  alert the moment it appears. The controller already alerts on it.
+- Long continuous takes are limited by heat, not by the link. Takes should be as short as the
+  action allows, with the cameras stopped between takes to cool; cameras should not be left
+  recording while waiting.
+- Open questions for the next run: which preset runs cool enough for the longest planned take,
+  whether the camera runs cooler with WiFi off (start by hand on two identical cameras, one
+  with COHN polling and one without), and how long a camera needs to cool between takes.

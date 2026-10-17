@@ -26,15 +26,16 @@ Documents:
 
 #### Camera Control
 
-**Status:** 📝 Proposal · **Categories:** `capture-hardware` · **Last updated:** 2026-08-06
+**Status:** 📝 Proposal · **Categories:** `capture-hardware` · **Last updated:** 2026-10-17
 
-A system to start/stop and confirm a heterogeneous set of capture cameras (GoPro, Insta360, Android phones, eventually iPhone) from a single controller PC over a wireless capture LAN, with per-camera start-time accuracy and automatic video offload — replacing today's manual, error-prone per-camera button presses.
+A system to start/stop and confirm a heterogeneous set of capture cameras (GoPro Hero13 first, then Hero11, Insta360, Android phones, eventually iPhone) from a single controller PC over a wireless capture LAN, with per-camera start-time accuracy, remote control of the marker-lighting LEDs, automatic video offload, and a mobile web UI for field operation.
 
 Documents:
 - [status.md](features/camera-control/status.md)
 - [camera-control-analysis.md](features/camera-control/camera-control-analysis.md)
 - [camera-control-brief.md](features/camera-control/camera-control-brief.md)
 - [camera-control-design.md](features/camera-control/camera-control-design.md)
+- [node-protocol.md](features/camera-control/node-protocol.md)
 
 ### cli
 
@@ -121,7 +122,7 @@ Documents:
 
 #### Marker-Based Motion Capture
 
-**Status:** 🚧 In progress · **Categories:** `tracker-core`, `detection-pipeline` · **Last updated:** 2026-09-19
+**Status:** 🚧 In progress · **Categories:** `tracker-core`, `detection-pipeline` · **Last updated:** 2026-09-21
 
 Tracking of rigid props and person-worn reflective dots or ArUco markers alongside the markerless pipeline: marker detection, tracklet linking, shared dot assignment inside the UKF, and rigid-body and articulated tracking. The foundation is built and validated on four real cases; the remaining work is turning the script-driven workflows into CLI and GUI features, per the productization plan.
 
@@ -143,6 +144,8 @@ Documents:
 - [rigid-marker-body-calibration-design.md](features/marker-based-mocap/rigid-marker-body-calibration-design.md)
 - [skeleton-scaling-and-marker-calibration-design.md](features/marker-based-mocap/skeleton-scaling-and-marker-calibration-design.md)
 - [streak-velocity-design.md](features/marker-based-mocap/streak-velocity-design.md)
+- [validation-baseline.md](features/marker-based-mocap/validation-baseline.md)
+- [ws2-assignment-robustness-plan.md](features/marker-based-mocap/ws2-assignment-robustness-plan.md)
 
 #### Measurement Error Model Improvements
 

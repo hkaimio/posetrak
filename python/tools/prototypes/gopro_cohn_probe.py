@@ -22,7 +22,7 @@ credentials file contains camera passwords; do not commit it.
 Cameras are addressed by the last four digits of their serial number, the
 same identifier as in the camera's BLE name ("GoPro 1234").
 
-Install into a scratch environment:   uv pip install open-gopro bleak
+Install into a scratch environment:   uv pip install open-gopro bleak httpx
 Examples:
   python gopro_cohn_probe.py scan
   python gopro_cohn_probe.py networks 1234
@@ -40,7 +40,7 @@ import csv
 import json
 import statistics
 import sys
-import tempfile
+import ssl
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -52,6 +52,8 @@ ST_ENCODING = "10"
 ST_SD_REMAINING_KB = "54"
 ST_BATTERY_PERCENT = "70"
 
+import open_gopro.network.wifi.adapters.wireless as _wifi_adapter
+_wifi_adapter.ensure_us_english = lambda: None
 
 def log(msg: str) -> None:
     print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
@@ -241,25 +243,32 @@ class Cam:
     cred: dict
 
     def __post_init__(self) -> None:
-        from open_gopro.network.wifi.requests_session import create_less_strict_requests_session
+        import httpx
 
-        cert = Path(tempfile.gettempdir()) / f"cohn_{self.camera_id}_{abs(hash(self.ssid))}.crt"
-        cert.write_text(self.cred["certificate"])
-        self.session = create_less_strict_requests_session(cert)
-        self.session.headers["Authorization"] = _basic(self.cred)
-        self.base = f"https://{self.cred['ip_address']}"
+        # The camera's certificate has no authority key identifier and the
+        # name does not match its IP address, so verify against the pinned
+        # certificate only, without hostname checking or X.509 strict mode.
+        ctx = ssl.create_default_context(cadata=self.cred["certificate"])
+        ctx.check_hostname = False
+        ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+        ctx.verify_flags &= ~ssl.VERIFY_X509_PARTIAL_CHAIN
+        # httpx, not requests: urllib3 requests are closed by the camera
+        # after ~2 s (see the camera-control analysis doc); httpx and
+        # http.client are answered in ~0.1-0.3 s.
+        self.client = httpx.AsyncClient(
+            base_url=f"https://{self.cred['ip_address']}",
+            verify=ctx,
+            headers={"Authorization": _basic(self.cred)},
+        )
         self.link_down_since: float | None = None
         self.drops: list[float] = []
-
-    def _get(self, path: str, timeout: float) -> dict | None:
-        r = self.session.get(self.base + path, timeout=timeout)
-        r.raise_for_status()
-        return r.json() if r.content else {}
 
     async def request(self, path: str, timeout: float = 5.0) -> tuple[bool, float, dict | None]:
         t0 = time.monotonic()
         try:
-            data = await asyncio.to_thread(self._get, path, timeout)
+            r = await self.client.get(path, timeout=timeout)
+            r.raise_for_status()
+            data = r.json() if r.content else {}
             ok = True
         except Exception as exc:  # noqa: BLE001  (probe: record any failure)
             data, ok = {"error": repr(exc)[:200]}, False

@@ -159,3 +159,32 @@ Fill this in. Paste the corresponding probe output next to the results where it 
 | Which network wins with both in range? | |
 | Settings required for the mocap profile exist and read back | |
 | Anything else surprising | |
+
+## Findings so far (Hero13, Windows 11, Python 3.13)
+
+- **Pairing is required.** BLE commands only work after the camera has been paired with
+  the PC (step 0). Pairing the SDK's `networks` command lists nearby networks; a freshly
+  provisioned camera shows no network as configured.
+- **COHN provisioning works.** `provision` joins the camera to the chosen network and
+  returns its IP address and credentials.
+- **Overlapping VPN routes hide the camera.** If a VPN tunnel (WireGuard) routes the same
+  subnet as the capture network, the PC sends traffic for the camera into the tunnel and every
+  request times out although the camera is fine. Check with
+  `Find-NetRoute -RemoteIPAddress <camera ip>`: the interface must be the WiFi adapter. The
+  controller should warn about this at startup. On location, use an access-point subnet that
+  does not overlap any VPN route.
+- **Do not use `requests` (urllib3) to talk to the camera.** With Python's `requests` the camera
+  accepts the connection and then closes it without a response after about 2 s, on almost
+  every attempt. `curl`, `http.client` and `httpx` get the answer in 0.1-0.3 s on every attempt
+  with the same credentials, so the camera is not at fault. The cause on the urllib3 side was
+  not found (TLS options, headers, proxy settings and keep-alive were ruled out). The
+  controller uses `httpx`, with an SSL context pinned to the camera's certificate:
+  `create_default_context(cadata=<cert>)`, `check_hostname = False`, and the
+  `VERIFY_X509_STRICT` and `VERIFY_X509_PARTIAL_CHAIN` flags cleared (the certificate has no
+  authority key identifier and does not match the IP address; Python 3.13 rejects it in strict
+  mode).
+- **Latency.** Ping to the camera varies between 20 and 320 ms (WiFi power saving on the
+  camera); state requests take 150-250 ms, and the first request after a pause up to 700 ms.
+- **Idle battery drain.** One camera lost 5 percentage points in about 11 minutes while idle on
+  WiFi with BLE closed (90% → 85%). Compare with a camera that is on without WiFi before
+  deciding how long cameras can be left on.

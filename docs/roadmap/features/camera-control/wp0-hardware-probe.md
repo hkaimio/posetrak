@@ -163,8 +163,8 @@ Fill this in. Paste the corresponding probe output next to the results where it 
 ## Findings so far (Hero13, Windows 11, Python 3.13)
 
 - **Pairing is required.** BLE commands only work after the camera has been paired with
-  the PC (step 0). Pairing the SDK's `networks` command lists nearby networks; a freshly
-  provisioned camera shows no network as configured.
+  the PC (step 0). Once paired, `networks` lists the nearby networks; a camera that has not
+  been provisioned yet shows none of them as configured.
 - **COHN provisioning works.** `provision` joins the camera to the chosen network and
   returns its IP address and credentials.
 - **Overlapping VPN routes hide the camera.** If a VPN tunnel (WireGuard) routes the same

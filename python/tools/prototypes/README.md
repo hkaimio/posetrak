@@ -27,6 +27,12 @@ lands.
 | `prototype_fk_marker_prediction.py` | `build_tracklet_groups.py`, `label_tracklet_groups_gui.py`, `gt/eval_fk_prediction.py` | `posetrak marker-set` |
 | `prototype_person_marker_assignment.py` | `render_dot_detection_overview_video.py` | `posetrak detect render` |
 
+## Hardware probes
+
+| Script | Question | Where the answer goes |
+|---|---|---|
+| `gopro_cohn_probe.py` | How do Hero13 cameras behave under COHN control: multiple WiFi networks, discovery, command latency, hour-long recording stability, wake from off | `docs/roadmap/features/camera-control/` (analysis and design); the production driver is `pipeline/capture/gopro_cohn.py` |
+
 ## Absorbed or reference
 
 | Script | What it established | Where it went |

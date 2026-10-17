@@ -26,21 +26,32 @@ cannot tell a half-written run from a complete one. `detection_runs.status` exis
    and `failure` (the error text). The tracker inserts the run as 'running', sets 'complete' after
    the last stage, and 'failed' with the message in its exception handler. A hierarchical run's
    per-stage status stays in `tracking_run_stages`.
-4. **Stale 'running' rows.** A run row stays 'running' only while its process lives. Each run records
-   nothing about its process; instead, the UI treats a 'running' row whose newest result is older
-   than a timeout (10 minutes without a new step) as interrupted and shows it so, and `posetrak runs
-   cleanup` marks such rows 'failed'. The same applies to `detection_runs`.
+4. **Stale 'running' rows.** A run row stays 'running' only while its process lives. The row
+   records nothing about the process; the newest activity is dated by `run_progress`
+   (`run_id`, `updated_at`), which the tracker's result writer updates inside every batch commit
+   (and at most every 30 s while patching a hierarchical child stage's rows) and the detection
+   writers update with every batch. A run that has not reported yet is dated by its start time
+   (`tracking_runs.ran_at`, `detection_runs.created_at`). A 'running' row with no progress for 10
+   minutes is shown as interrupted (`posetrak.db.run_status`), and `posetrak runs cleanup` marks
+   such rows 'failed' (and `posetrak runs list` shows every run that is not complete). The same
+   applies to `detection_runs`. The progress row is deleted when the run ends or is cleaned up.
+   Results have no wall-clock column, so a separate small table is the smallest way to date them;
+   it needs no change to `detection_runs`, whose columns belong to a later stage.
 5. **The UI respects status.** The session tree shows running, failed and interrupted runs distinctly
-   and does not open a run that is not complete as if it were (it may open it read-only with a
-   warning, for diagnosis).
+   (greyed, with the status in the label). A run that is not complete opens in the tracking run
+   panel with a warning and without the actions that build on a result: exports, skeleton scaling
+   and "Set as trial default" are disabled.
 
 Existing `tracking_runs` rows are migrated as 'complete': there is no way to tell the broken ones
 apart, and a run without results already shows as empty.
 
 ## 3. Acceptance
 
-- A tracking run proceeds when a detection job writes to the same database during the run (scripted
-  test with two processes and a 1-second writer lock held repeatedly).
+- A tracking run proceeds when another connection holds the write lock for several seconds during
+  the run (C++ test: a second connection holds `BEGIN IMMEDIATE` while the result writer
+  commits; Python test: `_connect` waits for a lock held by another process).
 - A tracker killed mid-run leaves a row the UI shows as interrupted, and `runs cleanup` marks it
-  failed.
-- A tracker that throws leaves a 'failed' row with the error text.
+  failed (Python test on a 'running' row without recent progress).
+- A tracker that throws leaves a 'failed' row with the error text (`finish_tracking_run`, called
+  from the `track` command's exception handlers).
+- A result batch commit holds the write lock well under a second (C++ test times a 500-step batch).

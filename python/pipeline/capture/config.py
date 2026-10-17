@@ -61,6 +61,8 @@ class DaemonConfig:
     port: int = DEFAULT_PORT
     token: str = ""
     session_db: Path | None = None
+    #: camera registry; None means the default registry
+    registry_db: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -143,6 +145,7 @@ def parse_config(data: dict[str, Any]) -> CaptureConfig:
         port=port,
         token=str(d.get("token", "")),
         session_db=Path(session_db) if session_db else None,
+        registry_db=Path(d["registry_db"]) if d.get("registry_db") else None,
     )
 
     p = data.get("profile", {})

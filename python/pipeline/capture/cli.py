@@ -13,6 +13,8 @@ from pathlib import Path
 import click
 
 from pipeline.capture.config import (
+    DEFAULT_CONFIG_DIR,
+    CaptureConfig,
     ConfigError,
     default_config_path,
     load_config,
@@ -90,6 +92,74 @@ def show_config(config_path: Path) -> None:
         click.echo(f"network:  {net.name} (ssid {net.ssid!r}, discovery {net.discovery})")
     for cam in cfg.cameras:
         click.echo(f"camera:   {cam.label} ({cam.method})")
+
+
+@main.command("run")
+@click.option("--demo", type=int, default=0, metavar="N", help="Serve N simulated cameras and a temporary database.")
+@click.option("--host", default=None, help="Address to listen on (default: from the configuration).")
+@click.option("--port", type=int, default=None, help="Port to listen on (default: from the configuration).")
+@click.option("-v", "--verbose", is_flag=True, help="Log debug messages.")
+@click.pass_obj
+def run(config_path: Path, demo: int, host: str | None, port: int | None, verbose: bool) -> None:
+    """Run the capture daemon and print the address of the web UI."""
+    import uvicorn
+
+    from pipeline.capture.api import create_app
+    from pipeline.capture.config import new_token, parse_config
+    from pipeline.capture.daemon import controller_factory
+    from pipeline.capture.network import access_url, lan_addresses, qr_text
+
+    try:
+        if demo and not config_path.exists():
+            cfg: CaptureConfig = parse_config({"daemon": {"token": new_token()}})
+        else:
+            cfg = load_config(config_path)
+        if not cfg.daemon.token:
+            raise ConfigError("daemon.token is empty (create a configuration with `posetrak-capture init-config`)")
+        factory = controller_factory(cfg, demo_cameras=demo)
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    listen_host = host or cfg.daemon.host
+    listen_port = port or cfg.daemon.port
+    log_path = setup_logging(DEFAULT_CONFIG_DIR, verbose=verbose)
+    addresses = lan_addresses() if listen_host in ("0.0.0.0", "::") else [listen_host]
+    click.echo(f"log file: {log_path}")
+    for addr in addresses:
+        click.echo(f"web UI:   {access_url(addr, listen_port, cfg.daemon.token)}")
+    if addresses:
+        url = access_url(addresses[0], listen_port, cfg.daemon.token)
+        try:
+            click.echo(qr_text(url))
+        except UnicodeEncodeError:
+            click.echo(qr_text(url, ascii_only=True))
+    app = create_app(factory, cfg.daemon.token)
+    uvicorn.run(app, host=listen_host, port=listen_port, log_level="debug" if verbose else "info")
+
+
+@main.command("firewall-rule")
+@click.option("--apply", "apply_rule", is_flag=True, help="Add the rule now (needs an administrator shell).")
+@click.pass_obj
+def firewall_rule(config_path: Path, apply_rule: bool) -> None:
+    """Show (or add) the Windows firewall rule that lets phones reach the daemon."""
+    import subprocess
+
+    try:
+        port = load_config(config_path).daemon.port
+    except ConfigError:
+        from pipeline.capture.config import DEFAULT_PORT
+
+        port = DEFAULT_PORT
+    cmd = [
+        "netsh", "advfirewall", "firewall", "add", "rule", "name=posetrak-capture",
+        "dir=in", "action=allow", "protocol=TCP", f"localport={port}", "profile=private,public",
+    ]
+    click.echo(" ".join(cmd))
+    if apply_rule:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        click.echo((result.stdout + result.stderr).strip())
+        if result.returncode:
+            raise click.ClickException("netsh failed; run this from a shell started as administrator")
 
 
 if __name__ == "__main__":

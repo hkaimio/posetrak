@@ -803,6 +803,25 @@ TEST_CASE("Rigid-body initialization: root-only skeleton uses Kabsch/Umeyama fit
         CHECK(tracker.state().joint_angles().size() == 0);
     }
 
+    SECTION("initialize() triangulates only absolute-position observations") {
+        // The observation loader also emits pair-difference (offset to the parent marker) and,
+        // for velocity-mode cameras, frame-delta entries under the same marker id; fed to the
+        // DLT as pixel positions they would move every triangulated marker.
+        std::vector<Observation> mixed = observations;
+        for (auto const& obs : observations) {
+            Observation pair = obs;
+            pair.mode = MeasurementMode::PAIR_DIFF;
+            pair.position = Eigen::Vector2d(30.0, -20.0);
+            mixed.push_back(pair);
+            Observation velocity = obs;
+            velocity.mode = MeasurementMode::VELOCITY;
+            velocity.position = Eigen::Vector2d(2.0, 1.0);
+            mixed.push_back(velocity);
+        }
+        REQUIRE(tracker.initialize(mixed, 0.0));
+        CHECK_THAT((tracker.state().root_position() - gt_position).norm(), WithinAbs(0.0, 1e-6));
+    }
+
     SECTION("initialize() rejects a residual above rigid_init_max_residual_m") {
         // Corrupt one marker's observations enough to blow the fit residual
         // past the configured threshold without breaking triangulation itself

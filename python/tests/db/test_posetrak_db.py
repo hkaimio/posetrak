@@ -1586,3 +1586,24 @@ def test_session_v61_to_v62_adds_dot_assignment_tables_and_is_repeatable():
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"dot_assignment_proposals", "dot_assignment_edits"} <= tables
     assert get_schema_version(conn) == 62
+
+
+def test_session_v62_to_v63_adds_tracking_run_name_and_is_repeatable():
+    import sqlite3
+
+    from posetrak.db.db import _migrate_session_v62_to_v63
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE tracking_runs (id TEXT PRIMARY KEY, notes TEXT)")
+    conn.execute("INSERT INTO tracking_runs (id) VALUES ('run-1')")
+    _migrate_session_v62_to_v63(conn)
+    _migrate_session_v62_to_v63(conn)
+    columns = [r[1] for r in conn.execute("PRAGMA table_info(tracking_runs)")]
+    assert columns.count("name") == 1
+    assert conn.execute("SELECT name FROM tracking_runs").fetchone()[0] is None
+    assert get_schema_version(conn) == 63
+
+
+def test_new_session_has_tracking_run_name(session_db: sqlite3.Connection) -> None:
+    columns = [r[1] for r in session_db.execute("PRAGMA table_info(tracking_runs)")]
+    assert "name" in columns

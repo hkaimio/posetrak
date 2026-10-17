@@ -795,7 +795,7 @@ def cmd_list(ctx: click.Context, sequence: str | None) -> None:
             fail(str(exc))
 
     query = (
-        "SELECT id, skeleton_id, ran_at, posetrak_version "
+        "SELECT id, name, skeleton_id, ran_at, posetrak_version "
         "FROM tracking_runs"
     )
     params: list = []
@@ -810,8 +810,28 @@ def cmd_list(ctx: click.Context, sequence: str | None) -> None:
     if not rows:
         sys.exit(0)
 
-    columns = ["id", "skeleton_id", "ran_at", "posetrak_version"]
+    columns = ["id", "name", "skeleton_id", "ran_at", "posetrak_version"]
     print_table(rows, columns, json_mode=ctx.obj["json_mode"])
+
+
+@track_group.command("rename")
+@click.argument("run")
+@click.argument("name")
+@click.pass_context
+def cmd_rename(ctx: click.Context, run: str, name: str) -> None:
+    """Give tracking run RUN (id prefix accepted) the display name NAME; an empty NAME clears it."""
+    session_path: str | None = ctx.obj.get("session")
+    if session_path is None:
+        fail("--session / POSETRAK_SESSION_DB is required for 'track rename'.")
+    try:
+        conn = open_session(Path(session_path))
+        run_id = resolve_id_prefix(conn, "tracking_runs", run)
+    except (FileNotFoundError, ValueError) as exc:
+        fail(str(exc))
+    conn.execute("UPDATE tracking_runs SET name = ? WHERE id = ?", (name.strip() or None, run_id))
+    conn.commit()
+    conn.close()
+    click.echo(f"{run_id}  {name.strip() or '(no name)'}")
 
 
 # ---------------------------------------------------------------------------

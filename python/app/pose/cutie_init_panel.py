@@ -1631,11 +1631,19 @@ class CutieInitPanel(QWidget):
             display_frame = _draw_click_markers(frame, clicks) if clicks else frame
             self._canvas.display(display_frame, mask)
 
-        t = (frame_idx - cam["track_first"]) / cam["fps"]
-        mm, ss = divmod(t, 60)
+        # Global capture time, the same timeline the Mark Start/End labels and
+        # the range bar use; the camera's own time from its first tracked frame
+        # only when there is no sync table.
+        t = (
+            self._sync_table.frame_to_global_time(frame_idx, cam["id"])
+            if self._sync_table is not None
+            else None
+        )
+        if t is None:
+            t = (frame_idx - cam["track_first"]) / cam["fps"]
         seg_indicator = " [mask]" if mask is not None else ""
         self._frame_label.setText(
-            f"Frame {frame_idx}  ({int(mm):02d}:{ss:05.2f}){seg_indicator}"
+            f"Frame {frame_idx}  ({self._fmt_mmss(t)}){seg_indicator}"
         )
 
     def _refresh_overlay(

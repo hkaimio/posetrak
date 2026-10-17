@@ -12,6 +12,7 @@ from enum import Enum
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QApplication,
     QInputDialog,
     QMessageBox,
     QMenu,
@@ -58,6 +59,7 @@ class SessionTreeWidget(QTreeWidget):
         self.customContextMenuRequested.connect(self._on_context_menu)
         self.currentItemChanged.connect(self._on_item_changed)
         self._conn: sqlite3.Connection | None = None
+        self._filter = ""
 
     # ------------------------------------------------------------------
     # Public
@@ -77,7 +79,28 @@ class SessionTreeWidget(QTreeWidget):
             return
         selected_id = self._current_id()
         self._populate()
+        self.set_filter(self._filter)
         self._restore_selection(selected_id)
+
+    def set_filter(self, text: str) -> None:
+        """Show only the items whose label or id contains *text* (case-insensitive), their ancestors and, for a
+        matching item, all its descendants; an empty text shows everything."""
+        self._filter = text
+        needle = text.strip().lower()
+
+        def visit(item: QTreeWidgetItem, ancestor_matches: bool) -> bool:
+            own = not needle or needle in item.text(0).lower() or needle in str(item.data(0, _ID) or "").lower()
+            below = False
+            for i in range(item.childCount()):
+                below |= visit(item.child(i), ancestor_matches or own)
+            show = own or below or ancestor_matches
+            item.setHidden(not show)
+            if needle and below:
+                item.setExpanded(True)
+            return own or below
+
+        for i in range(self.topLevelItemCount()):
+            visit(self.topLevelItem(i), False)
 
     # ------------------------------------------------------------------
     # Private — population
@@ -257,18 +280,16 @@ class SessionTreeWidget(QTreeWidget):
 
     def _add_tracking_runs(self, parent: QTreeWidgetItem, sequence_id: str) -> None:
         runs = self._conn.execute(
-            "SELECT tr.id, s.name AS skel_name, tr.ran_at, tr.notes "
+            "SELECT tr.id, tr.name, s.name AS skel_name, tr.ran_at, tr.notes "
             "FROM tracking_runs tr "
             "LEFT JOIN skeletons s ON s.id = tr.skeleton_id "
             "WHERE tr.observation_sequence_id = ? ORDER BY tr.ran_at",
             (sequence_id,),
         ).fetchall()
         for run in runs:
-            skel = run["skel_name"] or "?"
-            label = f"Tracking run  [{skel}]  {_fmt_ts(run['ran_at'])}"
+            label = tracking_run_label(run["id"], run["name"], run["skel_name"], run["ran_at"])
             item = _make_item(ItemKind.TRACKING_RUN, run["id"], label)
-            if run["notes"]:
-                item.setToolTip(0, run["notes"])
+            item.setToolTip(0, "\n".join(x for x in (run["name"], run["id"], run["notes"]) if x))
             parent.addChild(item)
 
     # ------------------------------------------------------------------
@@ -400,6 +421,9 @@ class SessionTreeWidget(QTreeWidget):
         )
 
     def _tracking_run_menu(self, menu: QMenu, run_id: str) -> None:
+        menu.addAction("Rename…").triggered.connect(lambda: self._rename_tracking_run(run_id))
+        menu.addAction("Copy run id").triggered.connect(lambda: QApplication.clipboard().setText(run_id))
+        menu.addSeparator()
         menu.addAction("View results…").setEnabled(False)
         menu.addAction("Export BVH…").setEnabled(False)
         menu.addSeparator()
@@ -410,6 +434,16 @@ class SessionTreeWidget(QTreeWidget):
     # ------------------------------------------------------------------
     # Private — rename helpers
     # ------------------------------------------------------------------
+
+    def _rename_tracking_run(self, run_id: str) -> None:
+        current = self._conn.execute("SELECT name FROM tracking_runs WHERE id = ?", (run_id,)).fetchone()
+        name, ok = QInputDialog.getText(self, "Rename tracking run", "Run name (empty clears it):",
+                                        text=(current["name"] if current and current["name"] else ""))
+        if not ok:
+            return
+        self._conn.execute("UPDATE tracking_runs SET name = ? WHERE id = ?", (name.strip() or None, run_id))
+        self._conn.commit()
+        self.reload()
 
     def _rename_trial(self, trial_id: str) -> None:
         current = self._conn.execute(
@@ -573,6 +607,11 @@ def _make_item(kind: ItemKind, item_id: str, label: str) -> QTreeWidgetItem:
     item.setData(0, _KIND, kind)
     item.setData(0, _ID, item_id)
     return item
+
+
+def tracking_run_label(run_id: str, name: str | None, skeleton: str | None, ran_at: str | None) -> str:
+    """Tree text of a tracking run: its name (or "Tracking run"), the first 8 characters of its id, skeleton and time."""
+    return f"{name or 'Tracking run'}  ·{run_id[:8]}·  [{skeleton or '?'}]  {_fmt_ts(ran_at)}"
 
 
 def _grey(item: QTreeWidgetItem) -> None:

@@ -41,6 +41,14 @@ gate formulas are empirically tuned across four rounds of offline stills. Idea 3
 (trigger debouncing, provenance/precedence, interpolation interaction, UI status color) was
 finalized 2026-07-14 and validated live 2026-07-15.
 
+## Hand refinement for SOMA-77 runs and without segmentation
+
+Planned, see
+[hand-refinement-without-segmentation-design.md](hand-refinement-without-segmentation-design.md):
+pose-model independent wrist input, a `hand21` manifest for refined rows, the pass inside the
+single-pass detection loop, `detect run --refine-hands` for every box source, and a measurement of
+its value on SOMA runs.
+
 ## Known issues
 
 - **Idea 1 still off by default** — not yet tested on the third person (Timo) or against the

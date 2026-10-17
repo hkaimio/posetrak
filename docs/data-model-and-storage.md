@@ -697,7 +697,8 @@ CREATE TABLE tracking_runs (
     posetrak_version TEXT NOT NULL,
     -- ordered JSON arrays defining the obs_blob layout (see §5 blob layout)
     active_camera_ids TEXT NOT NULL,  -- e.g. ["cam_A","cam_B","cam_C"]
-    marker_names TEXT NOT NULL        -- e.g. ["MRK-knee.L","MRK-knee.R",...]
+    marker_names TEXT NOT NULL,       -- e.g. ["MRK-knee.L","MRK-knee.R",...]
+    name TEXT                         -- display name given by the user (session tree, `posetrak track rename`); NULL until named
 );
 
 CREATE TABLE tracking_run_persons (

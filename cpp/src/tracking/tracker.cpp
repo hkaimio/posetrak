@@ -66,9 +66,13 @@ Tracker::Tracker(std::shared_ptr<const Skeleton> skeleton,
 
 std::map<std::string, Eigen::Vector3d>
 Tracker::triangulate_markers(std::vector<Observation> const& observations) const {
+    // Only absolute pixel positions can be triangulated: a PAIR_DIFF observation carries a
+    // pixel offset to the marker's parent and a VELOCITY one a frame-to-frame pixel delta,
+    // and either would pull the DLT solution far from the marker.
     std::map<int, std::vector<Observation>> obs_by_marker;
     for (auto const& obs : observations) {
-        obs_by_marker[obs.marker_id].push_back(obs);
+        if (obs.mode == MeasurementMode::POSITION)
+            obs_by_marker[obs.marker_id].push_back(obs);
     }
 
     std::map<std::string, Eigen::Vector3d> marker_positions;

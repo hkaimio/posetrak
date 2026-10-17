@@ -1241,7 +1241,7 @@ class TrialPanel(QWidget):
         ).fetchall()
 
         tracking_runs = self._conn.execute(
-            "SELECT tr.id, COALESCE(sp.person_name, 'Unnamed') AS person_name, "
+            "SELECT tr.id, tr.name, COALESCE(sp.person_name, 'Unnamed') AS person_name, "
             "       tr.ran_at "
             "FROM tracking_runs tr "
             "LEFT JOIN pose_observation_sequences pos ON pos.id = tr.observation_sequence_id "
@@ -1374,8 +1374,8 @@ class TrialPanel(QWidget):
             self._trk_list.setAlternatingRowColors(True)
             for r in tracking_runs:
                 label = (
-                    f"{r['person_name']}"
-                    f"  {_fmt_ts(r['ran_at'])}"
+                    f"{r['name'] + '  ' if r['name'] else ''}{r['person_name']}"
+                    f"  {_fmt_ts(r['ran_at'])}  ·{r['id'][:8]}·"
                 )
                 item = QListWidgetItem(label)
                 item.setData(Qt.ItemDataRole.UserRole, r["id"])
@@ -4026,6 +4026,19 @@ class _KeypointPickerPanel(QWidget):
                     return
 
 
+def _seg_source_for_video(conn: sqlite3.Connection, shot_video_id: str) -> str | None:
+    """The segmentation run whose masks are shown for a video: the run with the
+    most masks for it, the newest one when several have the same number."""
+    row = conn.execute(
+        "SELECT m.seg_quality_run_id, COUNT(*) n FROM seg_masks m "
+        "JOIN seg_quality_runs sq ON sq.id = m.seg_quality_run_id "
+        "WHERE m.shot_video_id=? GROUP BY m.seg_quality_run_id "
+        "ORDER BY n DESC, sq.created_at DESC LIMIT 1",
+        (shot_video_id,),
+    ).fetchone()
+    return row[0] if row else None
+
+
 class PersonCropGridWidget(QWidget):
     """Grid of per-camera person crop images with a time scrubber.
 
@@ -4246,18 +4259,14 @@ class PersonCropGridWidget(QWidget):
             for r in cam_rows
         ]
 
-        # Find seg_quality_run_id with the most masks for each camera, and store
+        # Find seg_quality_run_id with the most masks for each camera (the newest
+        # run when several have the same number), and store
         # video dimensions for coordinate scaling (masks may be at a lower resolution
         # than the video, e.g. FHD masks on 4K cameras).
         self._video_dims: dict[str, tuple[int, int]] = {}  # svid → (w, h)
         for cam in self._cameras:
             svid = cam["shot_video_id"]
-            row_sq = self._conn.execute(
-                "SELECT seg_quality_run_id, COUNT(*) n FROM seg_masks "
-                "WHERE shot_video_id=? GROUP BY seg_quality_run_id ORDER BY n DESC LIMIT 1",
-                (svid,),
-            ).fetchone()
-            self._seg_sources[svid] = row_sq["seg_quality_run_id"] if row_sq else None
+            self._seg_sources[svid] = _seg_source_for_video(self._conn, svid)
             dim_row = self._conn.execute(
                 "SELECT COALESCE(ic.image_width, cm.width_px) AS vw, "
                 "       COALESCE(ic.image_height, cm.height_px) AS vh "

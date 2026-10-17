@@ -23,6 +23,12 @@ last_updated = 2026-08-15
 See [extrinsics-improvements-design.md](extrinsics-improvements-design.md) for
 the problem statement, requirements, and full technical design.
 
+**Planned: calibration robustness** — see
+[calibration-robustness-design.md](calibration-robustness-design.md): fail-loud moving-box
+calibration and safe camera relabeling (first release of the SOMA/GEM-X productization), an
+intrinsics quality check (second release), and re-solving against stored room tags and
+extrinsics refinement from keypoints (separate work).
+
 **2026-08-15: the OnePlus rotation mismatch found — resolves the "root cause
 still open" mystery from the Phase 9 capture-2 validation below.** Found
 while investigating a full end-to-end tracking run: `posetrak.detection.

@@ -1,0 +1,141 @@
+# Camera control: hardware probe runbook
+
+How to run `python/tools/prototypes/gopro_cohn_probe.py` against real Hero13 cameras to
+answer the open questions of the [Phase 1 plan](phase1-implementation-plan.md) (WP0). Record
+the results in the table at the end and then fold them into the analysis and design docs.
+
+## Setup (once)
+
+A scratch environment keeps the SDK out of the main project environment:
+
+```bash
+uv venv probe-venv --python 3.13
+uv pip install --python probe-venv/Scripts/python.exe open-gopro bleak
+```
+
+Run the commands below as `probe-venv/Scripts/python.exe python/tools/prototypes/gopro_cohn_probe.py <command>`
+(abbreviated as `probe` below). Work from a scratch directory: the script writes its files
+to `./gopro_probe/` (override with `--db-dir`). That directory contains camera passwords and
+must not be committed.
+
+Prerequisites:
+
+- The cameras' wireless connections are enabled and the cameras are powered on, charged and
+  have an SD card. A Hero13 that is powered on advertises over BLE.
+- The PC has Bluetooth on and is connected to the WiFi network the cameras will join. For the
+  home network use the 2.4 GHz band or a combined SSID.
+- Cameras are identified by the last four digits of the serial number, as in the BLE name
+  `GoPro 1234`. `probe scan` lists them.
+- Phone apps (GoPro Quik) must not be connected to the cameras; they hold the BLE link.
+
+## 1. First contact (one camera)
+
+```bash
+probe scan                      # cameras advertising, with signal strength
+probe networks 1234             # COHN status, and WiFi networks the camera sees,
+                                #   flags CONFIGURED = already provisioned
+probe provision 1234 --ssid HomeNet --password '...'
+probe state 1234 --ssid HomeNet --repeat 10 --interval 1
+```
+
+Note: whether `provision` worked (COHN `state` connected, an IP address printed, credentials
+saved), how long each step took, and the median state latency.
+
+Quit the BLE connection to this camera from other apps first if `networks` cannot connect.
+
+## 2. Several cameras
+
+Provision each camera as in step 1, then:
+
+```bash
+probe state 1234 5678 9012 3456 --ssid HomeNet --repeat 10
+probe record 1234 5678 9012 3456 --ssid HomeNet --seconds 10
+probe dump 1234 --ssid HomeNet        # writes gopro_probe/dump_1234.json
+```
+
+`record` prints, per camera, the command latency, the time from sending START to the camera
+reporting that it is encoding, and the spread between cameras. Run it three to five times.
+`dump` gives the settings and presets for the mocap profile; before dumping, set the camera
+manually to the preset you intend to use for mocap (resolution, fps, lens, and so on).
+
+## 3. Power-cycle and rediscovery
+
+Power the cameras off and on (button). Without touching the PC, run:
+
+```bash
+probe state 1234 5678 9012 3456 --ssid HomeNet
+```
+
+Note: how long it takes for each camera to rejoin the network and answer; whether the IP
+address stayed the same (compare with `gopro_probe/<id>.json`); whether any camera needs a
+BLE nudge. Also record whether the router's DHCP lease list shows the cameras and whether the
+home network has client isolation (the PC cannot reach the camera at all).
+
+## 4. Wake from off
+
+```bash
+probe wake 1234 --ssid HomeNet --power-down       # the script powers the camera down
+probe wake 1234 --ssid HomeNet                    # or: power it off yourself first
+```
+
+Note: whether the BLE connect wakes the camera, the time from the attempt until COHN answers,
+and repeat it from realistic distances (5 m, 10 m, with a body in between, outdoors if
+possible). `probe scan --seconds 10` at each distance shows the signal strength.
+
+## 5. Soak
+
+Two or more cameras on the mocap preset, charged, with SD cards:
+
+```bash
+probe soak 1234 5678 --ssid HomeNet --minutes 60 --interval 5
+```
+
+The script starts recording, polls state, writes a CSV to `gopro_probe/soak_<time>.csv`, stops
+the recording and prints a summary (failed polls, latency, link drops and their length). Watch
+for `NOT ENCODING` (a camera stopped by itself) and `SYSTEM HOT` messages. Afterwards note the
+battery percentage drop and whether the camera is warm to the touch. Repeat once with the
+cameras in sun or a warm room if outdoor shoots matter, and once with a longer (2 h) run if the
+first one is clean.
+
+## 6. Multiple networks (needs a second network)
+
+With a second SSID available (the travel router, or a phone hotspot):
+
+```bash
+probe networks 1234                                 # both SSIDs should be flagged CONFIGURED
+                                                    #   once provisioned on each
+probe provision 1234 --ssid TravelAP --password '...'
+probe state 1234 --ssid HomeNet                      # does the first network's login still work?
+probe join 1234 --ssid HomeNet                       # switch back by BLE
+probe join 1234 --ssid TravelAP
+```
+
+Then power-cycle the camera in three situations and see which network it joins:
+
+1. only HomeNet in range
+2. only TravelAP in range
+3. both in range
+
+Note: whether provisioning the second network invalidated the first network's COHN
+credentials (`state` on the first SSID fails after step 2), whether `join` reports matching
+stored credentials, how the camera chooses with both in range, and how long switching takes.
+If credentials are invalidated, record how long re-provisioning takes per camera.
+
+## Results
+
+Fill this in. Paste the corresponding probe output next to the results where it helps.
+
+| Question | Result |
+|---|---|
+| SDK works on Windows / Python 3.13 | |
+| Provisioning time per camera (BLE, join, COHN) | |
+| How cameras are found on the WLAN (IP stable? DHCP reservation needed?) | |
+| Command latency (state, shutter) | |
+| START → confirmed encoding, 4 cameras, spread | |
+| Rejoin time after power-cycle | |
+| Wake from off over BLE; range limit | |
+| Soak: link drops, hot warnings, battery drain per hour | |
+| Camera keeps credentials for two networks? | |
+| Which network wins with both in range? | |
+| Settings required for the mocap profile exist and read back | |
+| Anything else surprising | |

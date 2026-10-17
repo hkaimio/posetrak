@@ -52,9 +52,6 @@ ST_ENCODING = "10"
 ST_SD_REMAINING_KB = "54"
 ST_BATTERY_PERCENT = "70"
 
-import open_gopro.network.wifi.adapters.wireless as _wifi_adapter
-_wifi_adapter.ensure_us_english = lambda: None
-
 def log(msg: str) -> None:
     print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
 
@@ -97,6 +94,42 @@ async def cmd_scan(args: argparse.Namespace) -> None:
         print("  no GoPro advertising (cameras need wireless connections enabled)")
 
 
+def _null_wifi_adapter():
+    """A WiFi adapter that never touches the host's WiFi.
+
+    The SDK builds a host WiFi controller even for BLE-only use, and on
+    Windows closing the camera object runs `netsh wlan disconnect`, which drops
+    the PC from its WLAN (and the camera's COHN link with it) at the end of
+    every BLE command.  This stand-in does nothing.
+    """
+    from open_gopro.network.wifi.controller import SsidState, WifiController
+
+    class NullWifi(WifiController):
+        def __init__(self, interface=None, password=None) -> None:
+            super().__init__(interface, password)
+
+        async def connect(self, ssid, password, timeout=15) -> bool:
+            return False
+
+        async def disconnect(self) -> bool:
+            return True
+
+        def current(self):
+            return None, SsidState.DISCONNECTED
+
+        def available_interfaces(self) -> list[str]:
+            return []
+
+        def power(self, power: bool) -> bool:
+            return False
+
+        @property
+        def is_on(self) -> bool:
+            return False
+
+    return NullWifi
+
+
 def _open_ble(camera_id: str, db_dir: Path):
     from open_gopro import WirelessGoPro
 
@@ -105,6 +138,7 @@ def _open_ble(camera_id: str, db_dir: Path):
         target=camera_id,
         interfaces={WirelessGoPro.Interface.BLE},
         cohn_db=db_dir / f"sdk_{camera_id}.json",
+        wifi_adapter=_null_wifi_adapter(),
     )
 
 

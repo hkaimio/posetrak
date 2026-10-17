@@ -188,3 +188,17 @@ Fill this in. Paste the corresponding probe output next to the results where it 
 - **Idle battery drain.** One camera lost 5 percentage points in about 11 minutes while idle on
   WiFi with BLE closed (90% → 85%). Compare with a camera that is on without WiFi before
   deciding how long cameras can be left on.
+- **The SDK drops the PC's WiFi connection.** On Windows, closing the SDK's camera object
+  runs `netsh wlan disconnect` on the PC's WiFi adapter, even for BLE-only use (it always builds
+  a host WiFi controller). Every BLE command, `provision` included, therefore ended with the PC
+  disconnected from its WLAN. The probe passes the SDK a no-op WiFi adapter; the production
+  driver must do the same, or avoid the SDK's camera object for BLE and use `bleak` directly for
+  the few provisioning commands.
+- **Start and stop timing (three Hero13s, one WLAN, commands fanned out together).**
+  START: the shutter request returns after 1.1-1.5 s (the camera answers once it is starting to
+  encode) and the encoding flag is up at 1.3-1.5 s; the three cameras confirm within 0.22 s of each
+  other. STOP: the request returns after 0.24-0.31 s, but the encoding flag only drops 1.65-1.8 s
+  after the command (the camera finalizes the file); spread 0.14 s. The 5 s confirmation timeout
+  in the design has plenty of margin.
+- **Status polling** of three cameras every second: 150-250 ms per request, no failures in 30
+  polls. Battery on one camera was 12%: cameras must be charged before an acceptance run.

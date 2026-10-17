@@ -9,10 +9,11 @@ system proposal is in [camera-control-design.md](camera-control-design.md).
 
 | Camera | Remote start/stop | Start confirmation | Mode set/verify | Wireless range path | File offload | Confidence |
 |---|---|---|---|---|---|---|
-| GoPro Hero11 Black Mini | ✅ Open GoPro BLE | ✅ BLE status (encoding flag) | ✅ full preset control via BLE | BLE via per-camera bridge node | ✅ Open GoPro wired USB (HTTP) or camera WiFi AP | High — official, documented API |
+| GoPro Hero13 Black | ✅ Open GoPro HTTP over COHN | ✅ status (encoding flag) | ✅ full preset control | Joins capture WLAN directly (COHN); BLE only for provisioning/wake | ✅ HTTP media API over the WLAN (parallel) or wired USB | Medium-high — official API; COHN field behaviour to be spiked (S7-S9) |
+| GoPro Hero11 Black Mini | ✅ Open GoPro BLE | ✅ BLE status (encoding flag) | ✅ full preset control via BLE | BLE via per-camera bridge node | ✅ Open GoPro wired USB (HTTP) | High — official, documented API |
 | Insta360 Ace Pro 2 | ✅ BLE (GPS Action Remote emulation) | ❌ none known (spike needed) | ⚠️ mode *cycle* only, no absolute set | BLE via per-camera bridge node | ✅ USB mass storage ("U-disk" mode) | Medium — reverse-engineered protocol, Ace Pro 2 untested |
 | Android (Pixel, OnePlus) | ✅ ADB over WiFi key events into stock camera app | ✅ `dumpsys media.camera` / file mtime probe | ⚠️ partial (app state not scriptable; verify-on-collect) | Phone joins capture WLAN directly | ✅ `adb pull` (wireless or USB) | Medium-high — standard tooling, per-OEM quirks |
-| iPhone (future) | ✅ BLE HID volume-key remote | ❌ | ❌ | BLE via bridge node (HID personality) | ⚠️ manual / Files app | Low — path exists, not designed here |
+| iPhone (future) | ✅ BLE HID volume-key remote | ❌ | ❌ | BLE via bridge node (HID role) | ⚠️ manual / Files app | Low — path exists, not designed here |
 
 Every camera type in scope can be started and stopped remotely; the differences are in
 *confirmation* and *mode enforcement*, which drives several design decisions (see the
@@ -20,7 +21,42 @@ verify-on-collect principle in the design doc).
 
 ---
 
-## 1. GoPro Hero11 Black Mini
+## 1a. GoPro Hero13 Black
+
+The Hero13 is on the [Open GoPro](https://gopro.github.io/OpenGoPro/docs/) compatibility
+list and, unlike the Hero11 generation, supports **COHN (Camera On Home Network)**: the
+camera joins an existing WLAN as a client instead of acting as its own access point. This
+removes the property that made WiFi unusable for multi-camera control (a controller can
+join only one camera AP at a time).
+
+With COHN the controller PC and all cameras share the capture WLAN and the PC speaks the
+Open GoPro HTTP(S) API to each camera directly. The full command set is available:
+presets and settings, shutter, status (encoding flag, battery, SD remaining), media list
+and download. No bridge node is involved in control.
+
+Workflow:
+
+- **Provisioning (once per camera and WLAN).** The camera is paired over BLE and given the
+  capture WLAN credentials; it then obtains COHN credentials (and a self-signed
+  certificate) that the controller stores locally. This needs BLE range, so it is done
+  with the camera next to the PC.
+- **Capture day.** The camera joins the WLAN when powered on; the controller finds it and
+  connects over HTTPS.
+- **Wake.** A camera that is off is not reachable over WiFi. BLE can still wake it, but
+  BLE at 10 m+ has the range problem described in §6. Options are to leave cameras
+  powered on after rigging, or to wake from a nearby node. Which is acceptable depends on
+  the battery and thermal behaviour measured in spike S7.
+- **Offload.** All cameras are on one network, so media can be downloaded in parallel over
+  WiFi without hopping between access points. Aggregate throughput on a shared 5 GHz
+  channel is the limit (spike S9); wired USB remains available as a fallback.
+- **Timing.** [GoPro Labs](https://gopro.github.io/labs/) precision-time QR works as for
+  the Hero11 (§1b).
+
+Unknowns to verify on hardware: how long a COHN connection stays up while recording at
+mocap frame rates, battery drain and heat with WiFi active, behaviour when the camera
+auto-sleeps, and reconnect time after a WLAN drop.
+
+## 1b. GoPro Hero11 Black Mini
 
 ### Control: Open GoPro (official)
 
@@ -225,13 +261,15 @@ Per-camera-type offload paths (all scriptable):
 
 | Camera | Path | Notes |
 |---|---|---|
-| GoPro | wired USB → Open GoPro HTTP media API | list + download + optional delete; fast |
+| GoPro Hero13 | COHN → Open GoPro HTTP media API over the WLAN | parallel; shares WLAN bandwidth |
+| GoPro Hero11 | wired USB → Open GoPro HTTP media API | list + download + optional delete; fast |
 | Insta360 | wired USB → mass storage | plain file copy |
 | Android | `adb pull` over WLAN or USB | can run wirelessly during teardown |
 
-Wireless offload for the action cameras was considered and rejected as the primary path:
-GoPro would require serial one-at-a-time AP hopping at ~30 MB/s, and Insta360 WiFi is
-undocumented. A USB "collection dock" (powered hub + the controller PC) that the cameras
+Wireless offload of Hero11 and Insta360 cameras is rejected as the primary path: the Hero11
+would require serial one-at-a-time AP hopping at ~30 MB/s, and Insta360 WiFi is
+undocumented. Hero13s on the capture WLAN (COHN) are the exception and can be downloaded
+in parallel over the network. A USB "collection dock" (powered hub + the controller PC) that the cameras
 are plugged into after teardown is faster, simpler, and doubles as charging. Wireless
 offload can be added later per-type without changing the collection model.
 
@@ -254,18 +292,19 @@ PC with BLE dongle talks to every camera. Rejected: BLE range at 10 m+ with bodi
 the way is unreliable; Windows multi-connection BLE stacks are flaky at 5+ concurrent
 connections; phones would still need WiFi/ADB anyway.
 
-### Option 2 — Per-camera bridge nodes on a capture WLAN (recommended)
+### Option 2 — Capture WLAN, direct control where possible, bridge nodes where not (recommended)
 
-A travel router creates a dedicated capture WLAN. Small ESP32-based nodes are mounted
+A travel router creates a dedicated capture WLAN. Hero13s and Android phones join it and
+are controlled directly. Small ESP32-based nodes are mounted
 next to each BLE-only camera (velcro/clamp, LiPo powered); each node speaks BLE to its
-camera over a ~0.5 m link (rock solid) and WiFi to the controller. Android phones join
-the WLAN directly, no node needed. WiFi at 10–30 m outdoors with a decent router is
+camera over a ~0.5 m link (rock solid) and WiFi to the controller. Android phones and Hero13s join
+the WLAN directly, no node needed for control. WiFi at 10–30 m outdoors with a decent router is
 dependable, and the star topology scales linearly by adding nodes.
 
 The brief explicitly blesses this: *"OK to have additional cheap equipment connected to
 cameras (e.g. microcontroller to action cameras)"*. ESP32 nodes cost ~€8–12 including
-battery; one firmware image with per-camera "personalities" (Open GoPro BLE client,
-Insta360 remote emulation, BLE HID) covers every camera type. One node can serve 2–3
+battery; one firmware image with selectable *roles* (Open GoPro BLE client for the Hero11,
+Insta360 remote emulation, BLE HID, plus the peripheral roles in §7) covers every case. One node can serve 2–3
 co-located cameras (NimBLE supports multiple concurrent connections) — but note the
 Insta360 personality *advertises as* a remote (peripheral role) while the GoPro
 personality is a central; mixing both on one node is a firmware complication, so plan
@@ -286,6 +325,53 @@ GoPro's "The Remote" (GoPro-only, max 5 cameras, no logging), Insta360 GPS Remot
 into a PC. Rejected.
 
 ---
+
+## 7. Marker lighting and fine synchronization
+
+Reflective-dot capture needs LEDs around each camera lens, switched on only while markers
+are in use (they interfere with pose-based capture and drain batteries). Two consequences
+for the architecture:
+
+1. **Peripherals are separate from cameras.** An LED ring is not part of any camera's
+   control API, so it is driven by a node regardless of how the camera itself is
+   controlled. A Hero13 controlled over COHN still carries a node when lighting is needed.
+   Nodes therefore have roles (`led_ring`, `beacon`, `ble_bridge`) and an optional
+   association with a camera, instead of being defined as a camera bridge.
+2. **The lighting state is part of the capture record.** Whether the LEDs were on, and at
+   what brightness, determines whether dot detection can work. It is logged per capture
+   like camera mode.
+
+**Future structured lighting.** Patterns that vary across cameras (for example temporal
+codes that identify which camera's LED a dot reflects) require LEDs in different cameras
+to be synchronized to well under a millisecond. Time sources, in increasing precision:
+
+| Method | Precision | Notes |
+|---|---|---|
+| SNTP to the controller over WLAN | ~5-50 ms, jittery | Adequate for beacon blinks and LED on/off. |
+| Broadcast sync frame (ESP-NOW, or WiFi beacon TSF timestamps) | ~10-100 µs plausible | All nodes timestamp the same radio event; needs firmware support and validation. |
+| Wired trigger or shared clock line | ~µs | Only if radio sync is not enough. |
+
+Because the method is not yet chosen, the node protocol (see
+[node-protocol.md](node-protocol.md)) makes every actuating command *scheduled*
+against a node clock and reports the node's current sync method and error estimate. The
+controller logic is independent of which method is used, so the better methods can be
+introduced later without changing it.
+
+## 8. Mobile control through a local web UI
+
+The operator is often away from the PC (rigging, adjusting lighting, or at a remote site
+with the PC in a bag or vehicle). A phone on the capture WLAN can reach a web UI served by
+the controller PC, with no app installation and no internet.
+
+This requires the capture service to run independently of the desktop GUI, exposing an
+HTTP API and an event stream that both the Qt application and the web UI use as clients.
+Design points (details in the design doc):
+
+- The web UI covers the operational loop (device status, arm, start, stop, lighting,
+  checklist). Review and editing stay in the desktop application.
+- The commands can start and stop recordings and delete files, so access is gated by a
+  token, and only one client at a time holds the right to send start/stop.
+- A phone dropping off the WLAN must not affect a running capture.
 
 ## Sources
 

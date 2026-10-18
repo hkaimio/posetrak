@@ -118,12 +118,21 @@ conflict, section 5). A row that conflicts with the geometry is not changed in `
 
 ## 6. Acceptance and measurements
 
-- On the labelled five-camera trial, YOLOX fragments assigned automatically agree with the
-  segmentation-derived identity on at least 98% of box-frames where persons are more than a body
-  width apart, and the report flags at least 90% of the frames where they disagree.
+The step is for footage where persons are mostly apart: one person, or several persons who move
+among each other or among bystanders without holding on to each other. Contacts are listed for the
+stitcher or for segmentation, not resolved.
+
 - Single-person footage needs no manual step from detection to tracking.
+- With several persons apart, the assignment gives each person long stretches that are nearly pure,
+  and the report lists the places where a person's label changes, so that the manual work in the
+  stitcher is joining stretches at the listed places rather than assigning fragments.
 - Sequences built from the automatic assignment have no interval without observations where a box of
-  the person exists in two or more cameras.
+  the person exists in two or more cameras, outside listed stretches.
+
+The original criterion, 98% agreement where persons are a body width apart on the labelled
+five-camera trial of section "Measurements", is not met on that trial. The trial is mostly contact
+(persons in a throwing technique), which is the case the step does not claim to solve; its figures
+are kept as the record of that case.
 
 `python/tools/eval_track_assignment.py` scores a run against a segmentation-sourced reference run
 (overlap matching, apart = boxes disjoint horizontally, person names paired by the best
@@ -175,6 +184,31 @@ with 17065 observations, against 17062 of the sequence made from the operator's 
 YOLOX run gives 4257 against 4256. The report lists one hand-over and the boxes of bystanders as
 unassigned, and marks the camera that agrees with the others for 35% of its boxes.
 
+Several persons among bystanders: six cameras at 120 fps, 97 s, five
+persons: two who move about the room and three bystanders who mostly stay in place, one of them seen
+by three cameras only. YOLOX with SOMA-77 (116 min of detection), scored against the
+segmentation-sourced run of the capture, which labels the two moving persons; 73099 box-frames are
+matched to it.
+
+| `detect assign` | persons apart | the subject (in view throughout) | the second moving person |
+|---|---|---|---|
+| `--persons 2` | 45.6% | 42.0% | 91.7% |
+| `--persons 4` | 90.3% | 90.2%; 99.8% after the first 16 s | 91.7%; 100% after the first 16 s |
+| `--persons 5` (the true count) | 85.1% | 90.2%; 99.8% after the first 16 s | 19.9% (three labels, see below) |
+
+With fewer persons than are present, the bystanders take the labels of the moving persons, and the
+automatic count (persons seen together for a fifth of the time) found three: with bystanders the
+count has to be given. With the true count, the labels the run gives are pure stretches: the second
+moving person is one label to 42.5 s, a second to 101.3 s and a third after that, and the subject
+one label to 42.5 s and another after, the two moving persons exchanging labels at 42.5 s, where they
+pass close to each other. The scoring pairs each reference person with one label, so the three
+stretches score as 19.9% although nearly every box in each of them belongs to the same person. Both
+places are in the report (`handover` of the two labels at 42.46 s, `split` between the two labels
+at 101.28 s), as are 99% of the disagreeing boxes. The other errors are in the first 16 s, where the
+fifth person and a bystander take boxes of the moving persons, and in an exchange of the two
+bystanders' labels midway. Fixing the run in the stitcher is joining three or four stretches at
+listed places.
+
 `detect assign` takes 26 s on the 28 s five-camera trial and 4 s on 10 s of one person.
 
 ## 7. Limits
@@ -185,6 +219,9 @@ unassigned, and marks the camera that agrees with the others for 35% of its boxe
   A wrong decision at one contact relabels everything after it, so the figures depend on a few
   decisions. This is what `contact` and `handover` stretches are listed for, and what seeds and
   segmentation are for.
+- The number of persons found automatically counts the persons seen together; bystanders seen by
+  few cameras or only part of the time are missed, and with too few persons a bystander takes a
+  moving person's label. With bystanders `--persons` has to be given.
 - A camera with a poor calibration or a poor synchronisation agrees with the others less; it shows
   in the report's per-camera figures and drags the cameras it pairs with.
 - Body proportions measured in 3D (shoulder width, torso, limb lengths) did not tell two of the

@@ -282,6 +282,29 @@ def recompute_track_spans(session: sqlite3.Connection, run_id: str, shot_video_i
     session.commit()
 
 
+def run_config(box_source: BoxSource, estimator: PoseEstimator, hand_pass, decode_mode: str, batch_frames: int) -> dict:
+    """The options of a run, as stored in ``detection_runs.config_json``."""
+    return {
+        "box_source": {"name": box_source.name, **box_source.options()},
+        "estimator": estimator.options(),
+        "hand_pass": hand_pass is not None,
+        "decode_mode": decode_mode,
+        "batch_frames": batch_frames,
+    }
+
+
+def record_run_options(session: sqlite3.Connection, run_id: str, box_source: BoxSource, config: dict) -> None:
+    """Store *config* and the box source's run inputs on a run that was created without them.
+
+    A run that already has options keeps them (several jobs may write into one run); a run input already set is kept.
+    """
+    session.execute("UPDATE detection_runs SET config_json = ? WHERE id = ? AND config_json IS NULL",
+                    (json.dumps(config), run_id))
+    for column, value in box_source.run_inputs().items():
+        session.execute(f"UPDATE detection_runs SET {column} = ? WHERE id = ? AND {column} IS NULL", (value, run_id))
+    session.commit()
+
+
 class DetectionPipeline:
     """Run person detection and pose estimation for all cameras in a shot.
 
@@ -336,13 +359,7 @@ class DetectionPipeline:
 
     def run_config(self) -> dict:
         """The options of this run, as stored in ``detection_runs.config_json``."""
-        return {
-            "box_source": {"name": self._box_source.name, **self._box_source.options()},
-            "estimator": self._estimator.options(),
-            "hand_pass": self._hand_pass is not None,
-            "decode_mode": self._decode_mode,
-            "batch_frames": self._batch_frames,
-        }
+        return run_config(self._box_source, self._estimator, self._hand_pass, self._decode_mode, self._batch_frames)
 
     def run(
         self,

@@ -132,16 +132,9 @@ def fetch_licence_text(licence: Licence, timeout: float = 30.0) -> str:
 AcceptCallback = Callable[[list[tuple[Licence, str]]], bool]
 
 
-def download_gemx(
-    accept: AcceptCallback,
-    progress: Callable[[str], None] | None = None,
-) -> Path:
-    """Show both licence texts to *accept*, and on acceptance download the weights; returns the ONNX path.
-
-    *accept* receives ``[(licence, text), ...]`` and returns whether the user accepted all of them. Raises
-    :class:`LicenceDeclined` when it returns False or a text cannot be fetched (a licence that cannot be shown
-    cannot be accepted), and the usual network errors from the download.
-    """
+def fetch_licences() -> list[tuple[Licence, str]]:
+    """Both licence texts. Raises :class:`LicenceDeclined` when one cannot be fetched: a licence that cannot be
+    shown cannot be accepted."""
     texts = []
     for licence in LICENCES:
         try:
@@ -150,9 +143,11 @@ def download_gemx(
             raise LicenceDeclined(
                 f"The text of the {licence.name} could not be fetched ({exc}); read it at {licence.url}"
             ) from exc
-    if not accept(texts):
-        raise LicenceDeclined("The licences of the SOMA-77 pose model were not accepted.")
+    return texts
 
+
+def install_gemx(texts: list[tuple[Licence, str]], progress: Callable[[str], None] | None = None) -> Path:
+    """Download the weights for a user who has accepted the licences *texts*, and record the acceptance."""
     from huggingface_hub import hf_hub_download
 
     target = _gemx_dir()
@@ -175,3 +170,19 @@ def download_gemx(
     path = soma77_model_path()
     assert path is not None
     return path
+
+
+def download_gemx(
+    accept: AcceptCallback,
+    progress: Callable[[str], None] | None = None,
+) -> Path:
+    """Show both licence texts to *accept*, and on acceptance download the weights; returns the ONNX path.
+
+    *accept* receives ``[(licence, text), ...]`` and returns whether the user accepted all of them. Raises
+    :class:`LicenceDeclined` when it returns False or a text cannot be fetched, and the usual network errors
+    from the download.
+    """
+    texts = fetch_licences()
+    if not accept(texts):
+        raise LicenceDeclined("The licences of the SOMA-77 pose model were not accepted.")
+    return install_gemx(texts, progress)

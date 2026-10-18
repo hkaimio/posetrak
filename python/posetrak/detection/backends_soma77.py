@@ -214,7 +214,8 @@ class Soma77Estimator:
             self._model_file = path.name
         else:
             self._model_file = "injected"
-        self.device = device or "auto"
+        session = getattr(onnx, "session", None)
+        self.device = "cuda" if session is not None and "CUDAExecutionProvider" in session.get_providers() else "cpu"
         self._onnx = onnx
 
     def estimate(self, frame: np.ndarray, detections: list[PersonDetection]) -> list[PoseResult]:

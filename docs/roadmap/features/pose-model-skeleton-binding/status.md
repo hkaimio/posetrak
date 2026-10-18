@@ -24,15 +24,15 @@ See [pose-model-skeleton-binding-design.md](pose-model-skeleton-binding-design.m
 | SOMA-77 estimator (`backends_soma77.py`, cell-centre decoding and its test) | Done; registering it as a batched estimator and the frame loop belong to the detection pipeline stage |
 | Manifest per observation source: schema (session version 65, provisional), migration, finalisation | Done |
 | Manifest per observation source: Python merge of hand rows, `track run` check | Done |
-| Manifest per observation source: C++ reader and its tests | Written and compiled for syntax only; **not built or run** (see below) |
+| Manifest per observation source: C++ reader and its tests | Done; the C++ test suite passes in a debug build (including the five new binding tests) |
 | Model-qualified landmarks | Done (reader accepts bare prototype names) |
 | SOMA offsets catalog file (`catalog/pose-models/soma77.marker-offsets.yaml`) | Done |
 | Default skeletons with both marker sets | Done (new ids) |
 | Joint-limit table and hinge test | Done |
 | Skeleton layer files, `skeleton compose` (also adds a pose model to a skeleton) | Done |
-| Run fails naming the missing pose model | Done (Python before the tracker starts; C++ reader as a second line, unbuilt) |
+| Run fails naming the missing pose model | Done (Python before the tracker starts; C++ reader as a second line) |
 | Migration check on a copy of a real session database | Done: see below |
-| Held-out check on the reference capture | Partly run: SOMA markers and limits through the previous tracker binary give 2.2 / 3.9 / 2.7 cm (see below); the regenerated default with the new reader **not run** |
+| Held-out check on the reference capture | Partly run: SOMA markers and limits through the previous tracker binary give 2.2 / 3.9 / 2.7 cm (see below); the regenerated default with the new reader needs an optimised build and is **not run** |
 | Wrist saturation | Cause examined (design section 2.6); with the new table no wrist axis saturates in the calibration clip (see below) |
 | UI action "add SOMA-77 markers" | Not done (out of scope; `skeleton compose --base` does the work) |
 
@@ -68,15 +68,10 @@ by the new C++ reader.
 
 ## C++ build
 
-On the machine used for this stage no new executable could be linked or started during the session (the
-linker could not write its output, and a freshly linked test program failed to start with Windows error
-1450, "insufficient system resources"; the `System` process held over 200 000 handles). The C++ reader
-(`cpp/src/db/session_reader.cpp`) and its tests (`cpp/tests/test_session_reader.cpp`) were checked with
-`cl /Zs` only. Before merging:
-
-1. build and run the C++ tests in a fresh build directory of the worktree;
-2. build `optbuild` and run `scripts/skeleton_heldout_check.py` on a copy of the reference capture's
-   session database (migrated to the current schema): it tracks the SOMA-77 sequence of the calibration
-   clip with the default male skeleton and prints leg / arm / head error against the reference tracking
-   run next to the prototype run, plus how often the wrist, elbow and knee sit at a limit. The
-   tracking takes under two minutes.
+The C++ test suite passes in a debug build of the worktree (meson with `-Ddefault_library=static` and the
+Pinocchio and Boost paths of `setup-windows.ps1`). The optimised build needed for the held-out check was not
+built. Run `scripts/skeleton_heldout_check.py` on a copy of the reference capture's session database
+(migrated to the current schema) with the new `optbuild` tracker: it tracks the SOMA-77 sequence of the
+calibration clip with the default male skeleton and prints leg / arm / head error against the reference
+tracking run next to the prototype run, plus how often the wrist, elbow and knee sit at a limit. The
+tracking takes under two minutes.

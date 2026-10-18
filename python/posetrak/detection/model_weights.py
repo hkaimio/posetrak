@@ -8,8 +8,10 @@ The weights of the SOMA-77 model are not part of the repository or the installer
 NVIDIA Open Model License and, assumed until NVIDIA answers, the DINOv3 License (design:
 docs/roadmap/features/detection-pipeline/detection-pipeline-design.md, section 4). They are downloaded from the
 ``nvidia/GEM-X`` Hugging Face repository into the model directory after the user has been shown the text of both
-licences and has accepted them. The acceptance is stored beside the files, with the hash of each text shown, so a
-changed text asks again.
+licences and has accepted them. The texts are bundled with posetrak (``posetrak/data/licences``), so showing and
+accepting them needs no network access; only the download does. The acceptance is stored beside the files with
+the SHA-256 of each bundled text; :func:`accepted_licences` counts a record whose hash differs from the text now
+bundled as not accepted, so a release that ships a changed text asks again.
 
 ``POSETRAK_MODEL_DIR`` moves the model directory (default ``~/.posetrak/models``). ``POSETRAK_SOMA77_MODEL``
 names an ``onnx/vitpose.onnx`` the user obtained and licensed on their own; it bypasses the download and the
@@ -19,13 +21,12 @@ from __future__ import annotations
 
 import datetime
 import hashlib
-import html.parser
 import json
 import logging
 import os
-import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
@@ -44,23 +45,26 @@ DINOV3_NOTICE = "Built with DINOv3"
 class Licence:
     id: str
     name: str
-    url: str
+    url: str  # where the bundled text was copied from
+    file: str  # file name in posetrak/data/licences
 
 
 LICENCES = (
     Licence(
         "nvidia-open-model-license", "NVIDIA Open Model License Agreement",
         "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/",
+        "nvidia-open-model-license.txt",
     ),
     Licence(
         "dinov3-license", "DINOv3 License Agreement",
         "https://ai.meta.com/resources/models-and-libraries/dinov3-license/",
+        "dinov3-license.txt",
     ),
 )
 
 
 class LicenceDeclined(Exception):
-    """The user did not accept the licences, or they could not be shown."""
+    """The user did not accept the licences."""
 
 
 def model_dir() -> Path:
@@ -86,68 +90,41 @@ def soma77_model_path() -> Path | None:
     return path if complete and accepted_licences() else None
 
 
+def licence_text(licence: Licence) -> str:
+    """The bundled text of *licence*, with line ends normalised to LF so that its hash is the same everywhere."""
+    raw = resources.files("posetrak.data.licences").joinpath(licence.file).read_bytes().decode("utf-8")
+    return raw.replace("\r\n", "\n")
+
+
+def licence_hash(licence: Licence) -> str:
+    """SHA-256 (hex) of the UTF-8 bytes of the bundled text of *licence*; the version recorded when it is accepted."""
+    return hashlib.sha256(licence_text(licence).encode("utf-8")).hexdigest()
+
+
+def bundled_licences() -> list[tuple[Licence, str]]:
+    """Both licences with their bundled texts, in the order they are shown."""
+    return [(licence, licence_text(licence)) for licence in LICENCES]
+
+
 def accepted_licences() -> list[dict]:
-    """The stored acceptance records (id, text_sha256, accepted_at); [] when none or unreadable."""
+    """The stored acceptance records (id, text_sha256, ...), or [] unless every licence in :data:`LICENCES` has a
+    record whose ``text_sha256`` equals the hash of the text bundled now. A missing or unreadable record, a missing
+    licence, or a record of an older text all count as not accepted."""
     try:
         record = json.loads(_acceptance_file().read_text(encoding="utf-8"))
-        have = {entry["id"] for entry in record["licences"]}
-        return record["licences"] if {lic.id for lic in LICENCES} <= have else []
+        by_id = {entry["id"]: entry["text_sha256"] for entry in record["licences"]}
+        if all(by_id.get(lic.id) == licence_hash(lic) for lic in LICENCES):
+            return record["licences"]
     except (OSError, ValueError, KeyError, TypeError):
-        return []
-
-
-class _Text(html.parser.HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.parts: list[str] = []
-        self._skip = 0
-
-    def handle_starttag(self, tag, attrs):
-        self._skip += tag in ("script", "style")
-
-    def handle_endtag(self, tag):
-        self._skip -= tag in ("script", "style")
-        if tag in ("p", "li", "h1", "h2", "h3", "h4", "div", "br"):
-            self.parts.append("\n")
-
-    def handle_data(self, data):
-        if not self._skip:
-            self.parts.append(data)
-
-
-def fetch_licence_text(licence: Licence, timeout: float = 30.0) -> str:
-    """The text of *licence* from its published page; raises OSError when it cannot be read as text."""
-    request = urllib.request.Request(licence.url, headers={"User-Agent": "posetrak"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        body = response.read().decode("utf-8", errors="replace")
-    parser = _Text()
-    parser.feed(body)
-    lines = [" ".join(line.split()) for line in "".join(parser.parts).splitlines()]
-    text = "\n".join(line for line in lines if line)
-    if len(text) < 2000:
-        raise OSError(f"{licence.url} did not return a readable licence text")
-    return text
+        pass
+    return []
 
 
 AcceptCallback = Callable[[list[tuple[Licence, str]]], bool]
 
 
-def fetch_licences() -> list[tuple[Licence, str]]:
-    """Both licence texts. Raises :class:`LicenceDeclined` when one cannot be fetched: a licence that cannot be
-    shown cannot be accepted."""
-    texts = []
-    for licence in LICENCES:
-        try:
-            texts.append((licence, fetch_licence_text(licence)))
-        except OSError as exc:
-            raise LicenceDeclined(
-                f"The text of the {licence.name} could not be fetched ({exc}); read it at {licence.url}"
-            ) from exc
-    return texts
-
-
-def install_gemx(texts: list[tuple[Licence, str]], progress: Callable[[str], None] | None = None) -> Path:
-    """Download the weights for a user who has accepted the licences *texts*, and record the acceptance."""
+def install_gemx(progress: Callable[[str], None] | None = None) -> Path:
+    """Download the weights for a user who has accepted the bundled licences, and record the acceptance."""
     from huggingface_hub import hf_hub_download
 
     target = _gemx_dir()
@@ -162,8 +139,8 @@ def install_gemx(texts: list[tuple[Licence, str]], progress: Callable[[str], Non
         "accepted_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "licences": [
             {"id": lic.id, "name": lic.name, "url": lic.url,
-             "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
-            for lic, text in texts
+             "text_sha256": licence_hash(lic)}
+            for lic in LICENCES
         ],
     }
     _acceptance_file().write_text(json.dumps(record, indent=1), encoding="utf-8")
@@ -176,13 +153,11 @@ def download_gemx(
     accept: AcceptCallback,
     progress: Callable[[str], None] | None = None,
 ) -> Path:
-    """Show both licence texts to *accept*, and on acceptance download the weights; returns the ONNX path.
+    """Show the bundled licence texts to *accept*, and on acceptance download the weights; returns the ONNX path.
 
     *accept* receives ``[(licence, text), ...]`` and returns whether the user accepted all of them. Raises
-    :class:`LicenceDeclined` when it returns False or a text cannot be fetched, and the usual network errors
-    from the download.
+    :class:`LicenceDeclined` when it returns False, and the usual network errors from the download.
     """
-    texts = fetch_licences()
-    if not accept(texts):
+    if not accept(bundled_licences()):
         raise LicenceDeclined("The licences of the SOMA-77 pose model were not accepted.")
-    return install_gemx(texts, progress)
+    return install_gemx(progress)

@@ -48,6 +48,7 @@ where = ["python"]
 [tool.setuptools.package-data]
 "posetrak.data.skeletons" = ["*.yaml", "layers/*.yaml", "layers/marker-sets/*.yaml"]
 "posetrak.db.sql" = ["*.sql", "migrations/*.sql"]
+"posetrak.data.licences" = ["*.txt"]
 
 [dependency-groups]
 dev = [

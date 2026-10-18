@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import socket
 
 import cv2
 import numpy as np
@@ -222,7 +223,10 @@ def model_dir(monkeypatch, tmp_path):
 
 @pytest.fixture
 def fake_hub(monkeypatch, model_dir):
-    monkeypatch.setattr(model_weights, "fetch_licence_text", lambda licence: f"terms of {licence.id} " * 200)
+    def no_network(*args, **kwargs):
+        raise AssertionError("showing and accepting the licences needs no network access")
+
+    monkeypatch.setattr(socket.socket, "connect", no_network)
     fetched = []
 
     def hf_hub_download(repo, filename, local_dir):
@@ -260,13 +264,22 @@ def test_weights_without_a_recorded_acceptance_are_not_used(fake_hub, model_dir)
     assert model_weights.soma77_model_path() is None
 
 
-def test_licence_that_cannot_be_shown_cannot_be_accepted(monkeypatch, model_dir):
-    def unreachable(licence):
-        raise OSError("offline")
+def test_bundled_licence_texts_are_the_agreements_with_their_versions():
+    texts = dict((lic.id, text) for lic, text in model_weights.bundled_licences())
+    assert "NVIDIA Open Model License Agreement" in texts["nvidia-open-model-license"]
+    assert "Version Release Date: October 24, 2025" in texts["nvidia-open-model-license"]
+    assert "Version: August 14, 2025" in texts["dinov3-license"] and "Built with DINOv3" in texts["dinov3-license"]
+    assert all(len(text) > 5000 and "<" not in text for text in texts.values())
 
-    monkeypatch.setattr(model_weights, "fetch_licence_text", unreachable)
-    with pytest.raises(model_weights.LicenceDeclined, match="could not be fetched"):
-        model_weights.download_gemx(lambda texts: True)
+
+def test_acceptance_of_a_different_text_counts_as_not_accepted(fake_hub, model_dir):
+    path = model_weights.download_gemx(lambda texts: True)
+    assert path == model_weights.soma77_model_path()
+    record_file = model_dir / "gem-x" / "licence-acceptance.json"
+    record = json.loads(record_file.read_text())
+    record["licences"][1]["text_sha256"] = "0" * 64
+    record_file.write_text(json.dumps(record))
+    assert model_weights.accepted_licences() == [] and model_weights.soma77_model_path() is None
 
 
 def test_declined_licences_fall_back_to_rtmpose_and_say_why(fake_hub):

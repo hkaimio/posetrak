@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QDialogButtonBox, QLabel, QMessageBox, QProgressDialog, QTabWidget, QTextBrowser,
+    QDialog, QDialogButtonBox, QLabel, QMessageBox, QProgressDialog, QTabWidget, QTextBrowser,
     QVBoxLayout,
 )
 
@@ -57,26 +57,22 @@ class _Download(QThread):
     progress = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, texts, parent=None) -> None:
-        super().__init__(parent)
-        self._texts = texts
-
     def run(self) -> None:
         try:
-            model_weights.install_gemx(self._texts, self.progress.emit)
+            model_weights.install_gemx(self.progress.emit)
         except Exception as exc:  # noqa: BLE001 -- reported to the user, who then gets RTMPose
             _log.warning("SOMA-77 weights download failed", exc_info=True)
             self.failed.emit(str(exc))
 
 
-def _download_with_progress(texts, parent) -> str | None:
+def _download_with_progress(parent) -> str | None:
     """Run the download with a busy dialog; the error message, or None on success."""
     dialog = QProgressDialog("Downloading the SOMA-77 weights…", None, 0, 0, parent)
     dialog.setWindowTitle("SOMA-77 pose model")
     dialog.setMinimumDuration(0)
     dialog.setAutoClose(False)
     dialog.setAutoReset(False)
-    worker = _Download(texts, parent)
+    worker = _Download(parent)
     error: list[str] = []
     worker.progress.connect(dialog.setLabelText)
     worker.failed.connect(error.append)
@@ -95,16 +91,10 @@ def prepare_pose_model(parent, requested: str) -> tuple[str, str | None]:
     """
     if not is_soma(requested) or model_weights.soma77_model_path() is not None:
         return requested, None
-    QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-    try:
-        texts = model_weights.fetch_licences()
-    except model_weights.LicenceDeclined as exc:
-        return _fallback(parent, requested, str(exc))
-    finally:
-        QApplication.restoreOverrideCursor()
+    texts = model_weights.bundled_licences()
     if LicenceDialog(texts, parent).exec() != QDialog.DialogCode.Accepted:
         return _fallback(parent, requested, "the licences were not accepted")
-    error = _download_with_progress(texts, parent)
+    error = _download_with_progress(parent)
     if error is not None:
         return _fallback(parent, requested, f"the weights could not be downloaded ({error})")
     return requested, None

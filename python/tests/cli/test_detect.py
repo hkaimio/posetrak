@@ -161,14 +161,9 @@ class TestDetectList:
 
 @pytest.fixture(autouse=True)
 def _no_model_weights_or_network(monkeypatch, tmp_path):
-    """No SOMA-77 weights on the machine, and the licence texts cannot be fetched."""
+    """No SOMA-77 weights on the machine."""
     monkeypatch.setenv("POSETRAK_MODEL_DIR", str(tmp_path / "models"))
     monkeypatch.delenv("POSETRAK_SOMA77_MODEL", raising=False)
-
-    def offline(licence):
-        raise OSError("offline")
-
-    monkeypatch.setattr("posetrak.detection.model_weights.fetch_licence_text", offline)
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +441,24 @@ class TestDetectRunModels:
         return _invoke(["detect", "run", "--capture", capture_id, "--sync", sync_id,
                         "--start", "0", "--end", "1", *extra], db)
 
+    def test_prompt_pages_the_bundled_licence_texts_without_network(self, monkeypatch) -> None:
+        import socket
+
+        from posetrak.cli.detect import _licence_prompt
+        from posetrak.detection import model_weights
+
+        def no_network(*args, **kwargs):
+            raise AssertionError("the licence texts are bundled")
+
+        monkeypatch.setattr(socket.socket, "connect", no_network)
+        paged: list[str] = []
+        monkeypatch.setattr("click.echo_via_pager", paged.append)
+        monkeypatch.setattr("sys.stdin", MagicMock(isatty=lambda: False))
+
+        assert _licence_prompt(False)(model_weights.bundled_licences()) is False    # no terminal to confirm in
+        assert len(paged) == 2
+        assert "NVIDIA Open Model License Agreement" in paged[0] and "DINOv3 License Agreement" in paged[1]
+
     @patch("posetrak.cli.detect.YOLOXDetector")
     @patch("posetrak.cli.detect.create_estimator")
     @patch("posetrak.cli.detect.DetectionPipeline")
@@ -455,7 +468,6 @@ class TestDetectRunModels:
     ) -> None:
         monkeypatch.setenv("POSETRAK_MODEL_DIR", str(tmp_path))
         monkeypatch.delenv("POSETRAK_SOMA77_MODEL", raising=False)
-        monkeypatch.setattr("posetrak.detection.model_weights.fetch_licence_text", lambda lic: "terms " * 500)
         mock_create.return_value = self._estimator()
         mock_pipeline_cls.return_value.cameras = ["cam"]
         mock_pipeline_cls.return_value.run.return_value = PipelineResult(detection_run_id="run-1")

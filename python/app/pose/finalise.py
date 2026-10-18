@@ -18,6 +18,7 @@ import numpy as np
 
 from posetrak.db.db import generate_id
 from posetrak.db.manage_person import find_or_create_person
+from posetrak.detection.pose_models import body_manifest, hand_manifest
 from app.setup.db_context import SyncPoint, SyncTable
 
 
@@ -53,6 +54,24 @@ def conf_scale_for_model(pose_model: str) -> float:
     except Exception:
         pass
     return 1.0
+
+
+def _write_manifest(
+    session: sqlite3.Connection, sequence_id: str, pose_model: str, obs_sources: set[str],
+) -> None:
+    """Name the keypoint slots of each observation source of a new person sequence.
+
+    The body blob gets the names of *pose_model* (nothing for a model the registry does not know, whose
+    layout stays the implied one) and each refined-hand source the hand21 names of its side.
+    """
+    rows = [(sequence_id, "body", idx, name, source) for idx, name, source in body_manifest(pose_model)]
+    for obs_source in sorted(obs_sources & {"hand_l", "hand_r"}):
+        rows += [(sequence_id, obs_source, idx, name, source) for idx, name, source in hand_manifest(obs_source)]
+    session.executemany(
+        "INSERT INTO pose_sequence_keypoints (sequence_id, obs_source, keypoint_idx, name, source) "
+        "VALUES (?, ?, ?, ?, ?)",
+        rows,
+    )
 
 
 def finalise_to_db(
@@ -150,6 +169,7 @@ def finalise_to_db(
             "DELETE FROM tracking_runs WHERE observation_sequence_id = ?", (sid,)
         )
         session.execute("DELETE FROM sequence_persons WHERE sequence_id = ?", (sid,))
+        session.execute("DELETE FROM pose_sequence_keypoints WHERE sequence_id = ?", (sid,))
         session.execute("DELETE FROM pose_observations WHERE sequence_id = ?", (sid,))
     session.execute(
         "DELETE FROM pose_observation_sequences WHERE detection_run_id = ?",
@@ -244,6 +264,7 @@ def finalise_to_db(
                 "VALUES (?,?,?,?,?,?,?,?,?)",
                 obs_by_key.values(),
             )
+            _write_manifest(session, seq_id, pose_model, {key[2] for key in obs_by_key})
 
     # Persist the track→person mapping for future restore
     session.execute(

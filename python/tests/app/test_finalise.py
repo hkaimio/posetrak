@@ -429,3 +429,47 @@ def test_auto_assign_records_the_persons_subject_id(session):
         "SELECT subject_id FROM detection_track_assignments WHERE detection_run_id = 'run1'"
     ).fetchone()
     assert dta["subject_id"] == person
+
+
+def _finalise_with_hands(session, pose_model, body_width):
+    for region, n in (("full_body", body_width), ("hand_l", 21), ("hand_r", 21)):
+        session.execute(
+            "INSERT OR REPLACE INTO detection_keypoints"
+            " (detection_run_id, shot_video_id, video_frame, track_id, region_type, keypoints, noise_scale)"
+            " VALUES ('run1', ?, 0, 1, ?, ?, 0.5)",
+            (_SVID, region, _kp(1.0, n)),
+        )
+    session.commit()
+    assignment = TrackAssignment(shot_video_id=_SVID, track_id=1, person_name="alice", first_frame=0, last_frame=0)
+    return finalise_to_db(
+        session, detection_run_id="run1", shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
+        assignments=[assignment], pose_model=pose_model,
+    )[0]
+
+
+def _manifest(session, seq_id):
+    rows = session.execute(
+        "SELECT obs_source, keypoint_idx, name, source FROM pose_sequence_keypoints WHERE sequence_id = ?"
+        " ORDER BY obs_source, keypoint_idx", (seq_id,)).fetchall()
+    by_source = {}
+    for r in rows:
+        by_source.setdefault(r["obs_source"], []).append((r["keypoint_idx"], r["name"], r["source"]))
+    return by_source
+
+
+def test_finalise_writes_a_manifest_per_source_for_a_coco133_sequence(session):
+    manifest = _manifest(session, _finalise_with_hands(session, "rtmpose-l-133kp", 133))
+    assert set(manifest) == {"body", "hand_l", "hand_r"}
+    assert len(manifest["body"]) == 133 and manifest["body"][7] == (7, "coco133:left_elbow", "coco133")
+    assert manifest["hand_l"][5] == (5, "hand21:left_index_1", "hand21")
+    assert manifest["hand_r"][0] == (0, "hand21:right_hand_root", "hand21")
+
+
+def test_finalise_writes_the_soma_body_manifest_and_replaces_it_on_refinalising(session):
+    seq_id = _finalise_with_hands(session, "soma77-dinov3-vitpose", 77)
+    manifest = _manifest(session, seq_id)
+    assert len(manifest["body"]) == 77 and manifest["body"][13] == (13, "soma77:LeftForeArm", "soma77")
+    assert len(manifest["hand_r"]) == 21
+    second = _finalise_with_hands(session, "soma77-dinov3-vitpose", 77)
+    assert session.execute("SELECT COUNT(*) FROM pose_sequence_keypoints WHERE sequence_id = ?", (seq_id,)).fetchone()[0] == 0
+    assert len(_manifest(session, second)["body"]) == 77

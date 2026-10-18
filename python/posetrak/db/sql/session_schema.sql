@@ -598,30 +598,61 @@ CREATE TABLE IF NOT EXISTS tracking_run_stages (
     PRIMARY KEY (run_id, person_id, group_name)
 );
 
--- Detection runs: one row per execution of the pose extraction pipeline.
--- Tracks which detector/pose model was used, over which time range.
--- trial_id: optional link to the trial this run belongs to.
+-- Detection runs: one row per execution of a detection pipeline (person pose, coded
+-- markers or reflective dots). Written by `detect run`, the GUI detection dialogs and the
+-- import commands; append-only: a finished run is never rewritten (a new stage reads it
+-- and writes a new run).
 CREATE TABLE IF NOT EXISTS detection_runs (
+    -- uuid of the run
     id                  TEXT PRIMARY KEY,
+    -- captures.id (historical column name)
     shot_id             TEXT NOT NULL REFERENCES captures(id),
+    -- sync_configs.id that maps video frames to capture time
     sync_config_id      TEXT NOT NULL REFERENCES sync_configs(id),
+    -- trials.id the run belongs to; NULL when the run is not tied to a trial
     trial_id            TEXT REFERENCES trials(id),
+    -- start of the covered range on the capture timeline, seconds
     time_start_s        REAL NOT NULL,
+    -- end of that range, seconds
     time_end_s          REAL NOT NULL,
+    -- box source: person detector name ('yolox-x'), 'segmentation' (boxes from mask labels),
+    -- 'detection-run' (boxes copied from source_detection_run_id), or 'aruco:<dictionary>'
     detector_model      TEXT NOT NULL,
+    -- pose model name ('rtmpose-l-133kp', 'soma77-vitpose-h'); '' for marker runs
     pose_model          TEXT NOT NULL,
+    -- version of the person detector; NULL or '' when unknown
     detector_version    TEXT,
+    -- version of the pose model; NULL or '' when unknown
     pose_version        TEXT,
+    -- person detector confidence threshold the run was made with
     detector_conf       REAL NOT NULL DEFAULT 0.3,
+    -- keypoint confidence threshold recorded with the run
     pose_conf_threshold REAL NOT NULL DEFAULT 0.3,
+    -- pose model input width, pixels; NULL for marker runs
     pose_input_width    INTEGER,
+    -- pose model input height, pixels; NULL for marker runs
     pose_input_height   INTEGER,
+    -- 'running', 'complete' or 'failed'
     status              TEXT NOT NULL DEFAULT 'running',
+    -- UTC ISO-8601 time the run started
     created_at          TEXT NOT NULL,
+    -- UTC ISO-8601 time the run ended; NULL while it is running
     completed_at        TEXT,
-    detector_type       TEXT NOT NULL DEFAULT 'pose',  -- 'pose', 'aruco', 'blob', ...
-    config_json         TEXT,  -- detector-specific config; see marker-mocap-design.md §4.1
-    capture_object_id   TEXT REFERENCES capture_objects(id)  -- NULL for person (pose) runs
+    -- 'pose' (every run before markers existed), 'aruco' (coded-marker and dot runs), 'blob', ...
+    detector_type       TEXT NOT NULL DEFAULT 'pose',
+    -- detector and estimator options as JSON: pose runs record the estimator options (flip test,
+    -- crop enlargement, refinement, decoding, mask gate, hand pass); marker runs the dictionary,
+    -- marker ids and dot settings (marker-mocap-design.md §4.1); NULL for older runs
+    config_json         TEXT,
+    -- capture_objects.id of the object a marker run tracks; NULL for person (pose) runs
+    capture_object_id   TEXT REFERENCES capture_objects(id),
+    -- seg_quality_runs.id whose masks gave the boxes or gated the heatmaps; NULL when no mask was used
+    -- (and for every run made before this column existed)
+    seg_quality_run_id  TEXT REFERENCES seg_quality_runs(id),
+    -- mask revision of that segmentation run that was read; NULL while masks are not versioned
+    seg_revision        INTEGER,
+    -- detection_runs.id whose person boxes this run copied instead of detecting them; NULL otherwise
+    source_detection_run_id TEXT REFERENCES detection_runs(id)
 );
 
 -- Raw keypoints produced by pose estimation, keyed by detection run.

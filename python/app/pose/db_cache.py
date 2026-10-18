@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 
 from posetrak.db.db import generate_id
+from posetrak.detection import stage_timing as st
 from posetrak.db.observation_merge import BODY_SOURCE, infer_body_width, merge_observation_sources
 from posetrak.db.run_status import touch_progress
 
@@ -65,6 +66,9 @@ def create_detection_run(
     pose_input_height: int = 0,
     detector_type: str = "pose",
     config_json: str | None = None,
+    seg_quality_run_id: str | None = None,
+    seg_revision: int | None = None,
+    source_detection_run_id: str | None = None,
 ) -> str:
     run_id = generate_id()
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -74,13 +78,13 @@ def create_detection_run(
         " detector_model, pose_model, detector_version, pose_version, "
         " detector_conf, pose_conf_threshold, "
         " pose_input_width, pose_input_height, status, created_at, "
-        " detector_type, config_json) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'running',?,?,?)",
+        " detector_type, config_json, seg_quality_run_id, seg_revision, source_detection_run_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'running',?,?,?,?,?,?)",
         (run_id, shot_id, sync_config_id, trial_id, time_start_s, time_end_s,
          detector_model, pose_model, detector_version, pose_version,
          detector_conf, pose_conf_threshold,
          pose_input_width, pose_input_height, now,
-         detector_type, config_json),
+         detector_type, config_json, seg_quality_run_id, seg_revision, source_detection_run_id),
     )
     session.commit()
     return run_id
@@ -253,6 +257,7 @@ class DetectionBatchWriter:
         img: np.ndarray | None = None,  # BGR frame for crop storage
     ) -> None:
         kp_by_track = {pr.track_id: pr.keypoints for pr in pose_results}
+        pose_noise_scale = {pr.track_id: pr.noise_scale for pr in pose_results if pr.noise_scale is not None}
 
         for det in detections:
             self._det_rows.append((
@@ -265,10 +270,9 @@ class DetectionBatchWriter:
 
             if det.track_id in kp_by_track:
                 kp = kp_by_track[det.track_id]
-                noise_scale = (
-                    float(det.bbox[2]) / self._pose_input_width
-                    if self._pose_input_width > 0 else None
-                )
+                noise_scale = pose_noise_scale.get(det.track_id)
+                if noise_scale is None and self._pose_input_width > 0:
+                    noise_scale = float(det.bbox[2]) / self._pose_input_width
                 self._kp_rows.append((
                     self._run_id, self._svid, video_frame,
                     det.track_id, "full_body",
@@ -277,7 +281,8 @@ class DetectionBatchWriter:
                 ))
 
             if img is not None:
-                result = _encode_crop(img, det.bbox)
+                with st.stage("preview_encode"):
+                    result = _encode_crop(img, det.bbox)
                 if result is not None:
                     jpeg, wpx, hpx, src_x, src_y, src_w, src_h = result
                     self._crop_rows.append((
@@ -292,7 +297,19 @@ class DetectionBatchWriter:
         if len(self._det_rows) >= _BATCH_SIZE:
             self._flush()
 
+    def add_hand_rows(self, video_frame: int, track_id: int, rows) -> None:
+        """Refined hand keypoints of a person: ``(region_type, hand_kp[21, 3], noise_scale)`` rows."""
+        for region_type, hand_kp, noise_scale in rows:
+            self._kp_rows.append((
+                self._run_id, self._svid, video_frame, track_id, region_type,
+                hand_kp.astype(np.float32).tobytes(), noise_scale,
+            ))
+
     def _flush(self) -> None:
+        with st.stage("db_write"):
+            self._flush_rows()
+
+    def _flush_rows(self) -> None:
         if self._det_rows:
             self._session.executemany(
                 "INSERT OR REPLACE INTO person_detections "

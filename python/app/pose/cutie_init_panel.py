@@ -581,16 +581,20 @@ class CutieInitPanel(QWidget):
 
         pose_row.addWidget(QLabel("Pose model:"))
         self._pose_model_combo = QComboBox()
+        self._pose_model_combo.addItem("SOMA-77 (GEM-X, recommended)", "soma77-vitpose-h")
         self._pose_model_combo.addItem("RTMPose-L 133kp", "rtmpose-l-133kp")
         self._pose_model_combo.addItem("VITpose-L 133kp", "vitpose-l-133kp")
-        self._pose_model_combo.setToolTip("Pose estimator model for queued pose extraction")
+        self._pose_model_combo.setToolTip(
+            "Pose estimator model for queued pose extraction. SOMA-77's weights are downloaded after you "
+            "accept their licences; without them RTMPose-133 is used."
+        )
         pose_row.addWidget(self._pose_model_combo)
 
         self._refine_hands_check = QCheckBox("Refine hands")
         self._refine_hands_check.setChecked(True)
         self._refine_hands_check.setToolTip(
-            "After pose extraction, re-detect each tracked wrist's hand in a "
-            "tight crop (rtmlib.Hand) and patch in the refined finger keypoints. "
+            "Re-detect each tracked wrist's hand in a tight crop (rtmlib.Hand) on the "
+            "frame already decoded and add the refined finger keypoints. "
             "Only has an effect for 133-keypoint pose models."
         )
         pose_row.addWidget(self._refine_hands_check)
@@ -1876,7 +1880,9 @@ class CutieInitPanel(QWidget):
 
     def _queue_pose_jobs(self, cameras: list[dict]) -> None:
         """Create and enqueue PoseExtractionJobs for the given cameras."""
-        pose_model = self._pose_model_combo.currentData()
+        from app.pose.pose_model_gui import prepare_pose_model
+
+        pose_model, _reason = prepare_pose_model(self, self._pose_model_combo.currentData())
         refine_hands = self._refine_hands_check.isChecked()
         detection_run_id = self._resolve_or_create_detection_run(pose_model)
         if detection_run_id is None:

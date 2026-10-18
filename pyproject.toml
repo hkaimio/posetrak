@@ -13,6 +13,8 @@ dependencies = [
     "certifi>=2024.0",
     "click>=8.0",
     "h5py>=3.10",
+    # Downloads the GEM-X pose weights (after the user accepts their licences); also used by sam2.
+    "huggingface_hub",
     "matplotlib>=3.8",
     "numpy>=1.26",
     "opencv-python>=4.13.0.92",
@@ -46,6 +48,7 @@ where = ["python"]
 [tool.setuptools.package-data]
 "posetrak.data.skeletons" = ["*.yaml", "layers/*.yaml", "layers/marker-sets/*.yaml"]
 "posetrak.db.sql" = ["*.sql", "migrations/*.sql"]
+"posetrak.data.licences" = ["*.txt"]
 
 [dependency-groups]
 dev = [

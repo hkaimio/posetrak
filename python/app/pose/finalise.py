@@ -38,6 +38,10 @@ def _scale_kp_confidence(kp_blob: bytes, scale: float) -> bytes:
     return arr.tobytes()
 
 
+#: SOMA-77 outputs heatmap peaks (0-1), like ViTPose, and takes ViTPose's scale into the tracker's noise range.
+SOMA77_CONF_SCALE = 5.0
+
+
 def conf_scale_for_model(pose_model: str) -> float:
     """Return the confidence normalisation factor for *pose_model*.
 
@@ -46,6 +50,8 @@ def conf_scale_for_model(pose_model: str) -> float:
     ``measurement_noise_std = base_noise / confidence``, so a scale factor
     is needed to bring ViTPose values into the same effective noise range.
     """
+    if pose_model.startswith("soma77"):
+        return SOMA77_CONF_SCALE
     try:
         from app.pose.backends_rtmpose import _KNOWN_MODELS
         entry = _KNOWN_MODELS.get(pose_model)
@@ -304,7 +310,7 @@ def auto_assign_and_finalise(
 
     Works because a segmentation mask's per-person label is already a
     stable identity -- mask label i+1 maps to persons_ordered[i], the same
-    convention app.pose.pose_worker._bboxes_from_mask uses when writing
+    convention MaskBoxSource uses when writing
     detections, so track_id (== mask label) -> person name is a pure
     lookup, not something that needs stitching across ambiguous YOLO
     tracks. See docs/roadmap/features/segmentation-reuse/
@@ -342,6 +348,34 @@ def auto_assign_and_finalise(
     )
 
 
+def finalise_from_source_run(
+    session: sqlite3.Connection,
+    detection_run_id: str,
+    source_run_id: str,
+    pose_model: str,
+    notes: str = "",
+    confidence_scale: float = 1.0,
+) -> list[str]:
+    """Finalise a run whose boxes came from *source_run_id* with that run's track-to-person assignments.
+
+    The tracks of the new run are the source run's tracks, so its assignments apply unchanged. Returns the new
+    sequence ids; [] (nothing finalised) when the source run has no assignments yet.
+    """
+    assignments = [
+        TrackAssignment(r["shot_video_id"], r["track_id"], r["person_name"], r["first_frame"], r["last_frame"])
+        for r in session.execute(
+            "SELECT shot_video_id, track_id, person_name, first_frame, last_frame FROM detection_track_assignments"
+            " WHERE detection_run_id = ?", (source_run_id,))
+    ]
+    if not assignments:
+        return []
+    run = session.execute("SELECT shot_id, sync_config_id FROM detection_runs WHERE id = ?", (detection_run_id,)).fetchone()
+    return finalise_to_db(
+        session=session, detection_run_id=detection_run_id, shot_id=run["shot_id"], sync_config_id=run["sync_config_id"],
+        assignments=assignments, pose_model=pose_model, notes=notes, confidence_scale=confidence_scale,
+    )
+
+
 def _make_dot_mask_filter(
     session: sqlite3.Connection, seg_run_id: str, dilate_px: float,
 ) -> Callable[[str, int, bytes], bytes]:
@@ -351,12 +385,12 @@ def _make_dot_mask_filter(
     the rationale and caveats.
 
     Coordinates are mapped into the mask's own (possibly downscaled, see
-    `app.pose.pose_worker._load_mask`) resolution rather than resizing the
+    `posetrak.detection.box_sources.load_mask`) resolution rather than resizing the
     mask up to native resolution per frame -- cheaper, and exact up to the
     same nearest-neighbor rounding `cv2.resize(..., INTER_NEAREST)` would
     give, since a dilated label mask is binary either way.
     """
-    from app.pose.pose_worker import _load_mask
+    from posetrak.detection.box_sources import load_mask as _load_mask
 
     native_size_cache: dict[str, tuple[int, int] | None] = {}
 

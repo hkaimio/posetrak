@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Protocol, TypeVar, runtime_checkable
+from typing import Callable, Protocol, Sequence, TypeVar, runtime_checkable
 from urllib.parse import urlparse
 import numpy as np
 
@@ -21,12 +21,19 @@ class PersonDetection:
     track_id: int
     bbox: np.ndarray   # float32[4]: x, y, w, h  centre-format, distorted px
     confidence: float
+    # Person mask the box was computed from, for estimators that gate heatmaps with it: uint8 [h, w] at a
+    # working resolution covering the whole frame (non-zero on the person, grown by a margin). None when the
+    # box source has no masks.
+    mask: np.ndarray | None = None
 
 
 @dataclass
 class PoseResult:
     track_id: int
     keypoints: np.ndarray  # float32[N, 3]: x, y, conf  distorted px
+    # Measurement noise scale written with the keypoints (distorted px per model input px). None: the writer
+    # uses the detection's box width over the model input width.
+    noise_scale: float | None = None
 
 
 @runtime_checkable
@@ -54,6 +61,17 @@ class PoseEstimator(Protocol):
         frame: np.ndarray,                  # original distorted full frame
         detections: list[PersonDetection],   # bboxes in distorted px
     ) -> list[PoseResult]: ...
+
+    def estimate_batch(
+        self,
+        items: Sequence[tuple[np.ndarray, list[PersonDetection]]],   # (frame, its detections), any cameras
+    ) -> list[list[PoseResult]]:
+        """Poses of every detection of every item, the model run on crops of all of them together."""
+        ...
+
+    def options(self) -> dict:
+        """Every option that changes the keypoints, for ``detection_runs.config_json``."""
+        ...
 
 
 _detector_registry: dict[str, type] = {}

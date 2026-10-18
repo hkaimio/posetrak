@@ -24,11 +24,14 @@ poses need to account for that.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import cv2
 import numpy as np
 
+from posetrak.detection import stage_timing as st
+from posetrak.detection.backends import PersonDetection, PoseResult, register_estimator
 from posetrak.detection.pose_models import SOMA77_FLIP_PAIRS as FLIP_PAIRS
 from posetrak.detection.pose_models import SOMA77_NAMES, SOMA77_PARENTS  # noqa: F401  (re-exported)
 
@@ -165,3 +168,88 @@ class Soma77Onnx:
             return decode(self.heatmaps(image[None])[0], cx, cy, s)
         both = self.heatmaps(np.stack([image, image[:, :, ::-1]]))
         return decode((both[0] + flip_heatmaps(both[1])) * 0.5, cx, cy, s)
+
+
+class Soma77WeightsMissing(RuntimeError):
+    """The GEM-X weights are not on this machine, or their licences have not been accepted."""
+
+
+@register_estimator
+class Soma77Estimator:
+    """SOMA-77 as a pose estimator of the detection loop: batched, with the options the spike validated.
+
+    The options (``options()``, recorded in ``detection_runs.config_json``): the flip test, the crop enlargement,
+    the sub-cell refinement, decoding at cell centres, and the mask gate, which multiplies a person's heatmaps by
+    the person's mask (``PersonDetection.mask``) when the box source provides one. *batch_crops* counts the
+    crops of one model call including the flipped copies (16 is the measured 12 ms per crop).
+    """
+
+    name = "soma77-vitpose-h"
+    version = "gem-x onnx"
+    input_size = (INPUT_H, INPUT_W)
+
+    def __init__(
+        self,
+        model_path: str | Path | None = None,
+        device: str | None = None,
+        *,
+        flip_test: bool = True,
+        enlarge: float = BOX_ENLARGE,
+        refine: str = "parabolic",
+        mask_gate: bool = True,
+        mask_gate_floor: float = 0.0,
+        batch_crops: int = 16,
+        onnx: Soma77Onnx | None = None,
+    ) -> None:
+        self.flip_test, self.enlarge, self.refine = flip_test, enlarge, refine
+        self.mask_gate, self.mask_gate_floor, self.batch_crops = mask_gate, mask_gate_floor, batch_crops
+        if onnx is None:
+            from posetrak.detection.model_weights import soma77_model_path
+
+            path = Path(model_path) if model_path else soma77_model_path()
+            if path is None:
+                raise Soma77WeightsMissing("The SOMA-77 weights are not downloaded or their licences not accepted.")
+            providers = ("CPUExecutionProvider",) if device == "cpu" else None
+            onnx = Soma77Onnx(path, providers)
+            self._model_file = path.name
+        else:
+            self._model_file = "injected"
+        session = getattr(onnx, "session", None)
+        self.device = "cuda" if session is not None and "CUDAExecutionProvider" in session.get_providers() else "cpu"
+        self._onnx = onnx
+
+    def estimate(self, frame: np.ndarray, detections: list[PersonDetection]) -> list[PoseResult]:
+        return self.estimate_batch([(frame, detections)])[0]
+
+    def estimate_batch(self, items: Sequence[tuple[np.ndarray, list[PersonDetection]]]) -> list[list[PoseResult]]:
+        jobs = []                                   # (item index, detection, frame, input, cx, cy, s)
+        for index, (frame, detections) in enumerate(items):
+            for det in detections:
+                cx, cy, s = crop_square(det.bbox, self.enlarge)
+                with st.stage("crop_preprocess"):
+                    jobs.append((index, det, frame, preprocess(frame, cx, cy, s), cx, cy, s))
+        results: list[list[PoseResult]] = [[] for _ in items]
+        per_call = max(1, self.batch_crops // (2 if self.flip_test else 1))
+        for lo in range(0, len(jobs), per_call):
+            chunk = jobs[lo:lo + per_call]
+            inputs = [x for job in chunk for x in ((job[3], job[3][:, :, ::-1]) if self.flip_test else (job[3],))]
+            with st.stage("inference"):
+                maps = self._onnx.heatmaps(np.stack(inputs))
+            for i, (index, det, frame, _, cx, cy, s) in enumerate(chunk):
+                with st.stage("heatmap_decode"):
+                    heat = (maps[2 * i] + flip_heatmaps(maps[2 * i + 1])) * 0.5 if self.flip_test else maps[i]
+                if self.mask_gate and det.mask is not None:
+                    with st.stage("mask_gate"):
+                        cells = mask_cells(det.mask, frame.shape[1], frame.shape[0], cx, cy, s)
+                        heat = gate_heatmaps(heat, cells, self.mask_gate_floor)
+                with st.stage("heatmap_decode"):
+                    kp = decode(heat, cx, cy, s, self.refine)
+                results[index].append(PoseResult(det.track_id, kp, noise_scale=0.75 * s / INPUT_W))
+        return results
+
+    def options(self) -> dict:
+        return {
+            "model": self.name, "model_file": self._model_file, "flip_test": self.flip_test,
+            "box_enlarge": self.enlarge, "refine": self.refine, "decoding": "cell-centre",
+            "mask_gate": self.mask_gate, "mask_gate_floor": self.mask_gate_floor, "batch_crops": self.batch_crops,
+        }

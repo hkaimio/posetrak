@@ -6,13 +6,9 @@
 reuse gap 2: docs/roadmap/features/segmentation-reuse/
 segmentation-reuse-design.md). This file had zero prior test coverage.
 
-The actual PoseWorker/JobQueueRunner execution needs a real video file and
-model, so these tests stop short of driving a real background thread:
-_run_from_segmentation's job-construction is exercised with
-JobQueueRunner.start() monkeypatched to a no-op, and the finalise wiring
-(_on_seg_queue_done) is exercised directly against DB state seeded the way
-a completed PoseWorker job would have left it -- the same pattern
-test_cutie_init_panel.py uses for the same reason.
+The detection job needs a real video file and models, so these tests stop short of driving a real
+background thread: the dialog's job construction is exercised with DetectionJob.start() monkeypatched
+to a no-op, and the job's run() against a fake pipeline.
 """
 from __future__ import annotations
 
@@ -221,81 +217,76 @@ def test_stays_on_yolo_when_requested_time_range_is_unknown(qapp, tmp_path):
     assert dlg._bbox_source_combo.currentData() is None
 
 
-def test_run_from_segmentation_builds_one_job_per_camera(qapp, capture_db, tmp_path, monkeypatch):
-    """_run_from_segmentation creates a detection run and one
-    PoseExtractionJob per camera, with frame ranges resolved via the sync
-    table (mirroring DetectionPipeline._frame_range) and persons_ordered
-    read from the segmentation's own persisted snapshot."""
-    from app.pose.job_queue_runner import JobQueueRunner
+def test_segmentation_source_starts_the_detection_job_with_that_segmentation(qapp, capture_db, tmp_path, monkeypatch):
+    """Choosing an existing segmentation as the bbox source runs the same detection job as YOLO boxes, with the
+    segmentation as its box source and the pose model the user has the weights for."""
+    from app.pose.main import DetectionJob
 
-    monkeypatch.setattr(JobQueueRunner, "start", lambda self: None)
-
-    dlg = _make_dialog(qapp, capture_db, tmp_path)
-    dlg._run_from_segmentation("seg1", "sync1", 0.0, 10.0)
-
-    assert dlg._seg_detection_run_id is not None
-    run_row = capture_db.execute(
-        "SELECT shot_id, sync_config_id, detector_model FROM detection_runs WHERE id=?",
-        (dlg._seg_detection_run_id,),
-    ).fetchone()
-    assert run_row["shot_id"] == "cap1"
-    assert run_row["sync_config_id"] == "sync1"
-    assert run_row["detector_model"] == "segmentation"
-
-    assert dlg._seg_jobs_total == 2
-    jobs = dlg._seg_runner.jobs
-    assert {j.shot_video_id for j in jobs} == {"sv1", "sv2"}
-    for j in jobs:
-        assert j.seg_quality_run_id == "seg1"
-        assert j.persons_ordered == ["Alice"]
-        assert j.first_frame == 0
-        assert j.last_frame == 300  # 10s @ 30fps per the sync points
-
-
-def test_on_seg_queue_done_finalises_without_manual_stitching(qapp, capture_db, tmp_path, monkeypatch):
-    """Once the queue completes, results are finalised automatically --
-    no manual track-to-person assignment step (gap 3, reused here)."""
-    import numpy as np
-    from app.pose.job_queue_runner import JobQueueRunner
-
-    monkeypatch.setattr(JobQueueRunner, "start", lambda self: None)
+    started = []
+    monkeypatch.setattr(DetectionJob, "start", lambda self: started.append(self))
+    monkeypatch.setattr("app.pose.pose_model_gui.prepare_pose_model", lambda parent, requested: (requested, None))
 
     dlg = _make_dialog(qapp, capture_db, tmp_path)
-    dlg._run_from_segmentation("seg1", "sync1", 0.0, 10.0)
+    assert dlg._bbox_source_combo.itemData(1) == "seg1"
+    dlg._bbox_source_combo.setCurrentIndex(1)
+    assert dlg._pose_combo.currentText() == "soma77-vitpose-h"          # the recommended model is preselected
+    dlg._on_run()
 
-    # Simulate what a completed PoseWorker job would have written.
-    run_id = dlg._seg_detection_run_id
-    kp = np.zeros((133, 3), dtype=np.float32).tobytes()
-    capture_db.execute(
-        "INSERT INTO detection_keypoints"
-        " (detection_run_id, shot_video_id, video_frame, track_id, region_type,"
-        "  keypoints, noise_scale)"
-        " VALUES (?, 'sv1', 0, 1, 'full_body', ?, 0.5)",
-        (run_id, kp),
+    (job,) = started
+    assert job._seg_run_id == "seg1" and job._pose_model_name == "soma77-vitpose-h"
+    assert (job._shot_id, job._sync_config_id, job._time_start_s, job._time_end_s) == ("cap1", "sync1", 0.0, 10.0)
+
+
+def test_declined_licences_run_the_job_with_rtmpose(qapp, capture_db, tmp_path, monkeypatch):
+    from app.pose.main import DetectionJob
+
+    started = []
+    monkeypatch.setattr(DetectionJob, "start", lambda self: started.append(self))
+    monkeypatch.setattr("app.pose.pose_model_gui.prepare_pose_model",
+                        lambda parent, requested: ("rtmpose-l-133kp", "licences not accepted"))
+    dlg = _make_dialog(qapp, capture_db, tmp_path)
+    dlg._bbox_source_combo.setCurrentIndex(0)                  # YOLO boxes
+    dlg._on_run()
+    assert started[0]._pose_model_name == "rtmpose-l-133kp" and started[0]._seg_run_id is None
+
+
+def test_detection_job_from_segmentation_finalises_without_manual_stitching(qapp, capture_db, tmp_path, monkeypatch):
+    """A segmentation-sourced run is finalised by the job itself: a mask label is already a person."""
+    from app.pose.main import DetectionJob
+    from posetrak.detection.pipeline import PipelineResult
+
+    pipelines, finalised = [], []
+
+    class FakePipeline:
+        cameras = []
+
+        def __init__(self, **kwargs):
+            pipelines.append(kwargs)
+
+        def run(self, on_progress=None, on_camera_done=None):
+            return PipelineResult(detection_run_id="run-1")
+
+    class FakeEstimator:
+        device = "cuda"
+
+    monkeypatch.setattr("posetrak.detection.pipeline.DetectionPipeline", FakePipeline)
+    monkeypatch.setattr("posetrak.detection.pose_model_choice.create_estimator", lambda model: FakeEstimator())
+    monkeypatch.setattr("app.pose.finalise.auto_assign_and_finalise", lambda **kw: finalised.append(kw))
+
+    job = DetectionJob(
+        session_path=str(tmp_path / "run_detection_test.db"), shot_id="cap1", sync_config_id="sync1",
+        time_start_s=0.0, time_end_s=10.0, detector_name="yolox-x", pose_model_name="soma77-vitpose-h",
+        detector_conf=0.3, refine_hands=True, seg_run_id="seg1",
     )
-    capture_db.execute(
-        "INSERT INTO person_tracks"
-        " (id, detection_run_id, shot_video_id, track_id, first_frame, last_frame)"
-        " VALUES ('pt1', ?, 'sv1', 1, 0, 0)",
-        (run_id,),
-    )
-    capture_db.commit()
+    done = []
+    job.finished.connect(done.append)
+    job.run()
 
-    finished = []
-    dlg.detection_finished.connect(lambda trial_id, rid: finished.append((trial_id, rid)))
-    dlg._on_seg_queue_done()
+    from posetrak.detection.box_sources import MaskBoxSource
 
-    seqs = capture_db.execute(
-        "SELECT id FROM pose_observation_sequences WHERE detection_run_id = ?", (run_id,)
-    ).fetchall()
-    assert len(seqs) == 1
-    assert len(finished) == 1
-    assert finished[0][1] == run_id
-    # A trial was created and linked (trial_id was None at dialog construction).
-    trial_row = capture_db.execute(
-        "SELECT trial_id FROM detection_runs WHERE id = ?", (run_id,)
-    ).fetchone()
-    assert trial_row["trial_id"] == finished[0][0]
+    assert isinstance(pipelines[0]["box_source"], MaskBoxSource) and pipelines[0]["hand_pass"] is None   # SOMA: no 133 hands
+    assert done == ["run-1"]
+    assert finalised[0]["persons_ordered"] == ["Alice"] and finalised[0]["confidence_scale"] == 5.0
 
 
 # ---------------------------------------------------------------------------

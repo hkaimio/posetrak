@@ -4,29 +4,31 @@
 
 """pose_worker.py — Segmentation-driven pose extraction as a queued job.
 
-Reads Cutie seg masks from the DB per frame, derives per-person tight
-bounding boxes, runs RTMPose or VITpose via rtmlib, and writes results
-directly to the DB via DetectionBatchWriter — the same schema used by
-the YOLO-based pipeline.
+A thin QThread around the detection frame loop (``posetrak.detection.pipeline.DetectionLoop``): the boxes come
+from the labels of a segmentation run (``MaskBoxSource``), the loop runs the job's pose model on one camera's
+frame range, and the rows go directly to the DB via DetectionBatchWriter into the detection run the caller
+created.
 
-The worker opens its own SQLite connection so DB writes happen in the
-worker thread, avoiding the main-thread signal queue problems entirely.
-Only progress and tracking_done signals cross the thread boundary.
+The worker opens its own SQLite connection so DB writes happen in the worker thread, avoiding the main-thread
+signal queue problems entirely. Only progress and tracking_done signals cross the thread boundary.
 """
 from __future__ import annotations
 
 import logging
 import sqlite3
-from pathlib import Path
-from posetrak.db.db import _connect
+import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
-import cv2
-import numpy as np
 from PySide6.QtCore import QThread, Signal
 
+from posetrak.db.db import _connect
+from posetrak.detection.box_sources import load_mask  # noqa: F401  (re-exported for app.pose.finalise)
+
 log = logging.getLogger(__name__)
+
+_PROGRESS_EVERY = 50
 
 
 @dataclass
@@ -81,14 +83,14 @@ class PoseWorker(QThread):
         self._job = job
         self._db_path = db_path
         self._device = device
-        self._stop_requested = False
+        self._stop_event = threading.Event()
         self._keypoints_written = 0
 
     def get_keypoints_written(self) -> int:
         return self._keypoints_written
 
     def stop(self) -> None:
-        self._stop_requested = True
+        self._stop_event.set()
 
     def run(self) -> None:
         try:
@@ -104,48 +106,14 @@ class PoseWorker(QThread):
     # Internal
     # ------------------------------------------------------------------
 
-    def _run_hand_refinement(self, conn: sqlite3.Connection, job: "PoseExtractionJob") -> None:
-        """Patch refined hand keypoints into the just-written detection_keypoints.
-
-        Same mechanism the YOLO-based pipeline uses (posetrak.detection.
-        hand_refinement) — mask-derived bboxes give better crops for the
-        body pass, but the hand-specific crop/gate is unaffected by bbox
-        source, so it's worth applying here too. See
-        docs/roadmap/features/hand-detection-refinement/hand-detection-refinement-design.md.
-        """
-        try:
-            from posetrak.detection.hand_refinement import HandRefinementPipeline
-        except ImportError:
-            log.warning("PoseWorker: rtmlib unavailable, skipping hand refinement")
-            return
-        from posetrak.detection.pipeline import CameraInfo
-
-        cam_row = conn.execute(
-            "SELECT camera_instance_id FROM capture_videos WHERE id=?",
-            (job.shot_video_id,),
-        ).fetchone()
-        cam = CameraInfo(
-            shot_video_id=job.shot_video_id,
-            camera_instance_id=cam_row["camera_instance_id"] if cam_row else job.shot_video_id,
-            file_path=job.video_path,
-            actual_fps=0.0,
-            ref_frame=0,
-            ref_timestamp_s=0.0,
-        )
-
-        def on_progress(done: int, total: int, cam_id: str) -> None:
-            self.progress.emit(done, total)
-
-        t0 = time.monotonic()
-        n_refined = HandRefinementPipeline(conn).run(
-            job.detection_run_id, cameras=[cam], on_progress=on_progress
-        )
-        log.info("PoseWorker: hand refinement done  %d refined  %.2fs",
-                 n_refined, time.monotonic() - t0)
-
     def _run_pose(self) -> None:
-        from app.pose.backends_rtmpose import RTMPoseEstimator
-        from app.pose.db_cache import DetectionBatchWriter, mark_run_complete
+        from app.pose.db_cache import mark_run_complete
+        from posetrak.detection.box_sources import MaskBoxSource
+        from posetrak.detection.frame_readers import get_reader
+        from posetrak.detection.pipeline import (
+            DEFAULT_DECODE_MODE, CameraInfo, CameraJob, DetectionLoop, record_run_options, run_config,
+        )
+        from posetrak.detection.pose_model_choice import create_estimator
 
         job = self._job
         t0 = time.monotonic()
@@ -158,72 +126,41 @@ class PoseWorker(QThread):
             if job.overwrite_range:
                 _delete_range(conn, job)
 
-            estimator = RTMPoseEstimator(job.pose_model, device=self._device)
-            pose_input_w = estimator.input_size[1]   # input_size is (height, width)
+            estimator = create_estimator(job.pose_model, device=self._device)
+            box_source = MaskBoxSource(conn, job.seg_quality_run_id, job.persons_ordered)
+            hand_pass = None
+            if job.refine_hands and "133" in job.pose_model:
+                try:
+                    from posetrak.detection.hand_refinement import HandPass
+                    hand_pass = HandPass()
+                except ImportError:
+                    log.warning("PoseWorker: rtmlib unavailable, skipping hand refinement")
 
-            writer = DetectionBatchWriter(
-                conn, job.detection_run_id, job.shot_video_id, pose_input_w,
+            row = conn.execute("SELECT camera_instance_id FROM capture_videos WHERE id=?",
+                               (job.shot_video_id,)).fetchone()
+            cam = CameraInfo(
+                shot_video_id=job.shot_video_id,
+                camera_instance_id=row["camera_instance_id"] if row else job.shot_video_id,
+                file_path=job.video_path, actual_fps=0.0, ref_frame=0, ref_timestamp_s=0.0,
+                label=job.camera_label,
             )
+            record_run_options(conn, job.detection_run_id, box_source,
+                               run_config(box_source, estimator, hand_pass, DEFAULT_DECODE_MODE, 6))
 
-            total = job.last_frame - job.first_frame + 1
-            done = 0
-            frames_with_kp = 0
+            def on_progress(done: int, total: int, label: str) -> None:
+                if done % _PROGRESS_EVERY == 0:
+                    self.progress.emit(done, total)
 
-            cap = cv2.VideoCapture(job.video_path)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, job.first_frame)
-
-            try:
-                for frame_idx in range(job.first_frame, job.last_frame + 1):
-                    if self._stop_requested:
-                        break
-                    ret, frame_bgr = cap.read()
-                    if not ret:
-                        log.warning("PoseWorker: video read failed at frame %d", frame_idx)
-                        break
-
-                    # Read the mask (stored at max_dim=1920p by CutieWorker).
-                    mask = _load_mask(conn, job.seg_quality_run_id,
-                                     job.shot_video_id, frame_idx)
-                    if mask is None:
-                        done += 1
-                        continue
-
-                    # Scale mask UP to match the native video resolution so bboxes
-                    # are in full-resolution coordinates.  Keypoints must be stored
-                    # at native resolution to match the camera calibration matrices
-                    # used by the C++ tracker (same as the YOLO pipeline).
-                    fh, fw = frame_bgr.shape[:2]
-                    if mask.shape != (fh, fw):
-                        mask = cv2.resize(mask, (fw, fh), interpolation=cv2.INTER_NEAREST)
-
-                    detections = _bboxes_from_mask(mask, job.persons_ordered)
-                    if detections:
-                        results = estimator.estimate(frame_bgr, detections)
-                        writer.add_frame(frame_idx, detections, results,
-                                        job.pose_model, img=frame_bgr)
-                        self._keypoints_written += len(results)
-                        frames_with_kp += 1
-
-                    done += 1
-                    if done % 50 == 0:
-                        self.progress.emit(done, total)
-                        log.debug("PoseWorker: %d/%d frames  kp_frames=%d  t=%.3f",
-                                  done, total, frames_with_kp, time.monotonic() - t0)
-            finally:
-                cap.release()
-
-            writer.finalise()
-
-            if job.refine_hands and not self._stop_requested:
-                self._run_hand_refinement(conn, job)
-
-            # Recompute person_track spans from full person_detections — handles
-            # partial re-runs where overwrite_range covered only part of the video.
-            _update_track_spans(conn, job.detection_run_id, job.shot_video_id)
+            loop = DetectionLoop(conn, job.detection_run_id, box_source, estimator, hand_pass=hand_pass,
+                                 reader=get_reader(DEFAULT_DECODE_MODE), stop_event=self._stop_event)
+            done = loop.run([CameraJob(cam, job.first_frame, job.last_frame + 1)], on_progress)
+            self._keypoints_written = conn.execute(
+                "SELECT COUNT(*) FROM detection_keypoints WHERE detection_run_id=? AND shot_video_id=?"
+                " AND region_type='full_body' AND video_frame BETWEEN ? AND ?",
+                (job.detection_run_id, job.shot_video_id, job.first_frame, job.last_frame)).fetchone()[0]
             mark_run_complete(conn, job.detection_run_id)
-
-            log.info("PoseWorker: done  %d frames  %d kp_frames  %.2fs",
-                     done, frames_with_kp, time.monotonic() - t0)
+            log.info("PoseWorker: done  %d frames  %d keypoint rows  %.2fs",
+                     done, self._keypoints_written, time.monotonic() - t0)
 
         except Exception:
             mark_run_complete(conn, job.detection_run_id, "failed")
@@ -235,62 +172,6 @@ class PoseWorker(QThread):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _load_mask(
-    conn: sqlite3.Connection,
-    seg_quality_run_id: str,
-    shot_video_id: str,
-    frame_idx: int,
-) -> np.ndarray | None:
-    """Return (H, W) uint8 labeled mask, or None if not stored."""
-    row = conn.execute(
-        "SELECT mask_blob FROM seg_masks "
-        "WHERE seg_quality_run_id=? AND shot_video_id=? AND frame_idx=?",
-        (seg_quality_run_id, shot_video_id, frame_idx),
-    ).fetchone()
-    if row is None:
-        return None
-    buf = np.frombuffer(bytes(row["mask_blob"]), dtype=np.uint8)
-    mask = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
-    if mask is None:
-        return None
-    if mask.ndim == 3:
-        mask = mask[:, :, 0]
-    return mask
-
-
-def _bboxes_from_mask(
-    mask: np.ndarray,
-    persons_ordered: list[str],
-) -> list:
-    """Return PersonDetection list from a labeled mask.
-
-    Uses tight pixel bboxes in centre-format (cx, cy, w, h).
-    DetectionBatchWriter._encode_crop adds the 20% margin when storing
-    person crop images, matching the YOLO-based pipeline exactly.
-    """
-    from app.pose.backends import PersonDetection
-
-    detections = []
-    for i, _name in enumerate(persons_ordered):
-        label = i + 1
-        ys, xs = np.where(mask == label)
-        if len(xs) == 0:
-            continue
-        x1, x2 = int(xs.min()), int(xs.max())
-        y1, y2 = int(ys.min()), int(ys.max())
-        w, h = x2 - x1, y2 - y1
-        if w < 4 or h < 4:
-            continue
-        cx = (x1 + x2) / 2.0
-        cy = (y1 + y2) / 2.0
-        detections.append(PersonDetection(
-            track_id=label,
-            bbox=np.array([cx, cy, float(w), float(h)], dtype=np.float32),
-            confidence=1.0,
-        ))
-    return detections
-
 
 def _delete_range(conn: sqlite3.Connection, job: PoseExtractionJob) -> None:
     """Delete existing detection data for this camera + frame range."""
@@ -313,32 +194,3 @@ def _delete_range(conn: sqlite3.Connection, job: PoseExtractionJob) -> None:
     conn.commit()
     log.info("PoseWorker: deleted existing data  svid=%s  frames %d-%d",
              job.shot_video_id, job.first_frame, job.last_frame)
-
-
-def _update_track_spans(
-    conn: sqlite3.Connection,
-    detection_run_id: str,
-    shot_video_id: str,
-) -> None:
-    """Recompute person_track first/last spans from person_detections.
-
-    DetectionBatchWriter.finalise() writes spans only for frames seen in
-    the current job.  For partial re-runs this overwrites the full span
-    with only the partial range.  This function corrects by querying all
-    detections for the run+camera.
-    """
-    spans = conn.execute(
-        "SELECT track_id, MIN(video_frame) AS first_f, MAX(video_frame) AS last_f "
-        "FROM person_detections "
-        "WHERE detection_run_id=? AND shot_video_id=? "
-        "GROUP BY track_id",
-        (detection_run_id, shot_video_id),
-    ).fetchall()
-    for row in spans:
-        conn.execute(
-            "UPDATE person_tracks "
-            "SET first_frame=?, last_frame=? "
-            "WHERE detection_run_id=? AND shot_video_id=? AND track_id=?",
-            (row["first_f"], row["last_f"], detection_run_id, shot_video_id, row["track_id"]),
-        )
-    conn.commit()

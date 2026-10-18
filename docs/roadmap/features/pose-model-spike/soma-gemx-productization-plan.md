@@ -155,7 +155,7 @@ Stage 0 is measurement only and comes first because several later scopes depend 
 - **Scope:** box source protocol and the three sources; SOMA as a registered batched estimator with
   mask gate; decode / infer / write pipeline sized by M1; `PoseWorker` and GUI dialogs on the same
   loop; model download with licence acceptance; SOMA-77 preselected as the recommended model, with
-  RTMPose-133 when the licences are declined; run inputs recorded (schema 65). From M1, in order of
+  RTMPose-133 when the licences are declined; run inputs recorded (schema 66). From M1, in order of
   measured cost:
   - A decode thread per camera. Decode is 12 times real time and serial, and the GPU is idle while it
     runs.

@@ -39,6 +39,7 @@ lands.
 | `prototype_pen_band_tracking.py`, `prototype_track_pen_trajectory.py` | 6-DOF trajectory of a pen from its ArUco tags and reflective bands | Feeds `blender/export_pen_pad_to_blender.py`; no package equivalent planned |
 | `prototype_calibrate_pen_and_pad.py` | Rigid-body geometry calibration, hardcoded to one capture's pen and pad | General paths are `posetrak marker-body calibrate` (fixed cameras) and `calibrate-video` (one moving camera) |
 | `calibrate_harness_from_orbit.py` | Recalibrating a rigid body from one moving camera orbiting the stationary rig, anchored by static markers | Absorbed by `posetrak marker-body calibrate-video` (`posetrak/calibration/video_marker_body.py`), which needs no old body for its dots; delete once it has been used on a second prop |
+| `decode_soak.py` | Whether decoding several camera videos in parallel hangs, with decode threads and with decode processes (random 10 s windows opened, decoded and closed over and over, a watchdog counting hangs per step) | The result chooses `DEFAULT_DECODE_MODE` in `posetrak/detection/pipeline.py` (detection pipeline design section 3); delete once the soak has been run on the release candidate |
 
 ## Superseded
 

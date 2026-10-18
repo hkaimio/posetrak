@@ -91,3 +91,20 @@ path = [
 ]
 SPDX-FileCopyrightText = "2026 Nelli Kaimio"
 SPDX-License-Identifier = "Apache-2.0"
+
+# Third-party licence texts shown before the GEM-X weights are downloaded
+# (docs/roadmap/features/detection-pipeline/detection-pipeline-design.md,
+# section 4). They are the vendors' agreements, not project code: the vendor
+# is the copyright holder and each text has its own LicenseRef file in
+# LICENSES/. The bytes of these files are hashed for the licence acceptance
+# record, so they carry no inline header; keep them after the generic *.txt
+# annotation above, the last matching annotation wins.
+[[annotations]]
+path = "python/posetrak/data/licences/nvidia-open-model-license.txt"
+SPDX-FileCopyrightText = "NVIDIA Corporation"
+SPDX-License-Identifier = "LicenseRef-NVIDIA-Open-Model-License"
+
+[[annotations]]
+path = "python/posetrak/data/licences/dinov3-license.txt"
+SPDX-FileCopyrightText = "Meta Platforms, Inc."
+SPDX-License-Identifier = "LicenseRef-DINOv3-License"

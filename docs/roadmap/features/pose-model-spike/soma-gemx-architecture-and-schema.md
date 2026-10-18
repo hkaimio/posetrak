@@ -289,8 +289,9 @@ The `CHECK` on `kind` is the reason for the rebuild. `dot_assignment_proposals` 
 | Session version | Release | Change | How |
 |---|---|---|---|
 | 64 | first | `tracking_runs.status`, `completed_at`, `failure`; `tracking_run_persons.seg_quality_run_id`, `seg_mask_label`, `seg_revision`; table `run_progress` | `ALTER TABLE ADD COLUMN`; `CREATE TABLE` |
-| 65 | first | `detection_runs.seg_quality_run_id`, `seg_revision`, `source_detection_run_id`; existing rows stay NULL (mask-sourced runs did not record their segmentation; the spike's prototype runs name their source run in `config_json`, which is copied into `source_detection_run_id`) | `ALTER TABLE ADD COLUMN` + update |
-| 66 | first | `pose_sequence_keypoints.obs_source` and new key; `tracker_configs.active_joint_groups` (registry version 17 in step) | table rebuild (small table); `ALTER TABLE ADD COLUMN` |
+| 65 | first | `pose_sequence_keypoints.obs_source` and new key (stage 2, merged) | table rebuild (small table) |
+| 66 | first | `detection_runs.seg_quality_run_id`, `seg_revision`, `source_detection_run_id`; existing rows stay NULL (mask-sourced runs did not record their segmentation; the spike's prototype runs name their source run in `config_json`, which is copied into `source_detection_run_id`) (stage 3) | `ALTER TABLE ADD COLUMN` + update |
+| next free | first | `tracker_configs.active_joint_groups` (registry version 17 in step) | `ALTER TABLE ADD COLUMN` |
 | 67 | second | `seg_mask_revisions`; `seg_masks.revision`, nullable blob, new key; `seg_masks_latest` view | table rebuild with copy, revision 0 rows |
 | 68 | second | `tracker_configs.kp_candidates_enabled` (registry version 18 in step) | `ALTER TABLE ADD COLUMN` |
 | 69 | third | `dot_assignment_edits` kinds 'force', 'split', column `edit_group_id` | table rebuild with copy |

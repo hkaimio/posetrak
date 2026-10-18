@@ -13,9 +13,11 @@
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <queue>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -856,7 +858,7 @@ ObservationSet SessionReader::load_observations(
     std::unordered_map<std::string, Camera const*> inst_to_cam =
         load_instance_camera_map(sequence_id, cameras);
 
-    // Step 2: Build COCO keypoint ID → skeleton marker index map
+    // Step 2: Build COCO keypoint ID → skeleton marker index map (the implied COCO-133 layout).
     std::unordered_map<int, int> coco_to_marker_idx;
     auto const& markers = skeleton.markers();
     for (size_t i = 0; i < markers.size(); ++i) {
@@ -865,22 +867,43 @@ ObservationSet SessionReader::load_observations(
         }
     }
 
-    // Step 2.1: Build manifest keypoint-slot → skeleton marker index map
-    // (marker-mocap design §4.3/§5.1). A sequence with no
-    // pose_sequence_keypoints rows (every existing person sequence) leaves
-    // this empty -- "behaves exactly as today" (design §5.1). landmark_to_marker_idx
-    // keys off Marker::landmark (the name a manifest row is matched against),
-    // not Marker::name, since a marker bound to a track may in principle have
-    // a display name distinct from its landmark -- though today's generator
-    // (posetrak.skeleton.marker_body_to_skeleton) always sets them equal.
-    std::unordered_map<int, int> manifest_idx_to_marker_idx;
-    // Per-frame kp_blob width for a manifest-bound (object) sequence -- the
-    // count of pose_sequence_keypoints rows, i.e. max(keypoint_idx)+1, not
-    // manifest_idx_to_marker_idx.size() (which only counts slots that
-    // happened to match a skeleton marker's landmark; a partial-subset
-    // skeleton would otherwise understate the real blob width). 0 for a
-    // sequence with no manifest at all (every existing person sequence).
-    int manifest_width = 0;
+    // Step 2.1: Bind the slots of each keypoint blob to skeleton markers.
+    //
+    // A sequence's blobs come from up to three observation sources, the "layers" of the merged
+    // array: the primary row ('body' for a person, 'markers' for an object) and the refined hand
+    // rows ('hand_l', 'hand_r'). Each layer that has pose_sequence_keypoints rows binds a slot to
+    // the marker whose Marker::landmark equals the row's name. A layer without rows has the implied
+    // COCO-133 layout (every sequence finalised before manifests were written for all sequences):
+    // slot k of the primary row is COCO index k, slot k of a hand row is 91 + k / 112 + k. The two
+    // never mix within a layer, so a slot that no marker claims stays unbound instead of falling
+    // through to whatever COCO marker has the same index.
+    enum Layer : int {
+        kPrimaryLayer = 0,
+        kHandLeftLayer = 1,
+        kHandRightLayer = 2,
+        kLayerCount = 3
+    };
+    struct LayerBinding {
+        bool has_manifest = false;
+        int width = 0;  // max(keypoint_idx) + 1 of the manifest rows
+        std::unordered_map<int, int> slot_to_marker;
+        std::set<std::string> models;  // the manifest rows' source column
+    };
+    std::array<LayerBinding, kLayerCount> bindings;
+    // hand21 -> COCO-133 index offsets. Canonical source of truth is posetrak.detection.pose_models
+    // (COCO133_HAND_BASE, HAND21_NAMES); Python and C++ don't share a header, so this is duplicated
+    // (see also posetrak/db/observation_merge.py).
+    constexpr int kHandBaseIdxLeft = 91;
+    constexpr int kHandBaseIdxRight = 112;
+    constexpr int kHandNKp = 21;
+    // Full COCO-133 layout width: the size of a primary row that is absent from a (camera, frame)
+    // group of a sequence without a primary manifest.
+    constexpr int kFullBodyNKp = 133;
+    auto coco_base = [&](int layer) {
+        return layer == kHandLeftLayer    ? kHandBaseIdxLeft
+               : layer == kHandRightLayer ? kHandBaseIdxRight
+                                          : 0;
+    };
     {
         std::unordered_map<std::string, int> landmark_to_marker_idx;
         for (size_t i = 0; i < markers.size(); ++i) {
@@ -888,34 +911,95 @@ ObservationSet SessionReader::load_observations(
                 landmark_to_marker_idx[markers[i].landmark] = static_cast<int>(i);
             }
         }
-        if (!landmark_to_marker_idx.empty()) {
-            Stmt manifest_stmt(db_,
-                               "SELECT keypoint_idx, name FROM pose_sequence_keypoints"
-                               " WHERE sequence_id = ?");
-            sqlite3_bind_text(manifest_stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
-            while (manifest_stmt.step()) {
-                int keypoint_idx = sqlite3_column_int(manifest_stmt.ptr, 0);
-                manifest_width = std::max(manifest_width, keypoint_idx + 1);
-                std::string landmark_name =
-                    reinterpret_cast<char const*>(sqlite3_column_text(manifest_stmt.ptr, 1));
-                auto it = landmark_to_marker_idx.find(landmark_name);
-                if (it != landmark_to_marker_idx.end()) {
-                    manifest_idx_to_marker_idx[keypoint_idx] = it->second;
-                }
+        // A database from before obs_source existed has the manifest of the primary row only.
+        sqlite3_stmt* manifest_raw = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                               "SELECT obs_source, keypoint_idx, name, source FROM"
+                               " pose_sequence_keypoints WHERE sequence_id = ?",
+                               -1, &manifest_raw, nullptr) != SQLITE_OK) {
+            manifest_raw = nullptr;
+            if (sqlite3_prepare_v2(db_,
+                                   "SELECT 'body', keypoint_idx, name, source FROM"
+                                   " pose_sequence_keypoints WHERE sequence_id = ?",
+                                   -1, &manifest_raw, nullptr) != SQLITE_OK) {
+                manifest_raw = nullptr;  // no manifest table at all
             }
         }
+        if (manifest_raw != nullptr) {
+            sqlite3_bind_text(manifest_raw, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
+            auto text = [&](int col) {
+                auto const* t = sqlite3_column_text(manifest_raw, col);
+                return t != nullptr ? std::string(reinterpret_cast<char const*>(t)) : std::string();
+            };
+            while (sqlite3_step(manifest_raw) == SQLITE_ROW) {
+                std::string const obs_source = text(0);
+                int const layer = obs_source == "hand_l"   ? kHandLeftLayer
+                                  : obs_source == "hand_r" ? kHandRightLayer
+                                                           : kPrimaryLayer;
+                int const keypoint_idx = sqlite3_column_int(manifest_raw, 1);
+                std::string const name = text(2);
+                std::string const model = text(3);
+                auto& binding = bindings[layer];
+                binding.has_manifest = true;
+                binding.width = std::max(binding.width, keypoint_idx + 1);
+                binding.models.insert(model);
+                // The landmark is "<model>:<keypoint>"; a name without a model prefix (sequences
+                // extracted before landmarks were model-qualified) also matches the qualified one.
+                auto it = landmark_to_marker_idx.find(name);
+                if (it == landmark_to_marker_idx.end() && name.find(':') == std::string::npos &&
+                    !model.empty()) {
+                    it = landmark_to_marker_idx.find(model + ":" + name);
+                }
+                if (it != landmark_to_marker_idx.end()) {
+                    binding.slot_to_marker[keypoint_idx] = it->second;
+                    continue;
+                }
+                // A COCO-133 or hand21 slot is also the COCO marker of that index, which keeps a
+                // skeleton that only carries openpose_keypoint markers bound.
+                bool const coco_model = (layer == kPrimaryLayer && model == "coco133") ||
+                                        (layer != kPrimaryLayer && model == "hand21");
+                if (coco_model) {
+                    auto coco_it = coco_to_marker_idx.find(coco_base(layer) + keypoint_idx);
+                    if (coco_it != coco_to_marker_idx.end())
+                        binding.slot_to_marker[keypoint_idx] = coco_it->second;
+                }
+            }
+            sqlite3_finalize(manifest_raw);
+        }
+    }
+    // Per-frame kp_blob width of a manifest-bound primary row -- the count of manifest rows, i.e.
+    // max(keypoint_idx)+1, not slot_to_marker.size() (which only counts slots a marker claims; a
+    // partial-subset skeleton would otherwise understate the real blob width). 0 for a sequence
+    // whose primary row has no manifest.
+    int const manifest_width = bindings[kPrimaryLayer].width;
+    int bound_manifest_slots = 0;
+    bool any_manifest = false;
+    std::set<std::string> manifest_models;
+    for (auto const& b : bindings) {
+        any_manifest = any_manifest || b.has_manifest;
+        bound_manifest_slots += static_cast<int>(b.slot_to_marker.size());
+        manifest_models.insert(b.models.begin(), b.models.end());
+    }
+    if (any_manifest && bound_manifest_slots == 0) {
+        std::string models;
+        for (auto const& m : manifest_models)
+            models += (models.empty() ? "" : ", ") + m;
+        throw std::runtime_error(
+            "The skeleton has no marker bound to the keypoints of sequence '" + sequence_id +
+            "' (pose model: " + models +
+            "). Add that pose model's markers to the skeleton (posetrak skeleton add-pose-model) "
+            "or track the sequence with a skeleton that has them.");
     }
 
-    // Resolves a keypoint blob slot to a skeleton marker index, trying the
-    // manifest (track/landmark-bound markers) before the legacy COCO map --
-    // the two never overlap in practice (a sequence is either a person's
-    // coco133-implied layout or an object's manifest-declared one, never
-    // both), so lookup order is not load-bearing, only completeness is.
-    auto resolve_marker_idx = [&](int blob_idx) -> std::optional<int> {
-        if (auto it = manifest_idx_to_marker_idx.find(blob_idx);
-            it != manifest_idx_to_marker_idx.end())
-            return it->second;
-        if (auto it = coco_to_marker_idx.find(blob_idx); it != coco_to_marker_idx.end())
+    // Resolves slot k of a layer's blob to a skeleton marker index.
+    auto resolve_marker_idx = [&](int layer, int k) -> std::optional<int> {
+        auto const& binding = bindings[layer];
+        if (binding.has_manifest) {
+            if (auto it = binding.slot_to_marker.find(k); it != binding.slot_to_marker.end())
+                return it->second;
+            return std::nullopt;
+        }
+        if (auto it = coco_to_marker_idx.find(coco_base(layer) + k); it != coco_to_marker_idx.end())
             return it->second;
         return std::nullopt;
     };
@@ -1044,28 +1128,14 @@ ObservationSet SessionReader::load_observations(
     sqlite3_bind_text(obs_stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_int(obs_stmt.ptr, 2, person_id);
 
-    // hand21 -> COCO-133 index offsets. Canonical source of truth is
-    // posetrak.detection.hand_refinement's _HAND_BASE_IDX / _HAND_N_KP
-    // (Python and C++ don't share a header here, so this is duplicated —
-    // see posetrak/db/observation_merge.py for the Python-side mirror).
-    constexpr int kHandBaseIdxLeft = 91;
-    constexpr int kHandBaseIdxRight = 112;
-    constexpr int kHandNKp = 21;
-    // Full COCO-133 layout width -- needed as a fallback array size when a
-    // (camera, frame) group has no 'body' row at all (body detection can
-    // drop frames a refined pass still covers, e.g. a hand track surviving
-    // past where body tracking lost the person -- see the body_row-null
-    // branch below). Same layout assumption already baked into the hand
-    // base indices above, just made explicit here.
-    constexpr int kFullBodyNKp = 133;
     // Takes a *base* source name (any ".refined" suffix already stripped by
     // split_source below) -- 'hand_l' and 'hand_l.refined' both resolve here
     // via the same base name.
-    auto hand_base_idx = [&](std::string const& base_source) -> int {
+    auto hand_layer = [&](std::string const& base_source) -> int {
         if (base_source == "hand_l")
-            return kHandBaseIdxLeft;
+            return kHandLeftLayer;
         if (base_source == "hand_r")
-            return kHandBaseIdxRight;
+            return kHandRightLayer;
         return -1;
     };
 
@@ -1135,7 +1205,7 @@ ObservationSet SessionReader::load_observations(
         for (auto const& r : group_rows) {
             auto [row_base_source, row_is_refined] = split_source(r.source);
             (void)row_is_refined;
-            if (hand_base_idx(row_base_source) < 0) {
+            if (hand_layer(row_base_source) < 0) {
                 body_row = &r;
                 break;
             }
@@ -1170,6 +1240,16 @@ ObservationSet SessionReader::load_observations(
             base_timestamp_s = group_rows.front().timestamp_s;
         }
         std::vector<double> merged_crop_scale(merged.size(), base_crop_scale);
+        // Marker bound to each slot of the merged array; the primary row's slots first, the slots
+        // a hand row overwrites rebound through that row's own layer.
+        std::vector<std::optional<int>> slot_marker(merged.size());
+        for (size_t k = 0; k < merged.size(); ++k)
+            slot_marker[k] = resolve_marker_idx(kPrimaryLayer, static_cast<int>(k));
+        // A COCO-133-wide primary row contains the hand slots, which the hand rows overwrite
+        // (91 and 112). A narrower one (SOMA-77) has none: the hand rows are appended after it,
+        // the left hand and then the right hand, and the array grows only when a hand row is
+        // present.
+        int const primary_width = static_cast<int>(merged.size());
         // Two explicit passes -- plain sources, then '.refined' sources on
         // top -- rather than a single loop over group_rows in fetch order:
         // the SQL query has no ORDER BY on source, so nothing guarantees a
@@ -1179,14 +1259,25 @@ ObservationSet SessionReader::load_observations(
                 auto [base_source, is_refined] = split_source(r.source);
                 if (is_refined != want_refined)
                     continue;
-                int base = hand_base_idx(base_source);
-                if (base < 0)
+                int const layer = hand_layer(base_source);
+                if (layer < 0)
                     continue;
-                int n = std::min({kHandNKp, static_cast<int>(r.kps.size()),
-                                  static_cast<int>(merged.size()) - base});
+                // A narrow primary row takes hand rows only through their own manifest.
+                if (primary_width < kFullBodyNKp && !bindings[layer].has_manifest)
+                    continue;
+                int const base = primary_width >= kFullBodyNKp
+                                     ? coco_base(layer)
+                                     : primary_width + (layer == kHandRightLayer ? kHandNKp : 0);
+                int const n = std::min(kHandNKp, static_cast<int>(r.kps.size()));
+                if (base + n > static_cast<int>(merged.size())) {
+                    merged.resize(static_cast<size_t>(base + n));
+                    merged_crop_scale.resize(merged.size(), base_crop_scale);
+                    slot_marker.resize(merged.size());
+                }
                 for (int k = 0; k < n; ++k) {
                     merged[static_cast<size_t>(base + k)] = r.kps[static_cast<size_t>(k)];
                     merged_crop_scale[static_cast<size_t>(base + k)] = r.crop_scale;
+                    slot_marker[static_cast<size_t>(base + k)] = resolve_marker_idx(layer, k);
                 }
             }
         }
@@ -1217,7 +1308,7 @@ ObservationSet SessionReader::load_observations(
             // reorders which of rows_skipped_confidence/rows_skipped_coco a keypoint
             // that fails both checks is counted under (cosmetic, diagnostics only; a
             // keypoint that matches no marker was never going to be used either way).
-            auto marker_idx_opt = resolve_marker_idx(i);
+            auto marker_idx_opt = slot_marker[static_cast<size_t>(i)];
             if (!marker_idx_opt.has_value()) {
                 ++rows_skipped_coco;
                 continue;
@@ -1385,7 +1476,7 @@ ObservationSet SessionReader::load_observations(
     // a wrong-person_id mistake to fail loudly over.
     bool const has_any_labeled_marker = [&] {
         for (auto const& m : markers) {
-            if (m.coco_id.has_value())
+            if (m.coco_id.has_value() || (m.track.empty() && !m.landmark.empty()))
                 return true;
             if (!m.track.empty()) {
                 InputTrack const* t = skeleton.get_input_track(m.track);
@@ -1423,8 +1514,8 @@ ObservationSet SessionReader::load_observations(
             " rows with unknown camera)\n"
             "  COCO markers in skeleton: " +
             std::to_string(coco_to_marker_idx.size()) +
-            ", manifest-bound markers: " + std::to_string(manifest_idx_to_marker_idx.size()) +
-            " (skipped " + std::to_string(rows_skipped_coco) +
+            ", manifest-bound markers: " + std::to_string(bound_manifest_slots) + " (skipped " +
+            std::to_string(rows_skipped_coco) +
             " keypoints matching neither)\n"
             "  skipped " +
             std::to_string(rows_skipped_confidence) + " keypoints below confidence threshold " +

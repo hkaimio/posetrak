@@ -7,12 +7,14 @@
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <sqlite3.h>
 
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -348,10 +350,11 @@ static void create_fixture_db() {
     exec_sql(db, R"(
         CREATE TABLE pose_sequence_keypoints (
             sequence_id TEXT NOT NULL REFERENCES pose_observation_sequences(id),
+            obs_source TEXT NOT NULL DEFAULT 'body',
             keypoint_idx INTEGER NOT NULL,
             name TEXT NOT NULL,
             source TEXT NOT NULL,
-            PRIMARY KEY (sequence_id, keypoint_idx)
+            PRIMARY KEY (sequence_id, obs_source, keypoint_idx)
         );
     )");
 
@@ -691,6 +694,74 @@ static void create_fixture_db() {
                             {{420.f, 510.f, 15.0f, 0.92f, 4.4f, 4.4f, 0.0f, 0.0f, -1.0f}}});
         insert_dots_row(1, {{{450.f, 460.f, 8.0f, 0.80f, 3.2f, 3.2f, 0.6f, 0.8f, 7.0f}}});
     }
+
+    // ---------- Pose model manifests per observation source ----------
+    // Row (frame 0, camera inst1): slot i of a blob of width `n` is at (base + i, base_y + i)
+    // with confidence 1.
+    auto insert_blob_row = [&](std::string const& seq, std::string const& source, int n,
+                               float base_x, float base_y) {
+        std::vector<float> kps;
+        for (int i = 0; i < n; ++i) {
+            kps.push_back(base_x + static_cast<float>(i));
+            kps.push_back(base_y + static_cast<float>(i));
+            kps.push_back(1.f);
+        }
+        auto blob = encode_float32_blob(kps);
+        std::string sql =
+            "INSERT INTO pose_observations "
+            "(sequence_id, camera_instance_id, video_frame, timestamp_s, person_id, source, "
+            "kp_blob, noise_scale) VALUES ('" +
+            seq + "', 'inst1', 0, 0.0, 0, '" + source + "', ?, 1.0)";
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
+        sqlite3_bind_blob(stmt, 1, blob.data(), static_cast<int>(blob.size()), SQLITE_STATIC);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    };
+    auto insert_manifest = [&](std::string const& seq, std::string const& obs_source, int n,
+                               std::string const& model,
+                               std::vector<std::pair<int, std::string>> const& named) {
+        for (int i = 0; i < n; ++i) {
+            std::string name = model + ":slot" + std::to_string(i);
+            for (auto const& [idx, nm] : named)
+                if (idx == i)
+                    name = nm;
+            exec_sql(db,
+                     "INSERT INTO pose_sequence_keypoints "
+                     "(sequence_id, obs_source, keypoint_idx, name, source) VALUES ('" +
+                         seq + "', '" + obs_source + "', " + std::to_string(i) + ", '" + name +
+                         "', '" + model + "')");
+        }
+    };
+    for (char const* id : {"seq_soma", "seq_soma_bare", "seq_coco_manifest", "seq_unbound"})
+        exec_sql(db, std::string("INSERT INTO pose_observation_sequences "
+                                 "(id,shot_id,sync_config_id,time_start_s,time_end_s) "
+                                 "VALUES ('") +
+                         id + "','shot1','sc1',0.0,1.0)");
+    // A SOMA-77 body blob (x = 1000 + slot) with refined left-hand rows (x = 2000 + slot).
+    insert_blob_row("seq_soma", "body", 77, 1000.f, 500.f);
+    insert_blob_row("seq_soma", "hand_l", 21, 2000.f, 600.f);
+    insert_manifest(
+        "seq_soma", "body", 77, "soma77",
+        {{14, "soma77:LeftHand"}, {15, "soma77:LeftHandThumb1"}, {19, "soma77:LeftHandIndex1"}});
+    insert_manifest("seq_soma", "hand_l", 21, "hand21",
+                    {{0, "hand21:left_hand_root"}, {5, "hand21:left_index_1"}});
+    // SOMA names written before landmarks were model-qualified.
+    insert_blob_row("seq_soma_bare", "body", 20, 1000.f, 500.f);
+    insert_manifest("seq_soma_bare", "body", 20, "soma77", {{14, "LeftHand"}});
+    {
+        // The bare names are exactly the model's names without the prefix.
+        exec_sql(db,
+                 "UPDATE pose_sequence_keypoints SET name = substr(name, 8) "
+                 "WHERE sequence_id = 'seq_soma_bare' AND name LIKE 'soma77:%'");
+    }
+    // A COCO-133 body blob with a manifest of coco133 landmarks.
+    insert_blob_row("seq_coco_manifest", "body", 133, 1000.f, 500.f);
+    insert_manifest("seq_coco_manifest", "body", 133, "coco133",
+                    {{9, "coco133:left_wrist"}, {15, "coco133:left_ankle"}});
+    // A SOMA body blob that no marker of the test skeletons claims.
+    insert_blob_row("seq_unbound", "body", 77, 1000.f, 500.f);
+    insert_manifest("seq_unbound", "body", 77, "soma77", {});
 
     sqlite3_close(db);
 }
@@ -1222,4 +1293,117 @@ TEST_CASE("SessionReader load_unlabeled_candidates returns empty for a sequence 
     auto cameras = reader.load_cameras_for_sequence("seq1");
     auto candidates = reader.load_unlabeled_candidates("seq1", cameras);
     REQUIRE(candidates.empty());
+}
+
+// ---------------------------------------------------------------------------
+// Pose model binding: a manifest per observation source
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A skeleton carrying both marker sets: the COCO left ankle (COCO index 15) and SOMA markers by
+// landmark, one of them (LeftHandThumb1, SOMA slot 15) deliberately left out.
+Skeleton make_dual_set_skeleton() {
+    Skeleton s;
+    s.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
+    s.add_marker("left_wrist", 0, Eigen::Vector3d::Zero(), 9, "", "coco133:left_wrist");
+    s.add_marker("left_ankle", 0, Eigen::Vector3d::Zero(), 15, "", "coco133:left_ankle");
+    s.add_marker("LeftHand", 0, Eigen::Vector3d::Zero(), std::nullopt, "", "soma77:LeftHand");
+    s.add_marker("LeftHandIndex1", 0, Eigen::Vector3d::Zero(), std::nullopt, "",
+                 "soma77:LeftHandIndex1");
+    s.add_marker("hand_l_index", 0, Eigen::Vector3d::Zero(), 96, "", "hand21:left_index_1");
+    s.add_marker("hand_l_root", 0, Eigen::Vector3d::Zero(), 91, "", "hand21:left_hand_root");
+    return s;
+}
+
+std::map<std::string, double> x_by_marker(ObservationSet const& set, Skeleton const& skeleton) {
+    std::map<std::string, double> out;
+    for (auto const& [id, seq] : set.sequences())
+        for (auto const& o : seq.observations)
+            out[skeleton.markers()[static_cast<size_t>(o.marker_id)].name] =
+                o.position_distorted.x();
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("SOMA slots that no marker claims do not fall through to the COCO markers",
+          "[session_reader][pose_model]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto skeleton = make_dual_set_skeleton();
+    auto cameras = reader.load_cameras_for_sequence("seq_soma");
+
+    auto xs =
+        x_by_marker(reader.load_observations("seq_soma", cameras, skeleton, 0.1, 0), skeleton);
+
+    // Slot 15 (LeftHandThumb1) has no landmark marker and COCO index 15 is the left ankle.
+    CHECK(xs.count("left_ankle") == 0);
+    CHECK(xs.count("left_wrist") == 0);
+    CHECK(xs.at("LeftHand") == Catch::Approx(1014.0));
+    CHECK(xs.at("LeftHandIndex1") == Catch::Approx(1019.0));
+}
+
+TEST_CASE("Refined hand rows of a SOMA sequence bind through their own manifest",
+          "[session_reader][pose_model]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto skeleton = make_dual_set_skeleton();
+    auto cameras = reader.load_cameras_for_sequence("seq_soma");
+
+    auto xs =
+        x_by_marker(reader.load_observations("seq_soma", cameras, skeleton, 0.1, 0), skeleton);
+
+    CHECK(xs.at("hand_l_root") == Catch::Approx(2000.0));
+    CHECK(xs.at("hand_l_index") == Catch::Approx(2005.0));
+}
+
+TEST_CASE("A bare SOMA manifest name binds the model-qualified landmark",
+          "[session_reader][pose_model]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto skeleton = make_dual_set_skeleton();
+    auto cameras = reader.load_cameras_for_sequence("seq_soma_bare");
+
+    auto xs =
+        x_by_marker(reader.load_observations("seq_soma_bare", cameras, skeleton, 0.1, 0), skeleton);
+
+    CHECK(xs.at("LeftHand") == Catch::Approx(1014.0));
+    CHECK(xs.count("left_ankle") == 0);
+}
+
+TEST_CASE("A COCO-133 manifest binds markers by landmark and by COCO index",
+          "[session_reader][pose_model]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto cameras = reader.load_cameras_for_sequence("seq_coco_manifest");
+
+    // Dual-set skeleton: the COCO markers bind, the SOMA markers get nothing.
+    auto dual = make_dual_set_skeleton();
+    auto xs =
+        x_by_marker(reader.load_observations("seq_coco_manifest", cameras, dual, 0.1, 0), dual);
+    CHECK(xs.at("left_ankle") == Catch::Approx(1015.0));
+    CHECK(xs.at("left_wrist") == Catch::Approx(1009.0));
+    CHECK(xs.count("LeftHand") == 0);
+
+    // A skeleton that only has openpose_keypoint markers (no landmarks) keeps working.
+    Skeleton coco_only;
+    coco_only.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
+    coco_only.add_marker("nose", 0, Eigen::Vector3d::Zero(), 0);
+    coco_only.add_marker("left_ankle", 0, Eigen::Vector3d::Zero(), 15);
+    auto xs2 = x_by_marker(
+        reader.load_observations("seq_coco_manifest", cameras, coco_only, 0.1, 0), coco_only);
+    CHECK(xs2.at("left_ankle") == Catch::Approx(1015.0));
+    CHECK(xs2.at("nose") == Catch::Approx(1000.0));
+}
+
+TEST_CASE("A skeleton that binds no marker of the manifest names the pose model",
+          "[session_reader][pose_model]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto cameras = reader.load_cameras_for_sequence("seq_unbound");
+    auto skeleton = make_test_skeleton();  // COCO markers only
+
+    CHECK_THROWS_WITH(reader.load_observations("seq_unbound", cameras, skeleton, 0.1, 0),
+                      Catch::Matchers::ContainsSubstring("soma77"));
 }

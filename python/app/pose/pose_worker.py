@@ -129,10 +129,11 @@ class PoseWorker(QThread):
             estimator = create_estimator(job.pose_model, device=self._device)
             box_source = MaskBoxSource(conn, job.seg_quality_run_id, job.persons_ordered)
             hand_pass = None
-            if job.refine_hands and "133" in job.pose_model:
+            if job.refine_hands:
                 try:
                     from posetrak.detection.hand_refinement import HandPass
-                    hand_pass = HandPass()
+                    if HandPass.supports(job.pose_model):
+                        hand_pass = HandPass(pose_model=job.pose_model)
                 except ImportError:
                     log.warning("PoseWorker: rtmlib unavailable, skipping hand refinement")
 

@@ -91,8 +91,8 @@ _DOT_OPTIONS = (
                    "The source run's track assignments are copied and the run finalised.")
 @click.option("--refine-hands/--no-refine-hands", default=None,
               help="Re-detect each tracked wrist's hand in a tight crop on the frame already decoded and add "
-                   "refined finger keypoints (133-keypoint pose models only). Default: on with --segmentation, "
-                   "off otherwise.")
+                   "refined finger keypoints, for every pose model that names a wrist and an elbow. "
+                   "Default: on with --segmentation, off otherwise.")
 @click.option("--accept-licences", "accept_licences", is_flag=True, default=False,
               help="Accept the NVIDIA Open Model License and the DINOv3 License for the SOMA-77 weights without "
                    "being asked (their texts are still named). Needed to download the weights without a terminal.")
@@ -403,12 +403,12 @@ def _run_pose_detection(
         refine_hands = segmentation is not None
     hand_pass = None
     if refine_hands:
-        if "133" in model:
-            from posetrak.detection.hand_refinement import HandPass
+        from posetrak.detection.hand_refinement import HandPass
 
-            hand_pass = HandPass()
+        if HandPass.supports(model):
+            hand_pass = HandPass(pose_model=model)
         else:
-            click.echo(f"Hand refinement skipped: {model} has no hand keypoints.", err=True)
+            click.echo(f"Hand refinement skipped: {model} names no wrist and elbow.", err=True)
 
     def on_progress(done: int, total: int, cam_id: str) -> None:
         click.echo(f"\r  {cam_id}  {done}/{total} frames", nl=False, err=True)

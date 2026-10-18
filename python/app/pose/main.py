@@ -114,7 +114,10 @@ class DetectionJob(BackgroundJob):
         pose_model_name: str,
         detector_conf: float,
         refine_hands: bool = True,
+        seg_run_id: str | None = None,
     ):
+        """*seg_run_id*, when given, replaces the YOLOX detector as the box source: the person boxes come from the
+        labels of that segmentation run, and the run is finalised automatically (a label is already an identity)."""
         super().__init__()
         self._session_path = session_path
         self._shot_id = shot_id
@@ -125,25 +128,43 @@ class DetectionJob(BackgroundJob):
         self._pose_model_name = pose_model_name
         self._detector_conf = detector_conf
         self._refine_hands = refine_hands
+        self._seg_run_id = seg_run_id
 
     def run(self):
         from posetrak.db.db import open_session
-        from posetrak.detection.backends_rtmdet import YOLOXDetector
-        from app.pose.backends_rtmpose import RTMPoseEstimator
-        from app.pose.detection_pipeline import DetectionPipeline
+        from posetrak.detection.pipeline import DetectionPipeline
+        from posetrak.detection.pose_model_choice import create_estimator
 
         session = open_session(Path(self._session_path))
         try:
-            det = YOLOXDetector(
-                model_name=self._detector_name,
-                conf=self._detector_conf,
-            )
-            est = RTMPoseEstimator(model_name=self._pose_model_name)
-            if det.device == "cpu" or est.device == "cpu":
+            persons_ordered = None
+            if self._seg_run_id is not None:
+                from posetrak.db.manage_person import persons_ordered_for_seg_run
+                from posetrak.detection.box_sources import MaskBoxSource
+
+                persons_ordered = persons_ordered_for_seg_run(session, self._seg_run_id)
+                box_source = MaskBoxSource(session, self._seg_run_id, persons_ordered)
+                devices = []
+            else:
+                from posetrak.detection.backends_rtmdet import YOLOXDetector
+                from posetrak.detection.box_sources import YoloxBoxSource
+
+                det = YOLOXDetector(model_name=self._detector_name, conf=self._detector_conf)
+                box_source = YoloxBoxSource(det)
+                devices = [det.device]
+            est = create_estimator(self._pose_model_name)
+            devices.append(getattr(est, "device", "cuda"))
+            if "cpu" in devices:
                 self.device_notice.emit(
                     "No GPU detected -- detection will run on CPU and will be "
                     "significantly slower than with a GPU."
                 )
+
+            hand_pass = None
+            if self._refine_hands and "133" in self._pose_model_name:
+                from posetrak.detection.hand_refinement import HandPass
+
+                hand_pass = HandPass()
 
             def on_progress(done: int, total: int, cam_id: str) -> None:
                 pct = int(done / max(total, 1) * 100)
@@ -158,32 +179,20 @@ class DetectionJob(BackgroundJob):
                 sync_config_id=self._sync_config_id,
                 time_start_s=self._time_start_s,
                 time_end_s=self._time_end_s,
-                detector=det,
+                box_source=box_source,
                 estimator=est,
+                hand_pass=hand_pass,
             )
             result = pipeline.run(on_progress=on_progress, on_camera_done=on_camera_done)
 
-            if self._refine_hands:
-                from posetrak.detection.hand_refinement import HandRefinementPipeline
+            if persons_ordered is not None and result.status == "complete":
+                from app.pose.finalise import auto_assign_and_finalise
 
-                def on_hand_progress(done: int, total: int, cam_id: str) -> None:
-                    pct = int(done / max(total, 1) * 100)
-                    self.progress.emit(pct, f"hands: {cam_id}  {done}/{total} frames")
-
-                def on_hand_camera_done(done: int, total: int) -> None:
-                    self.camera_progress.emit(done, total, "Hand refinement")
-
-                # Reset the cameras-done indicator to 0 for this new phase --
-                # otherwise it stays at the pose-detection pass's 100% for
-                # however long hand refinement takes, implying "already done"
-                # for a phase that hasn't started yet.
-                self.camera_progress.emit(0, len(pipeline.cameras), "Hand refinement")
-                hand_pipeline = HandRefinementPipeline(session)
-                n_refined = hand_pipeline.run(
-                    result.detection_run_id, pipeline.cameras, on_progress=on_hand_progress,
-                    on_camera_done=on_hand_camera_done,
+                auto_assign_and_finalise(
+                    session=session, detection_run_id=result.detection_run_id, shot_id=self._shot_id,
+                    sync_config_id=self._sync_config_id, persons_ordered=persons_ordered,
+                    pose_model=self._pose_model_name, confidence_scale=conf_scale_for_model(self._pose_model_name),
                 )
-                self.progress.emit(100, f"hands: {n_refined} refined")
         finally:
             # Close deterministically here rather than leaving it to whenever
             # the GC finalizes this thread-local connection -- otherwise its

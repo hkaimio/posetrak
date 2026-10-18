@@ -28,6 +28,16 @@ class PoseModelSpec:
     keypoint_names: tuple[str, ...]
     flip_pairs: tuple[tuple[int, int], ...] = ()  # left/right keypoint index pairs
     parents: tuple[int, ...] = ()                # parent keypoint index per keypoint (-1 root), if the model is a tree
+    trunk: tuple[str, ...] = ()                  # keypoints of the torso, for telling persons apart across cameras
+    body: tuple[str, ...] = ()                   # keypoints of the whole body without face and fingers
+
+    def trunk_indices(self) -> list[int]:
+        """Blob indices of the trunk keypoints."""
+        return [self.keypoint_names.index(n) for n in self.trunk]
+
+    def body_indices(self) -> list[int]:
+        """Blob indices of the body keypoints (trunk and limbs)."""
+        return [self.keypoint_names.index(n) for n in self.body]
 
     def landmark(self, index: int, side: str = "") -> str:
         """The landmark name of slot *index*; *side* ('left' / 'right') prefixes the name of a hand21 slot."""
@@ -80,7 +90,15 @@ SOMA77_FLIP_PAIRS = (
     (9, 10), *((i, i + 28) for i in range(11, 39)), *((i, i + 5) for i in range(67, 72)),
 )
 
-SOMA77 = PoseModelSpec("soma77", SOMA77_NAMES, SOMA77_FLIP_PAIRS, SOMA77_PARENTS)
+SOMA77_TRUNK = ("Hips", "Spine1", "Spine2", "Neck1", "LeftArm", "RightArm")   # LeftArm: the shoulder joint
+
+SOMA77_BODY = (
+    "Hips", "Spine1", "Spine2", "Chest", "Neck1", "Head", "LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand",
+    "RightShoulder", "RightArm", "RightForeArm", "RightHand", "LeftLeg", "LeftShin", "LeftFoot", "LeftToeBase",
+    "RightLeg", "RightShin", "RightFoot", "RightToeBase",
+)
+
+SOMA77 = PoseModelSpec("soma77", SOMA77_NAMES, SOMA77_FLIP_PAIRS, SOMA77_PARENTS, SOMA77_TRUNK, SOMA77_BODY)
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +157,9 @@ COCO133_FLIP_PAIRS = tuple(
     if COCO133_NAMES[i].startswith("left_")
 )
 
-COCO133 = PoseModelSpec("coco133", COCO133_NAMES, COCO133_FLIP_PAIRS)
+COCO133_TRUNK = ("left_shoulder", "right_shoulder", "left_hip", "right_hip")
+
+COCO133 = PoseModelSpec("coco133", COCO133_NAMES, COCO133_FLIP_PAIRS, trunk=COCO133_TRUNK, body=COCO133_NAMES[:17])
 
 
 # ---------------------------------------------------------------------------

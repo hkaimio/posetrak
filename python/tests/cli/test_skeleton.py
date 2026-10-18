@@ -401,3 +401,38 @@ class TestSkeletonScale:
             ],
         )
         assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# skeleton compose
+# ---------------------------------------------------------------------------
+
+
+def test_skeleton_compose_writes_the_default_skeleton_from_its_layers(tmp_path: Path) -> None:
+    from posetrak.skeleton.compose import compose_default
+
+    out = tmp_path / "composed.yaml"
+    result = CliRunner().invoke(main, ["skeleton", "compose", "--sex", "female", "--output", str(out)])
+    assert result.exit_code == 0, result.output
+    assert out.read_text(encoding="utf-8") == compose_default("female")
+
+
+def test_skeleton_compose_adds_a_pose_model_to_a_skeleton_of_the_users_own(tmp_path: Path) -> None:
+    from posetrak.skeleton.compose import compose_default
+
+    base = tmp_path / "mine.yaml"
+    base.write_text(compose_default("male", ["coco133", "hand21"]), encoding="utf-8")
+    out = tmp_path / "mine-soma.yaml"
+    result = CliRunner().invoke(
+        main, ["skeleton", "compose", "--base", str(base), "--marker-set", "soma77", "--output", str(out)])
+    assert result.exit_code == 0, result.output
+    doc = yaml.safe_load(out.read_text(encoding="utf-8"))
+    assert sum(m.get("landmark", "").startswith("soma77:") for m in doc["markers"]) == 33
+    assert doc["layers"]["marker_sets"] == ["coco133", "hand21", "soma77"]
+
+
+def test_skeleton_compose_base_needs_a_marker_set(tmp_path: Path) -> None:
+    base = tmp_path / "mine.yaml"
+    base.write_text(MINIMAL_SKELETON_YAML, encoding="utf-8")
+    result = CliRunner().invoke(main, ["skeleton", "compose", "--base", str(base)])
+    assert result.exit_code != 0 and "--marker-set" in result.output

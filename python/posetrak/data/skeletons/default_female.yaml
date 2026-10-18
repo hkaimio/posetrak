@@ -1,5 +1,13 @@
 name: reallusion-no-waist
 units: meters
+layers:
+  hierarchy: body-hands
+  limits: joint_limits
+  marker_sets:
+  - coco133
+  - hand21
+  - soma77
+  dimensions: female
 joints:
 - name: hips
   type: root
@@ -83,9 +91,9 @@ joints:
   bone_tip_offset: [0.0, 0.233687699, 0.0]
   orientation: [-0.00623780861, -0.0444833003, 0.0176783949]
   limits:
-    x: [0.0, 2.44346094]
-    y: [-1.57079637, 1.57079637]
-    z: [-1.57079633, 1.57079633]
+    x: [0, 2.44]
+    y: [0, 0]
+    z: [0, 0]
 - name: hand.L
   type: ball
   parent: forearm.L
@@ -93,9 +101,9 @@ joints:
   bone_tip_offset: [0.0, 0.0803000182, 0.0]
   orientation: [-0.0176529195, 0.0288651586, -0.00945848599]
   limits:
-    x: [-1.57079633, 1.57079633]
-    y: [-0.52359879, 0.52359879]
-    z: [-1.57079637, 1.57079637]
+    x: [-1.22, 1.22]
+    y: [-1.48, 1.48]
+    z: [-0.44, 0.44]
 - name: f_index.01.L
   type: ball
   parent: hand.L
@@ -113,7 +121,7 @@ joints:
   bone_tip_offset: [0.0, 0.0277147777, 0.0]
   orientation: [0.00540555362, -0.161000341, 0.089042604]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: f_index.03.L
@@ -123,7 +131,7 @@ joints:
   bone_tip_offset: [0.0, 0.0277146231, 0.0]
   orientation: [-0.0400017835, 0.0383343399, -0.00327922124]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: thumb.01.L
@@ -143,7 +151,7 @@ joints:
   bone_tip_offset: [0.0, 0.0282237362, 0.0]
   orientation: [0.181572184, -0.0449371934, 0.359280646]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: thumb.03.L
@@ -153,7 +161,7 @@ joints:
   bone_tip_offset: [0.0, 0.0282236263, 0.0]
   orientation: [-0.0596061833, 0.152122706, 0.0596391037]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: f_middle.01.L
@@ -173,7 +181,7 @@ joints:
   bone_tip_offset: [0.0, 0.0292947963, 0.0]
   orientation: [0.00499458984, 0.140424356, 0.0724475086]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: f_middle.03.L
@@ -183,7 +191,7 @@ joints:
   bone_tip_offset: [0.0, 0.0292948, 0.0]
   orientation: [0.0225538351, 0.0238224734, -0.0688181594]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: f_ring.01.L
@@ -203,7 +211,7 @@ joints:
   bone_tip_offset: [0.0, 0.0253363363, 0.0]
   orientation: [-0.0191358179, -0.0155859878, 0.10829512]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: f_ring.03.L
@@ -213,7 +221,7 @@ joints:
   bone_tip_offset: [0.0, 0.0253364481, 0.0]
   orientation: [0.0534208529, -0.163941562, -0.0292077437]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: f_pinky.01.L
@@ -233,7 +241,7 @@ joints:
   bone_tip_offset: [0.0, 0.0166220423, 0.0]
   orientation: [0.0140464446, -0.252638817, 0.0321885012]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: f_pinky.03.L
@@ -243,7 +251,7 @@ joints:
   bone_tip_offset: [0.0, 0.016622128, 0.0]
   orientation: [0.12319202, 0.276411355, -0.207774207]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: shoulder.R
@@ -273,9 +281,9 @@ joints:
   bone_tip_offset: [0.0, 0.233688891, 0.0]
   orientation: [0.00471097464, 0.0425052904, 0.0147990594]
   limits:
-    x: [0.0, 2.44346094]
-    y: [-1.57079637, 1.57079637]
-    z: [-1.57079633, 1.57079633]
+    x: [0, 2.44]
+    y: [0, 0]
+    z: [0, 0]
 - name: hand.R
   type: ball
   parent: forearm.R
@@ -283,9 +291,9 @@ joints:
   bone_tip_offset: [0.0, 0.080345057, 0.0]
   orientation: [0.0172142107, -0.0291400105, -0.00809379295]
   limits:
-    x: [-1.57079633, 1.57079633]
-    y: [-0.52359879, 0.52359879]
-    z: [-1.57079637, 1.57079637]
+    x: [-1.22, 1.22]
+    y: [-1.48, 1.48]
+    z: [-0.44, 0.44]
 - name: f_index.01.R
   type: ball
   parent: hand.R
@@ -303,7 +311,7 @@ joints:
   bone_tip_offset: [0.0, 0.0274191666, 0.0]
   orientation: [-0.00515556987, 0.158766404, 0.0867109001]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: f_index.03.R
@@ -313,7 +321,7 @@ joints:
   bone_tip_offset: [0.0, 0.0274190996, 0.0]
   orientation: [0.0335074738, -0.0448503271, -0.00851854496]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: thumb.01.R
@@ -333,7 +341,7 @@ joints:
   bone_tip_offset: [0.0, 0.02700001, 0.0]
   orientation: [-0.182392716, 0.0456835367, 0.359039515]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: thumb.03.R
@@ -343,7 +351,7 @@ joints:
   bone_tip_offset: [0.0, 0.0270003192, 0.0]
   orientation: [0.0596045144, -0.152193233, 0.0597669296]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: f_middle.01.R
@@ -363,7 +371,7 @@ joints:
   bone_tip_offset: [0.0, 0.0292941425, 0.0]
   orientation: [-0.00455909735, -0.142466307, 0.0703370646]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: f_middle.03.R
@@ -373,7 +381,7 @@ joints:
   bone_tip_offset: [0.0, 0.0292943493, 0.0]
   orientation: [-0.0228675604, -0.0211911947, -0.066237025]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: f_ring.01.R
@@ -393,7 +401,7 @@ joints:
   bone_tip_offset: [0.0, 0.025336612, 0.0]
   orientation: [0.0182832386, 0.0125094699, 0.105443113]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: f_ring.03.R
@@ -403,7 +411,7 @@ joints:
   bone_tip_offset: [0.0, 0.0253364686, 0.0]
   orientation: [-0.052052252, 0.165611655, -0.0280759931]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: f_pinky.01.R
@@ -423,7 +431,7 @@ joints:
   bone_tip_offset: [0.0, 0.0177120678, 0.0]
   orientation: [-0.0128378347, 0.251890659, 0.0308531355]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: f_pinky.03.R
@@ -433,7 +441,7 @@ joints:
   bone_tip_offset: [0.0, 0.0177118443, 0.0]
   orientation: [-0.122562237, -0.274623275, -0.20573011]
   limits:
-    x: [0.0, 1.57079637]
+    x: [0, 1.57079637]
     y: [0, 0]
     z: [0, 0]
 - name: thigh.L
@@ -453,9 +461,9 @@ joints:
   bone_tip_offset: [0.0, 0.452833563, 0.0]
   orientation: [0.00617601862, -0.00658670207, 0.0376866572]
   limits:
-    x: [0.0, 2.70526028]
-    y: [-1.57079633, 1.57079633]
-    z: [-1.57079633, 1.57079633]
+    x: [0, 2.71]
+    y: [0, 0]
+    z: [0, 0]
 - name: foot.L
   type: ball
   parent: shin.L
@@ -493,9 +501,9 @@ joints:
   bone_tip_offset: [0.0, 0.453367561, 0.0]
   orientation: [-0.00607771566, 0.00651109265, 0.0380907506]
   limits:
-    x: [0.0, 2.70526028]
-    y: [-1.57079633, 1.57079633]
-    z: [-1.57079633, 1.57079633]
+    x: [0, 2.71]
+    y: [0, 0]
+    z: [0, 0]
 - name: foot.R
   type: ball
   parent: shin.R
@@ -523,366 +531,559 @@ markers:
   openpose_keypoint: 0
   openpose_name: Nose
   confidence_threshold: 0.3
+  landmark: coco133:nose
 - name: MRK-ear.R
   parent: head
   offset: [-0.0671905875, 0.0525256544, -0.0194681846]
   openpose_keypoint: 4
   openpose_name: REar
   confidence_threshold: 0.3
+  landmark: coco133:right_ear
 - name: MRK-ear.L
   parent: head
   offset: [0.0666390061, 0.052533105, -0.0194756091]
   openpose_keypoint: 3
   openpose_name: LEar
   confidence_threshold: 0.3
-- name: MRK-index4.L
-  parent: f_index.03.L
-  offset: [-0.00101020932, 0.0282687284, -0.00054776296]
-  openpose_keypoint: 99
-  openpose_name: LIndex4
-  confidence_threshold: 0.3
-- name: MRK-index3.L
-  parent: f_index.02.L
-  offset: [-0.000704167411, 0.0282903276, 0.00125396904]
-  openpose_keypoint: 98
-  openpose_name: LIndex3
-  confidence_threshold: 0.3
-- name: MRK-index2.L
-  parent: f_index.02.L
-  offset: [1.11758709e-08, -1.34990842e-07, 2.2072345e-07]
-  openpose_keypoint: 97
-  openpose_name: LIndex2
-  confidence_threshold: 0.3
-- name: MRK-index.L
-  parent: f_index.01.L
-  offset: [7.4505806e-09, 8.54488462e-08, 3.09664756e-08]
-  openpose_keypoint: 96
-  openpose_name: LIndex
-  confidence_threshold: 0.3
-- name: MRK-thumb4.L
-  parent: thumb.03.L
-  offset: [-0.00153571926, 0.0280690379, 0.000466682017]
-  openpose_keypoint: 95
-  openpose_name: LThumb4
-  confidence_threshold: 0.3
-- name: MRK-thumb3.L
-  parent: thumb.02.L
-  offset: [-0.000842327252, 0.0277034044, -0.000579740852]
-  openpose_keypoint: 94
-  openpose_name: LThumb3
-  confidence_threshold: 0.3
-- name: MRK-thumb.L
-  parent: thumb.01.L
-  offset: [0.000734118512, 0.05793548, 0.000670012087]
-  openpose_keypoint: 93
-  openpose_name: LThumb
-  confidence_threshold: 0.3
-- name: MRK-thumb1.L
-  parent: thumb.01.L
-  offset: [-9.87201929e-08, -1.08033419e-07, -2.79396772e-08]
-  openpose_keypoint: 92
-  openpose_name: LThumb1
-  confidence_threshold: 0.3
-- name: MRK-middle4.L
-  parent: f_middle.03.L
-  offset: [0.000208709389, 0.0303753316, 0.00285207783]
-  openpose_keypoint: 103
-  openpose_name: LMiddle4
-  confidence_threshold: 0.3
-- name: MRK-middle3.L
-  parent: f_middle.03.L
-  offset: [0.0, -6.26314431e-08, 5.65778464e-08]
-  openpose_keypoint: 102
-  openpose_name: LMiddle3
-  confidence_threshold: 0.3
-- name: MRK-middle2.L
-  parent: f_middle.02.L
-  offset: [0.0, -2.279412e-07, 2.46800482e-08]
-  openpose_keypoint: 101
-  openpose_name: LMiddle2
-  confidence_threshold: 0.3
-- name: MRK-middle1.L
-  parent: f_middle.01.L
-  offset: [2.70083547e-08, 4.59840521e-09, 9.12696123e-08]
-  openpose_keypoint: 100
-  openpose_name: LMiddle1
-  confidence_threshold: 0.3
-- name: MRK-ring4.L
-  parent: f_ring.03.L
-  offset: [0.00104570179, 0.0280715637, -0.000280059874]
-  openpose_keypoint: 107
-  openpose_name: LRing4
-  confidence_threshold: 0.3
-- name: MRK-ring3.L
-  parent: f_ring.02.L
-  offset: [-0.0012226291, 0.0280739665, 0.00100518018]
-  openpose_keypoint: 106
-  openpose_name: LRing3
-  confidence_threshold: 0.3
-- name: MRK-ring2.L
-  parent: f_ring.01.L
-  offset: [-0.000285290182, 0.0468716361, 0.000670166686]
-  openpose_keypoint: 105
-  openpose_name: LRing2
-  confidence_threshold: 0.3
-- name: MRK-ring1.L
-  parent: f_ring.01.L
-  offset: [-5.58793545e-09, -5.424954e-08, -6.42612576e-08]
-  openpose_keypoint: 104
-  openpose_name: LRing1
-  confidence_threshold: 0.3
-- name: MRK-pinky4.L
-  parent: f_pinky.03.L
-  offset: [0.00108332932, 0.0191649497, 0.00174076203]
-  openpose_keypoint: 111
-  openpose_name: LPinky4
-  confidence_threshold: 0.3
-- name: MRK-pinky3.L
-  parent: f_pinky.03.L
-  offset: [-7.4505806e-09, -1.00815669e-07, 1.22003257e-07]
-  openpose_keypoint: 110
-  openpose_name: LPinky3
-  confidence_threshold: 0.3
-- name: MRK-pinky2.L
-  parent: f_pinky.02.L
-  offset: [-1.49011612e-08, 7.91624188e-08, -1.11758709e-07]
-  openpose_keypoint: 109
-  openpose_name: LPinky2
-  confidence_threshold: 0.3
-- name: MRK-pinky.L
-  parent: f_pinky.01.L
-  offset: [-1.86264515e-08, -1.77707989e-07, -8.38190317e-08]
-  openpose_keypoint: 108
-  openpose_name: LPinky
-  confidence_threshold: 0.3
+  landmark: coco133:left_ear
 - name: MRK-wrist.L
   parent: hand.L
   offset: [7.91624188e-07, -2.80311797e-05, -4.47034836e-08]
   openpose_keypoint: 9
   openpose_name: LWrist
   confidence_threshold: 0.3
+  landmark: coco133:left_wrist
 - name: MRK-elbow.L
   parent: forearm.L
   offset: [0.0, 0.0, 0.0]
   openpose_keypoint: 7
   openpose_name: LElbow
   confidence_threshold: 0.3
+  landmark: coco133:left_elbow
 - name: MRK-shoulder.L
   parent: upper_arm.L
   offset: [-8.84756446e-08, 1.50757842e-07, 1.11758709e-08]
   openpose_keypoint: 5
   openpose_name: LShoulder
   confidence_threshold: 0.3
-- name: MRK-index4.R
-  parent: f_index.03.R
-  offset: [0.000830110162, 0.0282772537, -0.000398012809]
-  openpose_keypoint: 120
-  openpose_name: RIndex4
-  confidence_threshold: 0.3
-- name: MRK-index3.R
-  parent: f_index.03.R
-  offset: [1.3038516e-08, -5.34928404e-08, -1.53668225e-07]
-  openpose_keypoint: 119
-  openpose_name: RIndex3
-  confidence_threshold: 0.3
-- name: MRK-index2.R
-  parent: f_index.02.R
-  offset: [5.58793545e-09, -1.40273187e-07, 9.35979187e-08]
-  openpose_keypoint: 118
-  openpose_name: RIndex2
-  confidence_threshold: 0.3
-- name: MRK-index.R
-  parent: f_index.01.R
-  offset: [-5.58793545e-09, 1.21362973e-07, -2.47964635e-08]
-  openpose_keypoint: 117
-  openpose_name: RIndex
-  confidence_threshold: 0.3
-- name: MRK-thumb4.R
-  parent: thumb.03.R
-  offset: [0.00154499244, 0.0280685872, 0.000449959189]
-  openpose_keypoint: 116
-  openpose_name: RThumb4
-  confidence_threshold: 0.3
-- name: MRK-thumb3.R
-  parent: thumb.03.R
-  offset: [4.28408384e-08, -1.17346644e-07, 8.19563866e-08]
-  openpose_keypoint: 115
-  openpose_name: RThumb3
-  confidence_threshold: 0.3
-- name: MRK-thumb.R
-  parent: thumb.02.R
-  offset: [-1.68103725e-07, -2.00932845e-07, -4.93600965e-08]
-  openpose_keypoint: 114
-  openpose_name: RThumb
-  confidence_threshold: 0.3
-- name: MRK-thumb1.R
-  parent: thumb.01.R
-  offset: [-1.02445483e-07, 3.91155481e-08, -1.76951289e-07]
-  openpose_keypoint: 113
-  openpose_name: RThumb1
-  confidence_threshold: 0.3
-- name: MRK-middle4.R
-  parent: f_middle.03.R
-  offset: [-0.000204272568, 0.0303761419, 0.00284145772]
-  openpose_keypoint: 124
-  openpose_name: RMiddle4
-  confidence_threshold: 0.3
-- name: MRK-middle3.R
-  parent: f_middle.03.R
-  offset: [0.0, -1.77300535e-07, 5.05242497e-08]
-  openpose_keypoint: 123
-  openpose_name: RMiddle3
-  confidence_threshold: 0.3
-- name: MRK-middle2.R
-  parent: f_middle.02.R
-  offset: [3.7252903e-09, 4.5762863e-07, -3.70200723e-08]
-  openpose_keypoint: 122
-  openpose_name: RMiddle2
-  confidence_threshold: 0.3
-- name: MRK-middle1.R
-  parent: f_middle.01.R
-  offset: [5.77419996e-08, 1.39916665e-07, -8.00937414e-08]
-  openpose_keypoint: 121
-  openpose_name: RMiddle1
-  confidence_threshold: 0.3
-- name: MRK-ring4.R
-  parent: f_ring.03.R
-  offset: [-0.00103667798, 0.0280720145, -0.00024048239]
-  openpose_keypoint: 128
-  openpose_name: RRing4
-  confidence_threshold: 0.3
-- name: MRK-ring3.R
-  parent: f_ring.03.R
-  offset: [-4.23751771e-08, -1.8987339e-07, -2.14204192e-07]
-  openpose_keypoint: 127
-  openpose_name: RRing3
-  confidence_threshold: 0.3
-- name: MRK-ring2.R
-  parent: f_ring.02.R
-  offset: [0.0, 3.6455458e-07, -1.2665987e-07]
-  openpose_keypoint: 126
-  openpose_name: RRing2
-  confidence_threshold: 0.3
-- name: MRK-ring1.R
-  parent: f_ring.01.R
-  offset: [-7.4505806e-09, 1.95810571e-07, 6.14672899e-08]
-  openpose_keypoint: 125
-  openpose_name: RRing1
-  confidence_threshold: 0.3
-- name: MRK-pinky4.R
-  parent: f_pinky.03.R
-  offset: [-0.00107096881, 0.0191666987, 0.00172566529]
-  openpose_keypoint: 132
-  openpose_name: RPinky4
-  confidence_threshold: 0.3
-- name: MRK-pinky3.R
-  parent: f_pinky.02.R
-  offset: [0.00152251869, 0.0192671753, 0.000896215439]
-  openpose_keypoint: 131
-  openpose_name: RPinky3
-  confidence_threshold: 0.3
-- name: MRK-pinky2.R
-  parent: f_pinky.02.R
-  offset: [-3.7252903e-08, -2.70840246e-07, -1.2293458e-07]
-  openpose_keypoint: 130
-  openpose_name: RPinky2
-  confidence_threshold: 0.3
-- name: MRK-pinky.R
-  parent: f_pinky.01.R
-  offset: [1.49011612e-08, 2.71829776e-08, -1.86264515e-09]
-  openpose_keypoint: 129
-  openpose_name: RPinky
-  confidence_threshold: 0.3
+  landmark: coco133:left_shoulder
 - name: MRK-wrist.R
   parent: hand.R
   offset: [-7.43195415e-07, -2.76602805e-05, -3.35276127e-08]
   openpose_keypoint: 10
   openpose_name: RWrist
   confidence_threshold: 0.3
+  landmark: coco133:right_wrist
 - name: MRK-elbow.R
   parent: forearm.R
   offset: [1.00582838e-07, 2.16881745e-07, -7.4505806e-09]
   openpose_keypoint: 8
   openpose_name: RElbow
   confidence_threshold: 0.3
+  landmark: coco133:right_elbow
 - name: MRK-shoulder.R
   parent: upper_arm.R
   offset: [3.25962901e-08, -1.20024197e-07, 3.35276127e-08]
   openpose_keypoint: 6
   openpose_name: RShoulder
   confidence_threshold: 0.3
+  landmark: coco133:right_shoulder
 - name: MRK-bigToe.L
   parent: foot.L
   offset: [-0.031543646, 0.169107273, -0.00399690121]
   openpose_keypoint: 17
   openpose_name: LBigToe
   confidence_threshold: 0.3
+  landmark: coco133:left_big_toe
 - name: MRK-smallToe.L
   parent: foot.L
   offset: [-0.00885264389, 0.168520853, 0.0128456727]
   openpose_keypoint: 18
   openpose_name: LSmallToe
   confidence_threshold: 0.3
+  landmark: coco133:left_small_toe
 - name: MRK-Ankle.L
   parent: foot.L
   offset: [-0.0043794997, 0.0, 0.00070639886]
   openpose_keypoint: 15
   openpose_name: LAnkle
   confidence_threshold: 0.3
+  landmark: coco133:left_ankle
 - name: MRK-heel.L
   parent: foot.L
   offset: [-0.0102218902, 0.00205975771, 0.067861639]
   openpose_keypoint: 19
   openpose_name: LHeel
   confidence_threshold: 0.3
+  landmark: coco133:left_heel
 - name: MRK-knee.L
   parent: shin.L
   offset: [8.8752131e-08, -3.97703843e-08, -1.16415322e-09]
   openpose_keypoint: 13
   openpose_name: LKnee
   confidence_threshold: 0.3
+  landmark: coco133:left_knee
 - name: MRK-hip.L
   parent: thigh.L
   offset: [2.81932444e-07, -1.49385869e-07, -2.6775524e-09]
   openpose_keypoint: 11
   openpose_name: LHip
   confidence_threshold: 0.3
+  landmark: coco133:left_hip
 - name: MRK-bigToe.R
   parent: foot.R
   offset: [0.0311765205, 0.169103906, -0.00633501541]
   openpose_keypoint: 20
   openpose_name: RBigToe
   confidence_threshold: 0.3
+  landmark: coco133:right_big_toe
 - name: MRK-smallToe.R
   parent: foot.R
   offset: [0.00978656393, 0.168521985, 0.0121322582]
   openpose_keypoint: 21
   openpose_name: RSmallToe
   confidence_threshold: 0.3
+  landmark: coco133:right_small_toe
 - name: MRK-Ankle.R
   parent: foot.R
   offset: [-9.55769792e-08, -9.31322575e-09, 7.7765435e-08]
   openpose_keypoint: 16
   openpose_name: RAnkle
   confidence_threshold: 0.3
+  landmark: coco133:right_ankle
 - name: MRK-heel.R
   parent: foot.R
   offset: [0.0151897706, 0.00206932938, 0.0669247583]
   openpose_keypoint: 22
   openpose_name: RHeel
   confidence_threshold: 0.3
+  landmark: coco133:right_heel
 - name: MRK-knee.R
   parent: shin.R
   offset: [2.64772098e-08, 1.04904757e-07, 6.75208867e-09]
   openpose_keypoint: 14
   openpose_name: RKnee
   confidence_threshold: 0.3
+  landmark: coco133:right_knee
 - name: MRK-hip.R
   parent: thigh.R
   offset: [2.31149897e-07, 3.34277956e-08, -9.31322575e-10]
   openpose_keypoint: 12
   openpose_name: RHip
   confidence_threshold: 0.3
+  landmark: coco133:right_hip
+- name: MRK-index4.L
+  parent: f_index.03.L
+  offset: [-0.00101020932, 0.0282687284, -0.00054776296]
+  openpose_keypoint: 99
+  openpose_name: LIndex4
+  confidence_threshold: 0.3
+  landmark: hand21:left_index_4
+- name: MRK-index3.L
+  parent: f_index.02.L
+  offset: [-0.000704167411, 0.0282903276, 0.00125396904]
+  openpose_keypoint: 98
+  openpose_name: LIndex3
+  confidence_threshold: 0.3
+  landmark: hand21:left_index_3
+- name: MRK-index2.L
+  parent: f_index.02.L
+  offset: [1.11758709e-08, -1.34990842e-07, 2.2072345e-07]
+  openpose_keypoint: 97
+  openpose_name: LIndex2
+  confidence_threshold: 0.3
+  landmark: hand21:left_index_2
+- name: MRK-index.L
+  parent: f_index.01.L
+  offset: [7.4505806e-09, 8.54488462e-08, 3.09664756e-08]
+  openpose_keypoint: 96
+  openpose_name: LIndex
+  confidence_threshold: 0.3
+  landmark: hand21:left_index_1
+- name: MRK-thumb4.L
+  parent: thumb.03.L
+  offset: [-0.00153571926, 0.0280690379, 0.000466682017]
+  openpose_keypoint: 95
+  openpose_name: LThumb4
+  confidence_threshold: 0.3
+  landmark: hand21:left_thumb_4
+- name: MRK-thumb3.L
+  parent: thumb.02.L
+  offset: [-0.000842327252, 0.0277034044, -0.000579740852]
+  openpose_keypoint: 94
+  openpose_name: LThumb3
+  confidence_threshold: 0.3
+  landmark: hand21:left_thumb_3
+- name: MRK-thumb.L
+  parent: thumb.01.L
+  offset: [0.000734118512, 0.05793548, 0.000670012087]
+  openpose_keypoint: 93
+  openpose_name: LThumb
+  confidence_threshold: 0.3
+  landmark: hand21:left_thumb_2
+- name: MRK-thumb1.L
+  parent: thumb.01.L
+  offset: [-9.87201929e-08, -1.08033419e-07, -2.79396772e-08]
+  openpose_keypoint: 92
+  openpose_name: LThumb1
+  confidence_threshold: 0.3
+  landmark: hand21:left_thumb_1
+- name: MRK-middle4.L
+  parent: f_middle.03.L
+  offset: [0.000208709389, 0.0303753316, 0.00285207783]
+  openpose_keypoint: 103
+  openpose_name: LMiddle4
+  confidence_threshold: 0.3
+  landmark: hand21:left_middle_4
+- name: MRK-middle3.L
+  parent: f_middle.03.L
+  offset: [0.0, -6.26314431e-08, 5.65778464e-08]
+  openpose_keypoint: 102
+  openpose_name: LMiddle3
+  confidence_threshold: 0.3
+  landmark: hand21:left_middle_3
+- name: MRK-middle2.L
+  parent: f_middle.02.L
+  offset: [0.0, -2.279412e-07, 2.46800482e-08]
+  openpose_keypoint: 101
+  openpose_name: LMiddle2
+  confidence_threshold: 0.3
+  landmark: hand21:left_middle_2
+- name: MRK-middle1.L
+  parent: f_middle.01.L
+  offset: [2.70083547e-08, 4.59840521e-09, 9.12696123e-08]
+  openpose_keypoint: 100
+  openpose_name: LMiddle1
+  confidence_threshold: 0.3
+  landmark: hand21:left_middle_1
+- name: MRK-ring4.L
+  parent: f_ring.03.L
+  offset: [0.00104570179, 0.0280715637, -0.000280059874]
+  openpose_keypoint: 107
+  openpose_name: LRing4
+  confidence_threshold: 0.3
+  landmark: hand21:left_ring_4
+- name: MRK-ring3.L
+  parent: f_ring.02.L
+  offset: [-0.0012226291, 0.0280739665, 0.00100518018]
+  openpose_keypoint: 106
+  openpose_name: LRing3
+  confidence_threshold: 0.3
+  landmark: hand21:left_ring_3
+- name: MRK-ring2.L
+  parent: f_ring.01.L
+  offset: [-0.000285290182, 0.0468716361, 0.000670166686]
+  openpose_keypoint: 105
+  openpose_name: LRing2
+  confidence_threshold: 0.3
+  landmark: hand21:left_ring_2
+- name: MRK-ring1.L
+  parent: f_ring.01.L
+  offset: [-5.58793545e-09, -5.424954e-08, -6.42612576e-08]
+  openpose_keypoint: 104
+  openpose_name: LRing1
+  confidence_threshold: 0.3
+  landmark: hand21:left_ring_1
+- name: MRK-pinky4.L
+  parent: f_pinky.03.L
+  offset: [0.00108332932, 0.0191649497, 0.00174076203]
+  openpose_keypoint: 111
+  openpose_name: LPinky4
+  confidence_threshold: 0.3
+  landmark: hand21:left_pinky_4
+- name: MRK-pinky3.L
+  parent: f_pinky.03.L
+  offset: [-7.4505806e-09, -1.00815669e-07, 1.22003257e-07]
+  openpose_keypoint: 110
+  openpose_name: LPinky3
+  confidence_threshold: 0.3
+  landmark: hand21:left_pinky_3
+- name: MRK-pinky2.L
+  parent: f_pinky.02.L
+  offset: [-1.49011612e-08, 7.91624188e-08, -1.11758709e-07]
+  openpose_keypoint: 109
+  openpose_name: LPinky2
+  confidence_threshold: 0.3
+  landmark: hand21:left_pinky_2
+- name: MRK-pinky.L
+  parent: f_pinky.01.L
+  offset: [-1.86264515e-08, -1.77707989e-07, -8.38190317e-08]
+  openpose_keypoint: 108
+  openpose_name: LPinky
+  confidence_threshold: 0.3
+  landmark: hand21:left_pinky_1
+- name: MRK-index4.R
+  parent: f_index.03.R
+  offset: [0.000830110162, 0.0282772537, -0.000398012809]
+  openpose_keypoint: 120
+  openpose_name: RIndex4
+  confidence_threshold: 0.3
+  landmark: hand21:right_index_4
+- name: MRK-index3.R
+  parent: f_index.03.R
+  offset: [1.3038516e-08, -5.34928404e-08, -1.53668225e-07]
+  openpose_keypoint: 119
+  openpose_name: RIndex3
+  confidence_threshold: 0.3
+  landmark: hand21:right_index_3
+- name: MRK-index2.R
+  parent: f_index.02.R
+  offset: [5.58793545e-09, -1.40273187e-07, 9.35979187e-08]
+  openpose_keypoint: 118
+  openpose_name: RIndex2
+  confidence_threshold: 0.3
+  landmark: hand21:right_index_2
+- name: MRK-index.R
+  parent: f_index.01.R
+  offset: [-5.58793545e-09, 1.21362973e-07, -2.47964635e-08]
+  openpose_keypoint: 117
+  openpose_name: RIndex
+  confidence_threshold: 0.3
+  landmark: hand21:right_index_1
+- name: MRK-thumb4.R
+  parent: thumb.03.R
+  offset: [0.00154499244, 0.0280685872, 0.000449959189]
+  openpose_keypoint: 116
+  openpose_name: RThumb4
+  confidence_threshold: 0.3
+  landmark: hand21:right_thumb_4
+- name: MRK-thumb3.R
+  parent: thumb.03.R
+  offset: [4.28408384e-08, -1.17346644e-07, 8.19563866e-08]
+  openpose_keypoint: 115
+  openpose_name: RThumb3
+  confidence_threshold: 0.3
+  landmark: hand21:right_thumb_3
+- name: MRK-thumb.R
+  parent: thumb.02.R
+  offset: [-1.68103725e-07, -2.00932845e-07, -4.93600965e-08]
+  openpose_keypoint: 114
+  openpose_name: RThumb
+  confidence_threshold: 0.3
+  landmark: hand21:right_thumb_2
+- name: MRK-thumb1.R
+  parent: thumb.01.R
+  offset: [-1.02445483e-07, 3.91155481e-08, -1.76951289e-07]
+  openpose_keypoint: 113
+  openpose_name: RThumb1
+  confidence_threshold: 0.3
+  landmark: hand21:right_thumb_1
+- name: MRK-middle4.R
+  parent: f_middle.03.R
+  offset: [-0.000204272568, 0.0303761419, 0.00284145772]
+  openpose_keypoint: 124
+  openpose_name: RMiddle4
+  confidence_threshold: 0.3
+  landmark: hand21:right_middle_4
+- name: MRK-middle3.R
+  parent: f_middle.03.R
+  offset: [0.0, -1.77300535e-07, 5.05242497e-08]
+  openpose_keypoint: 123
+  openpose_name: RMiddle3
+  confidence_threshold: 0.3
+  landmark: hand21:right_middle_3
+- name: MRK-middle2.R
+  parent: f_middle.02.R
+  offset: [3.7252903e-09, 4.5762863e-07, -3.70200723e-08]
+  openpose_keypoint: 122
+  openpose_name: RMiddle2
+  confidence_threshold: 0.3
+  landmark: hand21:right_middle_2
+- name: MRK-middle1.R
+  parent: f_middle.01.R
+  offset: [5.77419996e-08, 1.39916665e-07, -8.00937414e-08]
+  openpose_keypoint: 121
+  openpose_name: RMiddle1
+  confidence_threshold: 0.3
+  landmark: hand21:right_middle_1
+- name: MRK-ring4.R
+  parent: f_ring.03.R
+  offset: [-0.00103667798, 0.0280720145, -0.00024048239]
+  openpose_keypoint: 128
+  openpose_name: RRing4
+  confidence_threshold: 0.3
+  landmark: hand21:right_ring_4
+- name: MRK-ring3.R
+  parent: f_ring.03.R
+  offset: [-4.23751771e-08, -1.8987339e-07, -2.14204192e-07]
+  openpose_keypoint: 127
+  openpose_name: RRing3
+  confidence_threshold: 0.3
+  landmark: hand21:right_ring_3
+- name: MRK-ring2.R
+  parent: f_ring.02.R
+  offset: [0.0, 3.6455458e-07, -1.2665987e-07]
+  openpose_keypoint: 126
+  openpose_name: RRing2
+  confidence_threshold: 0.3
+  landmark: hand21:right_ring_2
+- name: MRK-ring1.R
+  parent: f_ring.01.R
+  offset: [-7.4505806e-09, 1.95810571e-07, 6.14672899e-08]
+  openpose_keypoint: 125
+  openpose_name: RRing1
+  confidence_threshold: 0.3
+  landmark: hand21:right_ring_1
+- name: MRK-pinky4.R
+  parent: f_pinky.03.R
+  offset: [-0.00107096881, 0.0191666987, 0.00172566529]
+  openpose_keypoint: 132
+  openpose_name: RPinky4
+  confidence_threshold: 0.3
+  landmark: hand21:right_pinky_4
+- name: MRK-pinky3.R
+  parent: f_pinky.02.R
+  offset: [0.00152251869, 0.0192671753, 0.000896215439]
+  openpose_keypoint: 131
+  openpose_name: RPinky3
+  confidence_threshold: 0.3
+  landmark: hand21:right_pinky_3
+- name: MRK-pinky2.R
+  parent: f_pinky.02.R
+  offset: [-3.7252903e-08, -2.70840246e-07, -1.2293458e-07]
+  openpose_keypoint: 130
+  openpose_name: RPinky2
+  confidence_threshold: 0.3
+  landmark: hand21:right_pinky_2
+- name: MRK-pinky.R
+  parent: f_pinky.01.R
+  offset: [1.49011612e-08, 2.71829776e-08, -1.86264515e-09]
+  openpose_keypoint: 129
+  openpose_name: RPinky
+  confidence_threshold: 0.3
+  landmark: hand21:right_pinky_1
+- name: Hips
+  parent: hips
+  offset: [-0.0293, 0.0394, 0.0138]
+  landmark: soma77:Hips
+- name: Spine1
+  parent: spine1
+  offset: [-0.0247, -0.0214, 0.0223]
+  landmark: soma77:Spine1
+- name: Spine2
+  parent: spine2
+  offset: [-0.0144, -0.0671, 0.064]
+  landmark: soma77:Spine2
+- name: Chest
+  parent: spine2
+  offset: [-0.0156, -0.0001, 0.0422]
+  landmark: soma77:Chest
+- name: Neck1
+  parent: neck1
+  offset: [-0.0255, -0.0136, -0.0071]
+  landmark: soma77:Neck1
+- name: Neck2
+  parent: neck2
+  offset: [-0.0292, -0.0026, -0.0069]
+  landmark: soma77:Neck2
+- name: Head
+  parent: head
+  offset: [-0.0311, 0.0062, 0.0007]
+  landmark: soma77:Head
+- name: HeadEnd
+  parent: head
+  offset: [-0.0239, 0.1706, -0.0013]
+  landmark: soma77:HeadEnd
+- name: Jaw
+  parent: head
+  offset: [-0.0333, 0.0315, 0.0319]
+  landmark: soma77:Jaw
+- name: LeftEye
+  parent: head
+  offset: [-0.0039, 0.0871, 0.0781]
+  landmark: soma77:LeftEye
+- name: RightEye
+  parent: head
+  offset: [-0.0615, 0.0874, 0.0815]
+  landmark: soma77:RightEye
+- name: LeftShoulder
+  parent: shoulder.L
+  offset: [0.0087, -0.0229, 0.0277]
+  landmark: soma77:LeftShoulder
+- name: LeftArm
+  parent: upper_arm.L
+  offset: [-0.0039, -0.0412, 0.0123]
+  landmark: soma77:LeftArm
+- name: LeftForeArm
+  parent: forearm.L
+  offset: [0.006, -0.0229, -0.0052]
+  landmark: soma77:LeftForeArm
+- name: LeftHand
+  parent: hand.L
+  offset: [-0.0035, -0.002, 0.0138]
+  landmark: soma77:LeftHand
+- name: LeftHandIndex1
+  parent: hand.L
+  offset: [-0.0118, 0.0421, 0.031]
+  landmark: soma77:LeftHandIndex1
+- name: LeftHandPinky1
+  parent: hand.L
+  offset: [-0.0, 0.038, 0.0114]
+  landmark: soma77:LeftHandPinky1
+- name: RightShoulder
+  parent: shoulder.R
+  offset: [-0.0159, 0.0285, 0.0118]
+  landmark: soma77:RightShoulder
+- name: RightArm
+  parent: upper_arm.R
+  offset: [0.0106, 0.0066, 0.0074]
+  landmark: soma77:RightArm
+- name: RightForeArm
+  parent: forearm.R
+  offset: [0.0066, 0.0287, -0.0279]
+  landmark: soma77:RightForeArm
+- name: RightHand
+  parent: hand.R
+  offset: [-0.0023, 0.0325, -0.0105]
+  landmark: soma77:RightHand
+- name: RightHandIndex1
+  parent: hand.R
+  offset: [0.0061, 0.0717, 0.0056]
+  landmark: soma77:RightHandIndex1
+- name: RightHandPinky1
+  parent: hand.R
+  offset: [-0.0038, 0.0708, -0.0133]
+  landmark: soma77:RightHandPinky1
+- name: LeftLeg
+  parent: thigh.L
+  offset: [-0.0275, 0.0057, -0.0196]
+  landmark: soma77:LeftLeg
+- name: LeftShin
+  parent: shin.L
+  offset: [-0.0285, -0.0572, 0.0123]
+  landmark: soma77:LeftShin
+- name: LeftFoot
+  parent: foot.L
+  offset: [-0.0128, -0.0319, -0.0985]
+  landmark: soma77:LeftFoot
+- name: LeftToeBase
+  parent: toe.L
+  offset: [-0.0044, -0.0172, -0.0652]
+  landmark: soma77:LeftToeBase
+- name: LeftToeEnd
+  parent: toe.L
+  offset: [-0.005, 0.0359, -0.0628]
+  landmark: soma77:LeftToeEnd
+- name: RightLeg
+  parent: thigh.R
+  offset: [-0.0321, 0.0001, -0.0211]
+  landmark: soma77:RightLeg
+- name: RightShin
+  parent: shin.R
+  offset: [-0.022, -0.0664, -0.0184]
+  landmark: soma77:RightShin
+- name: RightFoot
+  parent: foot.R
+  offset: [-0.0535, 0.0099, -0.0826]
+  landmark: soma77:RightFoot
+- name: RightToeBase
+  parent: toe.R
+  offset: [-0.0302, 0.0109, -0.0346]
+  landmark: soma77:RightToeBase
+- name: RightToeEnd
+  parent: toe.R
+  offset: [-0.0265, 0.0562, -0.0464]
+  landmark: soma77:RightToeEnd
 groups:
 - name: main
   joints:
@@ -934,6 +1135,39 @@ groups:
   - MRK-pinky.L
   - MRK-index.R
   - MRK-pinky.R
+  - Hips
+  - Spine1
+  - Spine2
+  - Chest
+  - Neck1
+  - Neck2
+  - Head
+  - HeadEnd
+  - Jaw
+  - LeftEye
+  - RightEye
+  - LeftShoulder
+  - LeftArm
+  - LeftForeArm
+  - LeftHand
+  - LeftHandIndex1
+  - LeftHandPinky1
+  - RightShoulder
+  - RightArm
+  - RightForeArm
+  - RightHand
+  - RightHandIndex1
+  - RightHandPinky1
+  - LeftLeg
+  - LeftShin
+  - LeftFoot
+  - LeftToeBase
+  - LeftToeEnd
+  - RightLeg
+  - RightShin
+  - RightFoot
+  - RightToeBase
+  - RightToeEnd
   optional: false
 - name: HandL
   depends_on: main

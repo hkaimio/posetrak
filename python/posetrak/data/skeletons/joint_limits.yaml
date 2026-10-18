@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Joint limits of the default skeletons, in radians, per joint and axis: [lower, upper].
+#
+# The three values of a ball joint are the components of its rotation vector in the joint's rest frame: x is
+# the flexion axis, y runs along the bone (twist) and z is the side-bend axis. A limit of [0, 0] locks the axis.
+#
+# Hinge joints (knee, elbow, the interphalangeal joints of the fingers) bend about x only: their y and z are
+# locked, and tests/skeleton/test_joint_limits.py fails when one gains off-axis range. The twist of the forearm
+# (pronation and supination) is not at the elbow but at the wrist joint (hand.*), where the markers on the wrist
+# and on the bases of the index and little fingers observe it.
+#
+# Sources of the changes against the earlier table, which had +-90 degrees on the off-axis limits of knee and
+# elbow and a wrist twist of +-30 degrees:
+#   knee   (shin.*)     flexion 0..155 degrees, no side bend or twist
+#   elbow  (forearm.*)  flexion 0..140 degrees, no side bend or twist
+#   wrist  (hand.*)     flexion/extension +-70 degrees, twist +-85 degrees, deviation +-25 degrees
+joints:
+  spine1: {x: [-0.122173049, 0.34906584], y: [-0.34906584, 0.34906584], z: [-0.34906584, 0.34906584]}
+  spine2: {x: [-0.122173049, 0.34906584], y: [-0.261799395, 0.261799395], z: [-0.261799395, 0.261799395]}
+  neck1: {x: [-0.17453292, 0.17453292], y: [-0.17453292, 0.17453292], z: [-0.17453292, 0.17453292]}
+  neck2: {x: [-0.17453292, 0.17453292], y: [-0.17453292, 0.17453292], z: [-0.17453292, 0.17453292]}
+  head: {x: [-0.69813168, 0.52359879], y: [-0.52359879, 0.52359879], z: [-0.52359879, 0.52359879]}
+  shoulder.L: {x: [-0.12, 0.6], y: [-0.4, 0.4], z: [-0.6, 0.6]}
+  upper_arm.L: {x: [-0.52359879, 2.79252672], y: [-0.785398185, 0.785398185], z: [-2.61799383, 0.34906584]}
+  forearm.L: {x: [0, 2.44], y: [0, 0], z: [0, 0]}
+  hand.L: {x: [-1.22, 1.22], y: [-1.48, 1.48], z: [-0.44, 0.44]}
+  f_index.01.L: {x: [-0.69813168, 1.57079637], y: [0, 0], z: [-0.34906584, 0.34906584]}
+  f_index.02.L: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  f_index.03.L: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  thumb.01.L: {x: [-0.261799395, 0.52359879], y: [0, 0], z: [-0.34906584, 0.34906584]}
+  thumb.02.L: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  thumb.03.L: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  f_middle.01.L: {x: [-0.69813168, 1.57079637], y: [0, 0], z: [-0.34906584, 0.34906584]}
+  f_middle.02.L: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  f_middle.03.L: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  f_ring.01.L: {x: [-0.69813168, 1.57079637], y: [0, 0], z: [-0.34906584, 0.34906584]}
+  f_ring.02.L: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  f_ring.03.L: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  f_pinky.01.L: {x: [-0.69813168, 1.57079637], y: [0, 0], z: [-0.34906584, 0.34906584]}
+  f_pinky.02.L: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  f_pinky.03.L: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  shoulder.R: {x: [-0.12, 0.6], y: [-0.4, 0.4], z: [-0.6, 0.6]}
+  upper_arm.R: {x: [-0.52359879, 2.79252672], y: [-0.785398185, 0.785398185], z: [-0.34906584, 2.61799383]}
+  forearm.R: {x: [0, 2.44], y: [0, 0], z: [0, 0]}
+  hand.R: {x: [-1.22, 1.22], y: [-1.48, 1.48], z: [-0.44, 0.44]}
+  f_index.01.R: {x: [-0.69813168, 1.57079637], y: [0, 0], z: [-0.34906584, 0.34906584]}
+  f_index.02.R: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  f_index.03.R: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  thumb.01.R: {x: [-0.261799395, 0.52359879], y: [0, 0], z: [-0.34906584, 0.34906584]}
+  thumb.02.R: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  thumb.03.R: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  f_middle.01.R: {x: [-0.69813168, 1.57079637], y: [0, 0], z: [-0.34906584, 0.34906584]}
+  f_middle.02.R: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  f_middle.03.R: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  f_ring.01.R: {x: [-0.69813168, 1.57079637], y: [0, 0], z: [-0.34906584, 0.34906584]}
+  f_ring.02.R: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  f_ring.03.R: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  f_pinky.01.R: {x: [-0.69813168, 1.57079637], y: [0, 0], z: [-0.34906584, 0.34906584]}
+  f_pinky.02.R: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  f_pinky.03.R: {x: [0, 1.57079637], y: [0, 0], z: [0, 0]}
+  thigh.L: {x: [-2.61799383, 0.87266463], y: [-1.22173047, 0.69813168], z: [-1.04719758, 0.52359879]}
+  shin.L: {x: [0, 2.71], y: [0, 0], z: [0, 0]}
+  foot.L: {x: [-1.04719758, 1.04719758], y: [-0.34906584, 0.34906584], z: [-0.34906584, 0.34906584]}
+  toe.L: {x: [-0.785398185, 0.785398185], y: [-1.57079633, 1.57079633], z: [-1.57079633, 1.57079633]}
+  thigh.R: {x: [-2.61799383, 0.87266463], y: [-0.69813168, 1.22173047], z: [-0.52359879, 1.04719758]}
+  shin.R: {x: [0, 2.71], y: [0, 0], z: [0, 0]}
+  foot.R: {x: [-1.04719758, 1.04719758], y: [-0.34906584, 0.34906584], z: [-0.34906584, 0.34906584]}
+  toe.R: {x: [-0.785398185, 0.785398185], y: [-1.57079633, 1.57079633], z: [-1.57079633, 1.57079633]}

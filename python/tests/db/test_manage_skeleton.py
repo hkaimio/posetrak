@@ -356,10 +356,13 @@ def test_seed_default_skeletons_ids_are_stable(tmp_path: Path) -> None:
     change) creeping back in fails this test immediately, rather than
     silently producing a second "Default male"/"Default female" pair the
     next time someone seeds a fresh registry.
+
+    The files are generated from the skeleton layers (``python -m posetrak.skeleton.compose``), so a change to
+    a layer changes the ids on purpose; update them here together with the regenerated files.
     """
     conn = create_registry(tmp_path / "registry.db")
     ids = set(seed_default_skeletons(conn))
     assert ids == {
-        "0d08a889b32acc13298ecba139ac585792f4221679b3238d0be40c356c945f04",  # Default female
-        "2ebe16046bf59a27482f253e40e9f21407bbbdb446f3db11e776c8fa97dc9c6a",  # Default male
+        "f48ee8c59fa5a17accd097af8c92f99b7c0ece03cb86249ff04c3ba662679e62",  # Default female
+        "dce6d5075c26d3c8a8a0cb46e2be79dc408af56de13ea7c5b01c2f0191ef8efc",  # Default male
     }

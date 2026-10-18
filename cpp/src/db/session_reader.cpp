@@ -987,8 +987,8 @@ ObservationSet SessionReader::load_observations(
         throw std::runtime_error(
             "The skeleton has no marker bound to the keypoints of sequence '" + sequence_id +
             "' (pose model: " + models +
-            "). Add that pose model's markers to the skeleton (posetrak skeleton add-pose-model) "
-            "or track the sequence with a skeleton that has them.");
+            "). Add that pose model's markers to the skeleton ('posetrak skeleton compose --base "
+            "SKELETON --marker-set MODEL') or track the sequence with a skeleton that has them.");
     }
 
     // Resolves slot k of a layer's blob to a skeleton marker index.

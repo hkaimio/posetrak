@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# SOMA-77 marker set: where the keypoints of the SOMA-77 pose model sit relative to the bones of the default
+# skeletons. The 29 body markers and the first joints of the index and little fingers (which, with the wrist, fix
+# the hand's twist) are bound by landmark (soma77:<name>) and join the `main` group. The other finger keypoints are
+# not tracked: from a body crop they localise at about 0.20 of the hand size, against 0.05-0.07 from a hand crop.
+#
+# Offsets: metres, in the frame of the parent joint of the default skeleton. Method: for each keypoint, the
+# median over a calibration window of its triangulated position (cameras that see it with confidence of at least
+# 0.5, heatmap cells decoded at their centres, 1.6 times the person box as crop, person-mask gate) expressed in the
+# frame of the parent joint of a reference tracking run, which was independent of this model. A keypoint is a joint
+# centre of the SOMA skeleton, a few centimetres from the corresponding joint of the default skeleton (the knee and
+# ankle sit higher up the leg). The displacement depends on pose, so these offsets are a calibration for upright
+# and squatting poses and not constants; the spread of the samples was at most 5 cm.
+pose_model: soma77
+group: main
+markers:
+- name: Hips
+  parent: hips
+  offset: [-0.0293, 0.0394, 0.0138]
+- name: Spine1
+  parent: spine1
+  offset: [-0.0247, -0.0214, 0.0223]
+- name: Spine2
+  parent: spine2
+  offset: [-0.0144, -0.0671, 0.064]
+- name: Chest
+  parent: spine2
+  offset: [-0.0156, -0.0001, 0.0422]
+- name: Neck1
+  parent: neck1
+  offset: [-0.0255, -0.0136, -0.0071]
+- name: Neck2
+  parent: neck2
+  offset: [-0.0292, -0.0026, -0.0069]
+- name: Head
+  parent: head
+  offset: [-0.0311, 0.0062, 0.0007]
+- name: HeadEnd
+  parent: head
+  offset: [-0.0239, 0.1706, -0.0013]
+- name: Jaw
+  parent: head
+  offset: [-0.0333, 0.0315, 0.0319]
+- name: LeftEye
+  parent: head
+  offset: [-0.0039, 0.0871, 0.0781]
+- name: RightEye
+  parent: head
+  offset: [-0.0615, 0.0874, 0.0815]
+- name: LeftShoulder
+  parent: shoulder.L
+  offset: [0.0087, -0.0229, 0.0277]
+- name: LeftArm
+  parent: upper_arm.L
+  offset: [-0.0039, -0.0412, 0.0123]
+- name: LeftForeArm
+  parent: forearm.L
+  offset: [0.006, -0.0229, -0.0052]
+- name: LeftHand
+  parent: hand.L
+  offset: [-0.0035, -0.002, 0.0138]
+- name: LeftHandIndex1
+  parent: hand.L
+  offset: [-0.0118, 0.0421, 0.031]
+- name: LeftHandPinky1
+  parent: hand.L
+  offset: [-0.0, 0.038, 0.0114]
+- name: RightShoulder
+  parent: shoulder.R
+  offset: [-0.0159, 0.0285, 0.0118]
+- name: RightArm
+  parent: upper_arm.R
+  offset: [0.0106, 0.0066, 0.0074]
+- name: RightForeArm
+  parent: forearm.R
+  offset: [0.0066, 0.0287, -0.0279]
+- name: RightHand
+  parent: hand.R
+  offset: [-0.0023, 0.0325, -0.0105]
+- name: RightHandIndex1
+  parent: hand.R
+  offset: [0.0061, 0.0717, 0.0056]
+- name: RightHandPinky1
+  parent: hand.R
+  offset: [-0.0038, 0.0708, -0.0133]
+- name: LeftLeg
+  parent: thigh.L
+  offset: [-0.0275, 0.0057, -0.0196]
+- name: LeftShin
+  parent: shin.L
+  offset: [-0.0285, -0.0572, 0.0123]
+- name: LeftFoot
+  parent: foot.L
+  offset: [-0.0128, -0.0319, -0.0985]
+- name: LeftToeBase
+  parent: toe.L
+  offset: [-0.0044, -0.0172, -0.0652]
+- name: LeftToeEnd
+  parent: toe.L
+  offset: [-0.005, 0.0359, -0.0628]
+- name: RightLeg
+  parent: thigh.R
+  offset: [-0.0321, 0.0001, -0.0211]
+- name: RightShin
+  parent: shin.R
+  offset: [-0.022, -0.0664, -0.0184]
+- name: RightFoot
+  parent: foot.R
+  offset: [-0.0535, 0.0099, -0.0826]
+- name: RightToeBase
+  parent: toe.R
+  offset: [-0.0302, 0.0109, -0.0346]
+- name: RightToeEnd
+  parent: toe.R
+  offset: [-0.0265, 0.0562, -0.0464]

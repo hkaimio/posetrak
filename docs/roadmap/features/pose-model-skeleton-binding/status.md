@@ -32,8 +32,8 @@ See [pose-model-skeleton-binding-design.md](pose-model-skeleton-binding-design.m
 | Skeleton layer files, `skeleton compose` (also adds a pose model to a skeleton) | Done |
 | Run fails naming the missing pose model | Done (Python before the tracker starts; C++ reader as a second line, unbuilt) |
 | Migration check on a copy of a real session database | Done: see below |
-| Held-out check on the reference capture | **Not run**: harness ready (see below) |
-| Wrist saturation | Cause examined (design section 2.6); not re-measured with the new table |
+| Held-out check on the reference capture | Partly run: SOMA markers and limits through the previous tracker binary give 2.2 / 3.9 / 2.7 cm (see below); the regenerated default with the new reader **not run** |
+| Wrist saturation | Cause examined (design section 2.6); with the new table no wrist axis saturates in the calibration clip (see below) |
 | UI action "add SOMA-77 markers" | Not done (out of scope; `skeleton compose --base` does the work) |
 
 ## Migration check
@@ -44,7 +44,29 @@ did not touch are unchanged (row counts and SHA-256 of every row), `tracking_run
 `tracking_run_persons` are unchanged apart from the columns versions 63 and 64 add, and `run_progress` is
 new (version 64).
 
-## C++ build and held-out check
+## Held-out check
+
+Reference capture, calibration clip, tracker configuration of the prototype run, held-out window
+123.5-135 s, joint position error against the reference tracking run (median over time of the mean over
+the group, cm):
+
+| Run | legs | arms | head |
+|---|---|---|---|
+| Prototype run (all 77 SOMA markers, earlier limits) | 2.4 | 4.0 | 2.6 |
+| New SOMA marker set (33 markers from the catalog offsets) and new limits | 2.2 | 3.9 | 2.7 |
+
+The second row is within 0.3 cm of the first in every group (differences 0.2 / 0.1 / 0.1 cm), and in the
+preceding window (112.5-123.5 s, where the offsets were fitted) it is 1.5 / 3.1 / 1.8 against 1.8 / 3.2 /
+1.9. It was tracked in 104 s with the previous tracker binary, on a skeleton composed from the new layers
+with only the SOMA markers and bare landmarks (that reader needs exact landmark names and would bind the
+COCO markers of the full default to the wrong SOMA slots). In that run no wrist axis sits at a limit
+(at most 1% of the states within 3% of one; twist 5th-95th percentile -35..55 degrees against the
++-85 limit, deviation -22..12 against +-25), and the elbows and knees move only about their flexion axis.
+
+What is **not** verified: the regenerated default skeleton (COCO, hand21 and SOMA markers together) read
+by the new C++ reader.
+
+## C++ build
 
 On the machine used for this stage no new executable could be linked or started during the session (the
 linker could not write its output, and a freshly linked test program failed to start with Windows error
@@ -53,10 +75,8 @@ linker could not write its output, and a freshly linked test program failed to s
 `cl /Zs` only. Before merging:
 
 1. build and run the C++ tests in a fresh build directory of the worktree;
-2. build `optbuild` and run `scripts/skeleton_heldout_check.py` on a copy of the reference capture's session
-   database (migrated to the current schema): it tracks the SOMA-77 sequence of the calibration clip with
-   the default male skeleton and prints leg / arm / head error against the reference tracking run in the
-   held-out window (123.5-135 s) next to the prototype run, plus how often the wrist, elbow and knee sit at
-   a limit. With this harness the prototype run gives 2.4 / 4.0 / 2.6 cm; the new default should stay within
-   0.3 cm of that. The tracking takes about as long as the 24 s clip at 120 Hz did for the prototype (the
-   clip has 2 879 steps); run it in the background.
+2. build `optbuild` and run `scripts/skeleton_heldout_check.py` on a copy of the reference capture's
+   session database (migrated to the current schema): it tracks the SOMA-77 sequence of the calibration
+   clip with the default male skeleton and prints leg / arm / head error against the reference tracking
+   run next to the prototype run, plus how often the wrist, elbow and knee sit at a limit. The
+   tracking takes under two minutes.

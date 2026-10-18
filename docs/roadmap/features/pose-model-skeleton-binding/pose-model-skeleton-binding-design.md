@@ -162,6 +162,10 @@ loosened to hide this: the twist range moved to the joint that owns it, the elbo
 what remains is a measurement problem (a hand pass, or markers with a wider base) and, for large twists
 combined with large swings, the per-axis rotation-vector limits that the swing-twist design replaces.
 
+With the table above, a SOMA run of the calibration clip puts no wrist axis at a limit (at most 1% of
+the states within 3% of one); the clip has little forearm twist, so this does not yet exercise the
+trial in which the earlier table saturated.
+
 ### 2.7 Layered skeleton definition
 
 A skeleton today is one immutable YAML document: joint hierarchy, joint limits, segment dimensions and

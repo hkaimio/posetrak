@@ -21,6 +21,7 @@ Run it on a COPY of a session database; it adds a skeleton, a tracker configurat
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -57,7 +58,8 @@ def track_with_default(session: Path, sequence: str, sex: str, config: str, bina
     print(f"tracking sequence {sequence} with {name} ({skeleton[:12]})", flush=True)
     cmd = [sys.executable, "-c", "from posetrak.cli.main import main; main()", "--session", str(session), "track",
            "run", "--sequence", sequence, "--skeleton", skeleton, "--config", config, "--binary", binary]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "python")}
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     print(result.stdout[-1500:], result.stderr[-1500:])
     if result.returncode:
         raise SystemExit(result.returncode)

@@ -1,7 +1,7 @@
 ```toml
 name = "Pose Model and Skeleton Binding"
 status = "in-progress"
-progress_pct = 85
+progress_pct = 95
 description = """
 Pose models as keypoint vocabularies, a keypoint manifest per observation source for every new \
 sequence, model-qualified landmark names, SOMA-77 markers and offsets as catalog data in the \
@@ -32,8 +32,8 @@ See [pose-model-skeleton-binding-design.md](pose-model-skeleton-binding-design.m
 | Skeleton layer files, `skeleton compose` (also adds a pose model to a skeleton) | Done |
 | Run fails naming the missing pose model | Done (Python before the tracker starts; C++ reader as a second line) |
 | Migration check on a copy of a real session database | Done: see below |
-| Held-out check on the reference capture | Partly run: SOMA markers and limits through the previous tracker binary give 2.2 / 3.9 / 2.7 cm (see below); the regenerated default with the new reader needs an optimised build and is **not run** |
-| Wrist saturation | Cause examined (design section 2.6); with the new table no wrist axis saturates in the calibration clip (see below) |
+| Held-out check on the reference capture | Done: 2.2 / 3.9 / 2.7 cm with the regenerated default skeleton and the new reader (see below) |
+| Wrist saturation | Cause examined (design section 2.6); with the new table no wrist axis saturates in the calibration clip (see below); the trial in which the earlier table saturated was not re-run |
 | UI action "add SOMA-77 markers" | Not done (out of scope; `skeleton compose --base` does the work) |
 
 ## Migration check
@@ -53,25 +53,17 @@ the group, cm):
 | Run | legs | arms | head |
 |---|---|---|---|
 | Prototype run (all 77 SOMA markers, earlier limits) | 2.4 | 4.0 | 2.6 |
-| New SOMA marker set (33 markers from the catalog offsets) and new limits | 2.2 | 3.9 | 2.7 |
+| Regenerated default male skeleton (COCO, hand21 and SOMA markers) and the new reader | 2.2 | 3.9 | 2.7 |
 
 The second row is within 0.3 cm of the first in every group (differences 0.2 / 0.1 / 0.1 cm), and in the
 preceding window (112.5-123.5 s, where the offsets were fitted) it is 1.5 / 3.1 / 1.8 against 1.8 / 3.2 /
-1.9. It was tracked in 104 s with the previous tracker binary, on a skeleton composed from the new layers
-with only the SOMA markers and bare landmarks (that reader needs exact landmark names and would bind the
-COCO markers of the full default to the wrong SOMA slots). In that run no wrist axis sits at a limit
-(at most 1% of the states within 3% of one; twist 5th-95th percentile -35..55 degrees against the
-+-85 limit, deviation -22..12 against +-25), and the elbows and knees move only about their flexion axis.
-
-What is **not** verified: the regenerated default skeleton (COCO, hand21 and SOMA markers together) read
-by the new C++ reader.
+1.9. Tracking took 103 s with the optimised build of the worktree. The same figures come out of a run
+with only the SOMA markers through the previous tracker binary. No wrist axis sits at a limit (at most 1%
+of the states within 3% of one; twist 5th-95th percentile -35..55 degrees against the +-85 limit,
+deviation -22..12 against +-25), and the elbows and knees move only about their flexion axis.
 
 ## C++ build
 
-The C++ test suite passes in a debug build of the worktree (meson with `-Ddefault_library=static` and the
-Pinocchio and Boost paths of `setup-windows.ps1`). The optimised build needed for the held-out check was not
-built. Run `scripts/skeleton_heldout_check.py` on a copy of the reference capture's session database
-(migrated to the current schema) with the new `optbuild` tracker: it tracks the SOMA-77 sequence of the
-calibration clip with the default male skeleton and prints leg / arm / head error against the reference
-tracking run next to the prototype run, plus how often the wrist, elbow and knee sit at a limit. The
-tracking takes under two minutes.
+The C++ test suite passes in a debug build of the worktree and the optimised build tracks the reference
+capture (meson with `-Ddefault_library=static` and the Pinocchio and Boost paths of `setup-windows.ps1`;
+copy `boost_serialization.dll` and `yaml-cpp.dll` next to the tracker).

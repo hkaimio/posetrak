@@ -92,7 +92,7 @@ _DOT_OPTIONS = (
 @click.option("--refine-hands/--no-refine-hands", default=None,
               help="Re-detect each tracked wrist's hand in a tight crop on the frame already decoded and add "
                    "refined finger keypoints, for every pose model that names a wrist and an elbow. "
-                   "Default: on with --segmentation, off otherwise.")
+                   "Default: on with --segmentation for COCO-133 models, off otherwise (and always off for SOMA-77).")
 @click.option("--accept-licences", "accept_licences", is_flag=True, default=False,
               help="Accept the NVIDIA Open Model License and the DINOv3 License for the SOMA-77 weights without "
                    "being asked (their texts are still named). Needed to download the weights without a terminal.")
@@ -400,7 +400,9 @@ def _run_pose_detection(
 
     estimator = create_estimator(model, device=None)
     if refine_hands is None:
-        refine_hands = segmentation is not None
+        # Validated on COCO-133 with mask boxes; SOMA-77 hands were not improved by it (see
+        # docs/roadmap/features/hand-detection-refinement/hand-refinement-without-segmentation-design.md).
+        refine_hands = segmentation is not None and "soma" not in model
     hand_pass = None
     if refine_hands:
         from posetrak.detection.hand_refinement import HandPass

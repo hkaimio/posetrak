@@ -402,6 +402,26 @@ class TestDetectRunSegmentation:
         assert finalise_kwargs["detection_run_id"] == "run-1"
         assert finalise_kwargs["persons_ordered"] == ["alice"]
 
+    @patch("app.pose.finalise.auto_assign_and_finalise")
+    @patch("posetrak.cli.detect.create_estimator")
+    @patch("posetrak.cli.detect.DetectionPipeline")
+    def test_soma_segmentation_run_leaves_hand_refinement_off_unless_asked(
+        self, mock_pipeline_cls, mock_create, mock_finalise, monkeypatch,
+        seeded_session_db_path: Path, capture_id: str, sync_id: str,
+    ) -> None:
+        monkeypatch.setattr("posetrak.cli.detect.resolve_pose_model", lambda requested, **_: (requested, None))
+        seg_id = self._seed_segmentation(seeded_session_db_path, capture_id)
+        mock_finalise.return_value = ["seq1"]
+        mock_pipeline_cls.return_value.cameras = ["cam"]
+        mock_pipeline_cls.return_value.run.return_value = PipelineResult(detection_run_id="run-1")
+        args = ["detect", "run", "--capture", capture_id, "--sync", sync_id, "--start", "0", "--end", "1",
+                "--segmentation", seg_id, "--pose-model", "soma77-vitpose-h"]
+
+        _invoke(args, seeded_session_db_path)
+        assert mock_pipeline_cls.call_args.kwargs["hand_pass"] is None
+        _invoke([*args, "--refine-hands"], seeded_session_db_path)
+        assert mock_pipeline_cls.call_args.kwargs["hand_pass"] is not None
+
     def test_segmentation_rejects_yolo_only_flags(
         self, seeded_session_db_path: Path, capture_id: str, sync_id: str,
     ) -> None:

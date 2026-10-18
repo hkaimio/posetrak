@@ -87,6 +87,7 @@ ResultWriter::ResultWriter(std::string const& db_path, std::string const& sequen
         throw std::runtime_error("ResultWriter: failed to open DB '" + db_path + "': " + err);
     }
 
+    sqlite3_busy_timeout(db_, kSessionDbBusyTimeoutMs);
     sqlite3_exec(db_, "PRAGMA foreign_keys=ON;", nullptr, nullptr, nullptr);
 
     run_id_ = generate_uuid_v4();
@@ -112,8 +113,8 @@ ResultWriter::ResultWriter(std::string const& db_path, std::string const& sequen
         "INSERT INTO tracking_runs"
         " (id, observation_sequence_id, tracker_config_id, skeleton_id,"
         "  extrinsic_calibration_id, sync_config_id, ran_at, posetrak_version,"
-        "  active_camera_ids, marker_names)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        "  active_camera_ids, marker_names, status)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running')";
 
     rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
@@ -139,6 +140,8 @@ ResultWriter::ResultWriter(std::string const& db_path, std::string const& sequen
         throw std::runtime_error(std::string("ResultWriter: INSERT tracking_runs failed: ") +
                                  sqlite3_errmsg(db_));
     }
+
+    touch_progress();
 
     // Record who was tracked: one tracking_run_persons row with the run's
     // capture subject (subject-identity-design.md). The subject is the
@@ -183,6 +186,7 @@ ResultWriter::ResultWriter(std::string const& db_path, std::string const& run_id
         throw std::runtime_error("ResultWriter: failed to open DB '" + db_path + "': " + err);
     }
 
+    sqlite3_busy_timeout(db_, kSessionDbBusyTimeoutMs);
     sqlite3_exec(db_, "PRAGMA foreign_keys=ON;", nullptr, nullptr, nullptr);
 
     // Load camera_labels_/marker_names_ from the parent's tracking_runs row so
@@ -386,6 +390,8 @@ void ResultWriter::flush_pending() {
         throw std::runtime_error("ResultWriter: INSERT tracking_results failed: " + fail_msg);
     }
 
+    touch_progress();
+
     rc = sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, &errmsg);
     if (rc != SQLITE_OK) {
         std::string err = errmsg ? errmsg : "unknown";
@@ -394,6 +400,81 @@ void ResultWriter::flush_pending() {
     }
 
     pending_.clear();
+}
+
+// Dates the newest activity of the run so a run whose process died can be told from one that
+// is still working (run_progress, session_schema.sql). Runs inside the caller's transaction, or
+// on its own when there is none.
+void ResultWriter::touch_progress() {
+    last_progress_ = std::chrono::steady_clock::now();
+    sqlite3_stmt* stmt = nullptr;
+    char const* sql =
+        "INSERT INTO run_progress (run_id, updated_at) VALUES (?, ?)"
+        " ON CONFLICT(run_id) DO UPDATE SET updated_at = excluded.updated_at";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        throw std::runtime_error(std::string("ResultWriter: prepare INSERT run_progress: ") +
+                                 sqlite3_errmsg(db_));
+    }
+    std::string const now = utc_iso_timestamp();
+    sqlite3_bind_text(stmt, 1, run_id_.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, now.c_str(), -1, SQLITE_STATIC);
+    int const rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        throw std::runtime_error(std::string("ResultWriter: INSERT run_progress failed: ") +
+                                 sqlite3_errmsg(db_));
+    }
+}
+
+// Long phases that do not go through flush_pending() (patching a child stage's rows) report
+// progress at most this often, so a busy run is not slowed by the extra write.
+void ResultWriter::touch_progress_if_due() {
+    if (std::chrono::steady_clock::now() - last_progress_ >= std::chrono::seconds(30))
+        touch_progress();
+}
+
+void finish_tracking_run(std::string const& db_path, std::string const& run_id,
+                         std::string const& status, std::string const& failure) {
+    sqlite3* db = nullptr;
+    if (sqlite3_open_v2(db_path.c_str(), &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+                        nullptr) != SQLITE_OK) {
+        std::string err = db ? sqlite3_errmsg(db) : "unknown error";
+        if (db)
+            sqlite3_close(db);
+        throw std::runtime_error("finish_tracking_run: failed to open DB '" + db_path +
+                                 "': " + err);
+    }
+    sqlite3_busy_timeout(db, kSessionDbBusyTimeoutMs);
+
+    std::string const now = utc_iso_timestamp();
+    sqlite3_stmt* stmt = nullptr;
+    char const* update_sql =
+        "UPDATE tracking_runs SET status = ?, completed_at = ?, failure = ? WHERE id = ?";
+    int rc = sqlite3_prepare_v2(db, update_sql, -1, &stmt, nullptr);
+    if (rc == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, status.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, now.c_str(), -1, SQLITE_STATIC);
+        if (failure.empty())
+            sqlite3_bind_null(stmt, 3);
+        else
+            sqlite3_bind_text(stmt, 3, failure.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 4, run_id.c_str(), -1, SQLITE_STATIC);
+        rc = sqlite3_step(stmt);
+    }
+    std::string err = rc == SQLITE_DONE ? "" : sqlite3_errmsg(db);
+    sqlite3_finalize(stmt);
+    if (rc == SQLITE_DONE) {
+        stmt = nullptr;
+        if (sqlite3_prepare_v2(db, "DELETE FROM run_progress WHERE run_id = ?", -1, &stmt,
+                               nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, run_id.c_str(), -1, SQLITE_STATIC);
+            sqlite3_step(stmt);
+        }
+        sqlite3_finalize(stmt);
+    }
+    sqlite3_close(db);
+    if (rc != SQLITE_DONE)
+        throw std::runtime_error("finish_tracking_run: UPDATE tracking_runs failed: " + err);
 }
 
 // ---------------------------------------------------------------------------
@@ -593,6 +674,7 @@ void ResultWriter::patch_obs_results(int step, std::vector<ObservationResult> co
     // Make sure a row this same writer may have just batched is visible to the
     // SELECT below.
     flush_pending();
+    touch_progress_if_due();
 
     int n_cams = static_cast<int>(camera_labels_.size());
     int n_markers = static_cast<int>(marker_names_.size());
@@ -697,6 +779,7 @@ void ResultWriter::patch_frame(int step, bool is_smoothed, std::vector<int> cons
     // Make sure a row this same writer may have just batched is visible to the
     // SELECT below.
     flush_pending();
+    touch_progress_if_due();
 
     sqlite3_stmt* select_stmt = nullptr;
     const char* select_sql =

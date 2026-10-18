@@ -100,6 +100,17 @@ A tracker execution. Written by `posetrak-tracker` when it creates the run and w
 | completed_at | TEXT | **new** UTC end time; NULL while running or when unknown |
 | failure | TEXT | **new** error text of a failed run; NULL otherwise |
 
+### 3.1a `run_progress` (session) — first release
+
+When a running tracking or detection job last made progress, so a job whose process died can be
+told from one that is working. Written by the tracker with every result batch and by the detection
+writers with every batch; deleted when the job ends or is cleaned up.
+
+| Column | Type | Meaning |
+|---|---|---|
+| run_id | TEXT PK | `tracking_runs.id` or `detection_runs.id` of the running job (no foreign key: it names a row of either table) |
+| updated_at | TEXT | UTC time of the newest batch written |
+
 ### 3.2 `tracking_run_persons` (session) — first release
 
 Who a tracking run tracked, and the skeleton and segmentation used for them. Written by the tracker.
@@ -277,7 +288,7 @@ The `CHECK` on `kind` is the reason for the rebuild. `dot_assignment_proposals` 
 
 | Session version | Release | Change | How |
 |---|---|---|---|
-| 64 | first | `tracking_runs.status`, `completed_at`, `failure`; `tracking_run_persons.seg_quality_run_id`, `seg_mask_label`, `seg_revision` | `ALTER TABLE ADD COLUMN` |
+| 64 | first | `tracking_runs.status`, `completed_at`, `failure`; `tracking_run_persons.seg_quality_run_id`, `seg_mask_label`, `seg_revision`; table `run_progress` | `ALTER TABLE ADD COLUMN`; `CREATE TABLE` |
 | 65 | first | `detection_runs.seg_quality_run_id`, `seg_revision`, `source_detection_run_id`; existing rows stay NULL (mask-sourced runs did not record their segmentation; the spike's prototype runs name their source run in `config_json`, which is copied into `source_detection_run_id`) | `ALTER TABLE ADD COLUMN` + update |
 | 66 | first | `pose_sequence_keypoints.obs_source` and new key; `tracker_configs.active_joint_groups` (registry version 17 in step) | table rebuild (small table); `ALTER TABLE ADD COLUMN` |
 | 67 | second | `seg_mask_revisions`; `seg_masks.revision`, nullable blob, new key; `seg_masks_latest` view | table rebuild with copy, revision 0 rows |

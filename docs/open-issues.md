@@ -128,11 +128,6 @@ consistent with `compute_state_error` in `ukf.cpp` (`q_ref⁻¹ * q_state`).
 
 ## Active
 
-- **Tracker run aborts with "database is locked" when another process writes the session DB** (2026-10-16)
-  - The tracker's `ResultWriter` (`cpp/src/db/result_writer.cpp`) opens the session DB without a busy timeout, so a write that meets another writer fails at once instead of waiting. One run died at 34% (about 8 minutes in) with `ResultWriter: INSERT tracking_obs_results failed: database is locked`; the run row was left unfinished (run id None) and all progress was lost.
-  - Any concurrent writer triggers it: a detection job writing keypoints to the same DB (seen twice, 8 min and 80 s into a run), a finalise job, the UI opening the run, a segmentation edit. The same will happen to long runs later.
-  - Direction: set `sqlite3_busy_timeout` (tens of seconds) on the writer's connection, keep each result write in a short transaction, and make a failed write mark the run as failed rather than leaving it half-written. The UI should not open a run whose status is not complete.
-
 - **Segmentation masks are mutable but tracking runs do not record which version they used** (2026-10-14)
   - Every other input of a tracking run (detections, observation sequences, calibrations) is append-only, so a run can be reproduced and compared with another. Segmentation masks are edited in place by the user between runs (a `seg_quality_runs` row keeps its id while its `seg_masks` change), and nothing records which masks a derived result saw: candidate mask labels, mask-derived boxes and the mask overlay in the person view.
   - Consequences seen: a result computed before an edit can no longer be reproduced from the database, the overlay shows whatever the run holds now, and two runs covering the same frames could hide the edited one (the overlay now picks the newest among equally complete runs, which is a workaround, not versioning).
@@ -211,6 +206,9 @@ consistent with `compute_state_error` in `ukf.cpp` (`q_ref⁻¹ * q_state`).
     triangulations). No skeleton YAML changes needed.
 
 ## Fixed
+
+- **FIXED (2026-10-17)**: Tracker run aborted with "database is locked" when another process wrote the session DB
+  - The tracker's connections and the Python `_connect` now wait up to 60 s for the other writer's lock; the result writer commits in short batch transactions. A tracking run has a `status` ('running', 'complete', 'failed'); a run whose process stopped is shown as interrupted after 10 minutes without progress and `posetrak runs cleanup` marks it failed. The session tree shows the status and a run that is not complete opens read-only with a warning. See `docs/roadmap/features/session-db-concurrency/`.
 
 - **FIXED (2026-02-28)**: \`root_velocity_\` was \`VectorXd\` instead of \`Vector3d\`
   - Now \`Eigen::Vector3d\` in \`State\` with a matching typed accessor.

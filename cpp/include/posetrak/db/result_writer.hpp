@@ -5,6 +5,7 @@
 #pragma once
 #include <posetrak/core/camera.hpp>
 #include <posetrak/core/skeleton.hpp>
+#include <posetrak/db/busy_timeout.hpp>
 #include <posetrak/filters/update_result.hpp>
 #include <posetrak/tracking/dot_assignment.hpp>
 
@@ -12,6 +13,7 @@
 
 #include <sqlite3.h>
 
+#include <chrono>
 #include <map>
 #include <string>
 #include <tuple>
@@ -21,7 +23,7 @@ namespace posetrak {
 
 /// @brief Writes tracking results to a session SQLite database.
 ///
-/// Creates a tracking_runs row on construction and batches tracking_results
+/// Creates a tracking_runs row (status 'running') on construction and batches tracking_results
 /// inserts for efficiency. Call flush() (or let the destructor do it) when done.
 class ResultWriter {
    public:
@@ -172,6 +174,10 @@ class ResultWriter {
     void flush();
 
    private:
+    void touch_progress();
+    void touch_progress_if_due();
+    std::chrono::steady_clock::time_point last_progress_{};
+
     sqlite3* db_{};
     std::string run_id_;
     int person_id_;
@@ -196,5 +202,13 @@ class ResultWriter {
     std::vector<std::string>
         marker_names_;  ///< Marker names in skeleton order (obs_blob marker axis)
 };
+
+/// @brief End a tracking run: set tracking_runs.status ('complete' or 'failed'), completed_at
+/// and, for a failed run, the error text. Opens its own connection, so it works after the
+/// run's ResultWriter is gone.
+/// @param status 'complete' or 'failed'
+/// @param failure Error text recorded for a failed run; empty leaves tracking_runs.failure NULL
+void finish_tracking_run(std::string const& db_path, std::string const& run_id,
+                         std::string const& status, std::string const& failure = "");
 
 }  // namespace posetrak

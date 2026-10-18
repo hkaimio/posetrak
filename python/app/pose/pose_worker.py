@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from pathlib import Path
+from posetrak.db.db import _connect
 import time
 from dataclasses import dataclass
 
@@ -150,8 +152,7 @@ class PoseWorker(QThread):
         log.info("PoseWorker: start  %s  frames %d-%d  model=%s  t=%.3f",
                  job.camera_label, job.first_frame, job.last_frame, job.pose_model, t0)
 
-        conn = sqlite3.connect(self._db_path)
-        conn.row_factory = sqlite3.Row
+        conn = _connect(Path(self._db_path))
 
         try:
             if job.overwrite_range:
@@ -224,6 +225,9 @@ class PoseWorker(QThread):
             log.info("PoseWorker: done  %d frames  %d kp_frames  %.2fs",
                      done, frames_with_kp, time.monotonic() - t0)
 
+        except Exception:
+            mark_run_complete(conn, job.detection_run_id, "failed")
+            raise
         finally:
             conn.close()
 

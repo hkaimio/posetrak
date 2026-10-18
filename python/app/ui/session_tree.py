@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
 )
 
+from posetrak.db.run_status import INTERRUPTED, display_status
+
 _KIND = Qt.ItemDataRole.UserRole
 _ID   = Qt.ItemDataRole.UserRole + 1
 
@@ -222,12 +224,12 @@ class SessionTreeWidget(QTreeWidget):
 
     def _make_detection_run_item(self, dr) -> QTreeWidgetItem:
         ts = _fmt_ts(dr["created_at"])
-        status = dr["status"]
+        status = display_status(self._conn, "detection_runs", dr["id"], dr["status"])
         label = f"Detection [{dr['detector_model']}]  {ts}"
         if status != "complete":
             label += f"  ({status})"
         item = _make_item(ItemKind.DETECTION_RUN, dr["id"], label)
-        if status == "failed":
+        if status in ("failed", INTERRUPTED):
             _grey(item)
         item.setExpanded(True)
         self._add_person_tracks(item, dr["id"])
@@ -280,16 +282,19 @@ class SessionTreeWidget(QTreeWidget):
 
     def _add_tracking_runs(self, parent: QTreeWidgetItem, sequence_id: str) -> None:
         runs = self._conn.execute(
-            "SELECT tr.id, tr.name, s.name AS skel_name, tr.ran_at, tr.notes "
+            "SELECT tr.id, tr.name, s.name AS skel_name, tr.ran_at, tr.notes, tr.status, tr.failure "
             "FROM tracking_runs tr "
             "LEFT JOIN skeletons s ON s.id = tr.skeleton_id "
             "WHERE tr.observation_sequence_id = ? ORDER BY tr.ran_at",
             (sequence_id,),
         ).fetchall()
         for run in runs:
-            label = tracking_run_label(run["id"], run["name"], run["skel_name"], run["ran_at"])
+            status = display_status(self._conn, "tracking_runs", run["id"], run["status"])
+            label = tracking_run_label(run["id"], run["name"], run["skel_name"], run["ran_at"], status)
             item = _make_item(ItemKind.TRACKING_RUN, run["id"], label)
-            item.setToolTip(0, "\n".join(x for x in (run["name"], run["id"], run["notes"]) if x))
+            item.setToolTip(0, "\n".join(x for x in (run["name"], run["id"], run["notes"], run["failure"]) if x))
+            if status != "complete":
+                _grey(item)
             parent.addChild(item)
 
     # ------------------------------------------------------------------
@@ -609,9 +614,15 @@ def _make_item(kind: ItemKind, item_id: str, label: str) -> QTreeWidgetItem:
     return item
 
 
-def tracking_run_label(run_id: str, name: str | None, skeleton: str | None, ran_at: str | None) -> str:
-    """Tree text of a tracking run: its name (or "Tracking run"), the first 8 characters of its id, skeleton and time."""
-    return f"{name or 'Tracking run'}  ·{run_id[:8]}·  [{skeleton or '?'}]  {_fmt_ts(ran_at)}"
+def tracking_run_label(
+    run_id: str, name: str | None, skeleton: str | None, ran_at: str | None, status: str = "complete"
+) -> str:
+    """Tree text of a tracking run: its name (or "Tracking run"), the first 8 characters of its id, skeleton and time.
+
+    A run that is not complete (running, failed or interrupted) gets its status appended.
+    """
+    label = f"{name or 'Tracking run'}  ·{run_id[:8]}·  [{skeleton or '?'}]  {_fmt_ts(ran_at)}"
+    return label if status == "complete" else f"{label}  ({status})"
 
 
 def _grey(item: QTreeWidgetItem) -> None:

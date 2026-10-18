@@ -31,6 +31,8 @@ the video; the widget's time_changed signal moves the cursor line across all plo
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
+from posetrak.db.db import _connect
 
 import numpy as np
 import yaml
@@ -151,8 +153,7 @@ class _MeasWorker(QThread):
                 self.finished.emit(None, "No inlier observations found.")
                 return
 
-            conn = sqlite3.connect(self._db_path)
-            conn.row_factory = sqlite3.Row
+            conn = _connect(Path(self._db_path))
             run = conn.execute(
                 "SELECT extrinsic_calibration_id, observation_sequence_id, skeleton_id "
                 "FROM tracking_runs WHERE id=?",

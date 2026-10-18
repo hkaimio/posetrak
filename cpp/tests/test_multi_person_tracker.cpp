@@ -328,8 +328,12 @@ void create_fixture_db(fs::path const& path, int num_frames, double dt) {
             tracker_config_id TEXT NOT NULL, skeleton_id TEXT NOT NULL,
             extrinsic_calibration_id TEXT, sync_config_id TEXT,
             ran_at TEXT NOT NULL, posetrak_version TEXT,
-            active_camera_ids TEXT, marker_names TEXT
+            active_camera_ids TEXT, marker_names TEXT,
+            status TEXT NOT NULL DEFAULT 'complete', completed_at TEXT, failure TEXT
         );
+    )");
+    exec_sql(db, R"(
+        CREATE TABLE run_progress (run_id TEXT PRIMARY KEY, updated_at TEXT NOT NULL);
     )");
     exec_sql(db, R"(
         CREATE TABLE tracking_results (

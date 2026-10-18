@@ -1607,3 +1607,30 @@ def test_session_v62_to_v63_adds_tracking_run_name_and_is_repeatable():
 def test_new_session_has_tracking_run_name(session_db: sqlite3.Connection) -> None:
     columns = [r[1] for r in session_db.execute("PRAGMA table_info(tracking_runs)")]
     assert "name" in columns
+
+
+def test_session_v63_to_v64_marks_existing_runs_complete_and_is_repeatable():
+    import sqlite3
+
+    from posetrak.db.db import _migrate_session_v63_to_v64
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE tracking_runs (id TEXT PRIMARY KEY, notes TEXT)")
+    conn.execute("CREATE TABLE tracking_run_persons (run_id TEXT, person_id INTEGER)")
+    conn.execute("INSERT INTO tracking_runs (id) VALUES ('run-1')")
+    _migrate_session_v63_to_v64(conn)
+    _migrate_session_v63_to_v64(conn)
+    columns = [r[1] for r in conn.execute("PRAGMA table_info(tracking_runs)")]
+    for name in ("status", "completed_at", "failure"):
+        assert columns.count(name) == 1
+    assert conn.execute("SELECT status, completed_at, failure FROM tracking_runs").fetchone() == (
+        "complete", None, None)
+    persons = [r[1] for r in conn.execute("PRAGMA table_info(tracking_run_persons)")]
+    assert {"seg_quality_run_id", "seg_mask_label", "seg_revision"} <= set(persons)
+    assert conn.execute("SELECT COUNT(*) FROM run_progress").fetchone()[0] == 0
+    assert get_schema_version(conn) == 64
+
+
+def test_new_session_has_run_status_columns(session_db: sqlite3.Connection) -> None:
+    columns = [r[1] for r in session_db.execute("PRAGMA table_info(tracking_runs)")]
+    assert {"status", "completed_at", "failure"} <= set(columns)

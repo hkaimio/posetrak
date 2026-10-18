@@ -957,6 +957,19 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
 // ---------------------------------------------------------------------------
 // 'track --session-db' subcommand: run the tracker from a session DB.
 // ---------------------------------------------------------------------------
+// Record a thrown error on the runs the tracker had created. Failing to record must not hide
+// the original error, so a failure here is only reported.
+static void mark_runs_failed(std::string const& db_path, std::vector<std::string> const& run_ids,
+                             std::string const& message) {
+    for (auto const& run_id : run_ids) {
+        try {
+            finish_tracking_run(db_path, run_id, "failed", message);
+        } catch (std::exception const& e) {
+            fmt::print(stderr, "Could not mark run {} failed: {}\n", run_id, e.what());
+        }
+    }
+}
+
 static int run_track_from_db(std::string const& db_path, std::string const& sequence_id,
                              std::string const& skeleton_id, std::string const& config_id,
                              std::string const& output_dir, bool verbose, bool quiet,
@@ -969,6 +982,7 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                              int trace_assignment_start = -1, int trace_assignment_end = -1,
                              std::string const& seg_run_id = "", int seg_mask_label = 0,
                              std::string const& tracklet_assignments_path = "") {
+    std::vector<std::string> run_ids;  // runs to mark failed when tracking throws
     try {
         PersonSpec spec;
         spec.sequence_id = sequence_id;
@@ -990,6 +1004,7 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
         opts.quiet = quiet;
 
         auto ctx = build_person_context(spec, opts, verbose);
+        run_ids.push_back(ctx->result_writer->run_id());
 
         // Segmentation-mask-based dot-assignment trust (segmentation-mask-
         // dot-assignment-design.md): seg_run_id/seg_mask_label are this
@@ -1135,10 +1150,12 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
             }
         }
 
+        finish_tracking_run(db_path, run_ids.front(), "complete");
         return 0;
 
     } catch (std::exception const& e) {
         fmt::print(stderr, "Error: {}\n", e.what());
+        mark_runs_failed(db_path, run_ids, e.what());
         return 1;
     }
 }
@@ -1159,6 +1176,7 @@ static int run_multi_person_track_from_db(std::string const& db_path,
                                           double min_confidence,
                                           std::vector<std::string> const& active_joint_groups,
                                           double override_start_time, double override_end_time) {
+    std::vector<std::string> run_ids;  // runs to mark failed when tracking throws
     try {
         BuildPersonContextOptions opts;
         opts.db_path = db_path;
@@ -1178,6 +1196,8 @@ static int run_multi_person_track_from_db(std::string const& db_path,
         }
 
         MultiPersonTracker tracker(resolved_specs, opts, verbose);
+        for (auto const& person_ctx : tracker.persons())
+            run_ids.push_back(person_ctx->result_writer->run_id());
         tracker.run();
 
         // Hierarchical solver child stages, per person (existence-based toggle -- see
@@ -1195,10 +1215,13 @@ static int run_multi_person_track_from_db(std::string const& db_path,
             }
         }
 
+        for (auto const& run_id : run_ids)
+            finish_tracking_run(db_path, run_id, "complete");
         return 0;
 
     } catch (std::exception const& e) {
         fmt::print(stderr, "Error: {}\n", e.what());
+        mark_runs_failed(db_path, run_ids, e.what());
         return 1;
     }
 }

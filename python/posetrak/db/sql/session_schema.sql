@@ -332,7 +332,7 @@ CREATE TABLE IF NOT EXISTS pose_sequence_keypoints (
     PRIMARY KEY (sequence_id, keypoint_idx)
 );
 
--- A single tracker execution record: one row per tracker execution, written by posetrak-tracker when it creates the run.
+-- A single tracker execution record: one row per tracker execution, written by posetrak-tracker when it creates the run and updated when it ends.
 CREATE TABLE IF NOT EXISTS tracking_runs (
     -- uuid of the run
     id                       TEXT PRIMARY KEY,
@@ -359,7 +359,18 @@ CREATE TABLE IF NOT EXISTS tracking_runs (
     -- the trial the run belongs to: trials.id; NULL when it was run on a sequence outside a trial
     trial_id                 TEXT REFERENCES trials(id),
     -- display name the user gave the run, shown in the session tree and searched by it; NULL until the run is named
-    name                     TEXT
+    name                     TEXT,
+    -- 'running' while the tracker works, 'complete' after its last stage, 'failed' when it
+    -- stopped with an error; a 'running' row with no recent run_progress is shown as
+    -- interrupted and set 'failed' by "posetrak runs cleanup". Rows from before this
+    -- column are 'complete'.
+    status                   TEXT NOT NULL DEFAULT 'complete'
+                             CHECK (status IN ('running', 'complete', 'failed')),
+    -- when the run ended: UTC timestamp, ISO 8601 with a trailing Z; NULL while running
+    -- and for runs from before the column
+    completed_at             TEXT,
+    -- error text of a failed run; NULL for any other status
+    failure                  TEXT
 );
 
 -- Who a tracking run tracked (one row per tracked person or object in the run) and
@@ -371,7 +382,24 @@ CREATE TABLE IF NOT EXISTS tracking_run_persons (
     skeleton_id TEXT    NOT NULL,  -- registry skeletons.id used for this subject (per-person override)
     capture_object_id TEXT REFERENCES capture_objects(id), -- set when the subject is a tracked object; NULL for a person
     subject_id  TEXT,              -- capture_subjects.id of the tracked person or object; NULL if it could not be resolved
+    seg_quality_run_id TEXT REFERENCES seg_quality_runs(id), -- segmentation run whose masks gated this subject's candidates; NULL without a mask gate
+    seg_mask_label INTEGER,        -- the subject's label (1-255) in those masks; NULL when seg_quality_run_id is NULL
+    seg_revision INTEGER,          -- mask revision read; NULL when the masks are unversioned or there is no gate
     PRIMARY KEY (run_id, person_id)
+);
+
+-- When a running job (a tracking_runs or detection_runs row) last made progress, so
+-- a job whose process died can be told from one that is still working: a 'running'
+-- row whose updated_at is older than posetrak.db.run_status.STALE_AFTER_S is
+-- interrupted. Written by the tracker with each batch of results and by the
+-- detection writers with each batch of detections; the row is deleted when the job
+-- ends or is cleaned up. No row means the job has not reported yet (its start time
+-- is used instead).
+CREATE TABLE IF NOT EXISTS run_progress (
+    -- tracking_runs.id or detection_runs.id of the running job (no foreign key: it names a row of either table)
+    run_id     TEXT PRIMARY KEY,
+    -- UTC time of the newest batch written, ISO 8601 with a trailing Z
+    updated_at TEXT NOT NULL
 );
 
 -- Per-frame tracking results

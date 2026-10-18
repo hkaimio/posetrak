@@ -97,14 +97,20 @@ def test_tree_lists_the_runs_of_a_sequence_with_their_names(qapp):
     conn.row_factory = sqlite3.Row
     conn.execute("CREATE TABLE skeletons (id TEXT PRIMARY KEY, name TEXT)")
     conn.execute("CREATE TABLE tracking_runs (id TEXT PRIMARY KEY, name TEXT, skeleton_id TEXT, ran_at TEXT, notes TEXT, "
-                 "observation_sequence_id TEXT)")
+                 "observation_sequence_id TEXT, status TEXT, failure TEXT)")
+    conn.execute("CREATE TABLE run_progress (run_id TEXT PRIMARY KEY, updated_at TEXT NOT NULL)")
     conn.execute("INSERT INTO skeletons VALUES ('sk', 'Tommi scaled')")
-    conn.execute("INSERT INTO tracking_runs VALUES ('run-aaaaaaaa-1', 'labels', 'sk', '2026-10-09T10:00:00Z', 'fed with labels', 'seq')")
-    conn.execute("INSERT INTO tracking_runs VALUES ('run-bbbbbbbb-2', NULL, 'sk', '2026-10-09T11:00:00Z', NULL, 'seq')")
+    conn.execute("INSERT INTO tracking_runs VALUES ('run-aaaaaaaa-1', 'labels', 'sk', '2026-10-09T10:00:00Z', 'fed with labels', 'seq', 'complete', NULL)")
+    conn.execute("INSERT INTO tracking_runs VALUES ('run-bbbbbbbb-2', NULL, 'sk', '2026-10-09T11:00:00Z', NULL, 'seq', 'complete', NULL)")
+    conn.execute("INSERT INTO tracking_runs VALUES ('run-cccccccc-3', NULL, 'sk', '2026-10-09T12:00:00Z', NULL, 'seq', 'failed', 'boom')")
+    conn.execute("INSERT INTO tracking_runs VALUES ('run-dddddddd-4', NULL, 'sk', '2026-10-09T13:00:00Z', NULL, 'seq', 'running', NULL)")
     tree = SessionTreeWidget()
     tree._conn = conn
     parent = QTreeWidgetItem(["sequence"])
     tree._add_tracking_runs(parent, "seq")
     texts = [parent.child(i).text(0) for i in range(parent.childCount())]
-    assert texts == ["labels  ·run-aaaa·  [Tommi scaled]  2026-10-09 10:00", "Tracking run  ·run-bbbb·  [Tommi scaled]  2026-10-09 11:00"]
+    assert texts == ["labels  ·run-aaaa·  [Tommi scaled]  2026-10-09 10:00", "Tracking run  ·run-bbbb·  [Tommi scaled]  2026-10-09 11:00",
+                     "Tracking run  ·run-cccc·  [Tommi scaled]  2026-10-09 12:00  (failed)",
+                     "Tracking run  ·run-dddd·  [Tommi scaled]  2026-10-09 13:00  (interrupted)"]
+    assert parent.child(2).toolTip(0).endswith("boom")
     assert parent.child(0).toolTip(0) == "labels\nrun-aaaaaaaa-1\nfed with labels"

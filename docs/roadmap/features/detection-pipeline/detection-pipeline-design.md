@@ -219,21 +219,13 @@ What this says about the hypotheses above:
 - **The hand pass doubles the RTMPose mask route** (918 s against 437 s): the hand model and a second decode
   of the clip. Inside the frame loop the second decode disappears (136 s); the hand model remains
   (349 s, 38% of the route) and is a candidate for batching.
-- **Explained by the unified loop's measurement (see its results below):** RTMPose inference is twice as expensive per crop in the segmentation route (11.5-11.9 ms)
-  as in the YOLOX route (5.7 ms) for the same model, device and options. A stand-alone loop of the estimator
-  with `cv2.VideoCapture` reads and a Qt core application gives 6.8 ms per crop, so neither explains it.
-  Code reading finds no difference in what the two routes ask of the model (the same estimator, the same crop
-  preparation, the same device selection); what differs is what runs around it. In the segmentation route the
-  GPU stays idle while the CPU decodes and resizes masks and reads PNGs (149 s of the 437 s), and the OpenCV
-  worker threads of those steps share the cores with the ONNX Runtime threads. Two causes fit the profile and
-  nothing else in it: the GPU clocking down during its idle gaps (a short burst of kernels then runs at a lower
-  clock), and CPU threads of OpenCV and ONNX Runtime competing. The unified loop removes both structural
-  differences: both routes now call the estimator with the same batched pattern, and the CPU-side work of the
-  mask source runs on the decode threads, overlapped with the model. Reading the `inference` ms per crop of the
-  "YOLOX + RTMPose-133" and "Masks + RTMPose-133" rows of the table above settles it: equal means the loop
-  removed the gap; unequal with a lower GPU clock in the mask route (`nvidia-smi --query-gpu=clocks.sm -l 1`
-  beside the run) means clock-down, unequal with equal clocks means thread competition, to be checked by
-  `cv2.setNumThreads(1)` in the mask source.
+- **Explained (GPU clock):** RTMPose inference was twice as expensive per crop in the segmentation route
+  (11.5-11.9 ms) as in the YOLOX route (5.7 ms) for the same model, device and options. A stand-alone loop of the
+  estimator with `cv2.VideoCapture` reads and a Qt core application gave 6.8 ms per crop, so neither explained it.
+  The unified loop's measurement (results below) shows the same gap, 7.8 against 11.3 ms per crop, and the GPU
+  clock accounts for it: 2757 MHz while the model is busy in the YOLOX route, 985 MHz in the segmentation route,
+  where the GPU is idle between short bursts and clocks down. The cost is a property of a lightly loaded GPU, not
+  of the code path, and it disappears when the GPU is kept busy, as it is in the SOMA routes.
 
 ### Decode producers: threads or processes
 
@@ -347,10 +339,16 @@ What follows for posetrak:
   and accepted them. The accepted licence version is stored with the downloaded file.
   Implementation (`posetrak/detection/model_weights.py`): the model directory is `~/.posetrak/models`
   (`POSETRAK_MODEL_DIR`), the files are `gem-x/onnx/vitpose.onnx` and its `.data` file (about 3.4 GB), fetched with
-  `huggingface_hub`. The two texts are fetched from the vendors' published pages at the time of acceptance; a text
-  that cannot be fetched cannot be shown, so it cannot be accepted and the run falls back to RTMPose. The "version"
-  of an accepted licence is the SHA-256 of the text that was shown, stored in `licence-acceptance.json` beside the
-  weights with the notice lines; the weights are not used without that record. `POSETRAK_SOMA77_MODEL` names an
+  `huggingface_hub`. The two licence texts are bundled with Posetrak as package data
+  (`posetrak/data/licences/`: `nvidia-open-model-license.txt`, version released October 24, 2025, and
+  `dinov3-license.txt`, August 14, 2025), copied unchanged from the vendors' pages under a short header that
+  names the licence, the source URL and the version; they are third-party texts in the REUSE data (vendor as
+  copyright holder, their own `LicenseRef` file in `LICENSES/`). Showing and accepting them needs no network
+  access; only the download does. The "version" of an accepted licence is the SHA-256 of the bundled text
+  (line ends normalised to LF), stored in `licence-acceptance.json` beside the
+  weights with the notice lines; a record whose hash differs from the text bundled in the running release counts as
+  not accepted, so a release that ships a changed text asks again; the weights are not used
+  without a valid record. `POSETRAK_SOMA77_MODEL` names an
   `onnx/vitpose.onnx` the user licensed on their own and bypasses download and record. The acceptance is asked
   in the detection dialogs and the segmentation panel (a dialog with a tab per licence and a progress dialog for
   the download), and by `detect run` (the texts in a pager and a confirmation, or `--accept-licences`).
@@ -415,8 +413,9 @@ DINOv3 License Agreement at the versions read when the draft was written.
 ### Status of the acceptance criteria
 
 - One `detect run` makes a SOMA-77 run from YOLOX boxes (default), from masks (`--segmentation`) and from an
-  existing run (`--from-run`), each without a prior RTMPose pass: built and covered by unit tests with fake models;
-  the full-size runs are in the operator's measurement.
-- GPU utilisation of at least 85% on the profiling clip, and the throughput of at least twice the prototype
-  route's: to be measured (the table above).
+  existing run (`--from-run`), each without a prior RTMPose pass: built, covered by unit tests with fake models, and
+  run on the profiling clip (routes 1-3 of "Results of the unified loop", all exit 0).
+- Throughput of at least twice the prototype route's: met, 2.9 times (506 s against 1,454 s).
+- GPU utilisation of at least 85% on the profiling clip: not met, 79-82%. Inference is the bound, not a non-GPU
+  stage at its decode floor; the findings after the results table say what would move it.
 - Parity with the prototype: see the status document.

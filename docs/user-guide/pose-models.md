@@ -11,7 +11,8 @@ Posetrak finds the body keypoints of each person with a pose model. Two families
 
 The SOMA-77 weights are NVIDIA's GEM-X 2D pose model. They are not part of Posetrak or its installer.
 The first time you choose SOMA-77 (in the detection dialogs, in the segmentation panel's pose row, or with
-`posetrak detect run`), Posetrak shows you the texts of two licences:
+`posetrak detect run`), Posetrak shows you the texts of two licences (both ship with Posetrak, so reading and accepting them
+needs no internet connection; only the download does):
 
 * the NVIDIA Open Model License Agreement, and
 * the DINOv3 License Agreement (the model's image backbone is DINOv3; until NVIDIA confirms otherwise Posetrak
@@ -19,7 +20,8 @@ The first time you choose SOMA-77 (in the detection dialogs, in the segmentation
 
 If you accept both, the weights (about 3.4 GB) are downloaded from the `nvidia/GEM-X` repository on Hugging
 Face into `~/.posetrak/models` (set `POSETRAK_MODEL_DIR` to put them elsewhere) and your acceptance is stored
-beside them. You are asked once.
+beside them together with a hash of the licence texts you accepted. You are asked once, and again after an
+update of Posetrak that ships a changed licence text.
 
 If you decline, or the download is not possible, the run uses RTMPose-133 instead and the program tells you why.
 Both models stay selectable at any time.

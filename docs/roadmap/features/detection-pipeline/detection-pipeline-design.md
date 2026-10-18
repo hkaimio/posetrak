@@ -25,11 +25,20 @@ BoxSource ──boxes per (camera, frame)──▶ PoseEstimator ──keypoints
    └─ RunBoxSource         (person_detections of an existing run, with its track assignments)
 ```
 
-- `BoxSource.boxes(camera, video_frame, image) -> list[PersonDetection]`. The mask source also
-  exposes the decoded mask of the frame so the estimator can gate heatmaps with it.
+- A box source (`posetrak/detection/box_sources.py`) is called in two places so that each part runs where it is
+  cheap: `prepare(camera, video_frame, image)` on the decode thread of the camera (CPU only: the mask source
+  decodes the mask and finds its boxes, the YOLOX source resizes the image to the model input; it must be
+  thread-safe), and `detect(works)` on the inference thread, the frames of one camera in order (the YOLOX model
+  call and its tracker). `start_camera` runs once per camera before its frames (tracker reset, boxes of a run
+  loaded) and `wants` lets a source say that a frame cannot have boxes, so that the loop does not hand its image
+  on. The mask source attaches the person's grown mask to each `PersonDetection` (`mask`, at a working resolution
+  of 480 pixels across) so that the estimator can gate heatmaps with it.
 - `PoseEstimator` (existing protocol in `backends.py`) gets a batched form,
-  `estimate_batch(items) -> list[list[PoseResult]]`, over crops from several frames and cameras.
-  RTMPose and SOMA-77 both implement it; the single-frame `estimate` stays for callers that need it.
+  `estimate_batch(items) -> list[list[PoseResult]]`, where an item is a frame with its detections, the frames
+  of any cameras. RTMPose and SOMA-77 both implement it; the single-frame `estimate` stays for callers that need
+  it. `options()` returns every option that changes the keypoints, for `config_json`. A `PoseResult` may carry
+  its own `noise_scale` (SOMA-77 writes the width of the model window in frame pixels per model input pixel; the
+  writer's default is the box width over the model input width).
 - SOMA-77 (`backends_soma77.py`) is registered as estimator `soma77-vitpose-h`, with the options the
   spike validated: flip test, crop enlargement 1.6, parabolic refinement, decoding at cell centres
   (index + 0.5), heatmap gating by the person's mask when the box source provides masks. Optional
@@ -48,17 +57,28 @@ BoxSource ──boxes per (camera, frame)──▶ PoseEstimator ──keypoints
 
 The loop is split into three stages connected by bounded queues:
 
-1. **Decode** — one producer per camera video (threads, or processes if decode holds the GIL in
-   practice), yielding frames of the range. Each producer also asks the box source for boxes, so
-   mask decoding runs here too.
-2. **Infer** — one consumer that collects crops from all producers into batches of a fixed size
-   (16 crops for SOMA, the size measured at 12 ms per crop) and runs the model.
-3. **Write** — one thread that encodes preview crops and writes rows in batches.
+1. **Decode** — one producer per camera video, yielding frames of the range (`frame_readers.py`: a thread per
+   camera, or a child process per camera that hands the frames over in shared memory; section 3 has the soak
+   test that chooses). Each producer also prepares the frame for the box source, so mask decoding runs here too.
+2. **Infer** — one thread that takes the frames of all producers, asks the box source for their boxes and runs
+   the estimator on the crops of all persons of up to six frames at once, in model calls of a fixed size
+   (16 crops for SOMA, the size measured at 12 ms per crop, the flipped copies counted), then the hand pass.
+3. **Write** — the thread that called the loop writes the rows in batches (the database connection belongs to
+   it) and encodes the preview crops; the loop reports progress from there.
 
 The GPU then waits only when all producers together cannot keep up, which the profiling below
 shows or rules out.
 
-Decoding is single-threaded today on purpose: closing a container with threaded decoding before
+YOLOX is the exception to batching across cameras: the shipped YOLOX ONNX graphs have batch size 1 baked
+into their reshape nodes (changing the batch dimension of the input makes the first reshape fail), so the YOLOX
+box source makes one model call per frame. Its image resizing moves to the decode threads and all its model calls
+are made by the single inference thread, in the order the frames arrive. A batched YOLOX needs a re-exported
+model.
+
+The hand pass has the same limit: the hand detector (RTMDet-nano) has batch size 1 and runs per hand crop; the
+hand pose model takes any batch and runs once for all detected hands of the batch.
+
+Decoding is single-threaded per video on purpose: closing a container with threaded decoding before
 the end of the file can hang in FFmpeg (`frame_source.py`). Parallelism comes from decoding several
 cameras at once, not from threaded decoding of one; hardware decoding is an option to measure.
 
@@ -199,10 +219,77 @@ What this says about the hypotheses above:
 - **The hand pass doubles the RTMPose mask route** (918 s against 437 s): the hand model and a second decode
   of the clip. Inside the frame loop the second decode disappears (136 s); the hand model remains
   (349 s, 38% of the route) and is a candidate for batching.
-- **Unexplained:** RTMPose inference is twice as expensive per crop in the segmentation route (11.5-11.9 ms)
+- **Unexplained, now testable:** RTMPose inference is twice as expensive per crop in the segmentation route (11.5-11.9 ms)
   as in the YOLOX route (5.7 ms) for the same model, device and options. A stand-alone loop of the estimator
-  with `cv2.VideoCapture` reads and a Qt core application gives 6.8 ms per crop, so neither explains it;
-  the cause is not known and is left for the unified loop to remove or reveal.
+  with `cv2.VideoCapture` reads and a Qt core application gives 6.8 ms per crop, so neither explains it.
+  Code reading finds no difference in what the two routes ask of the model (the same estimator, the same crop
+  preparation, the same device selection); what differs is what runs around it. In the segmentation route the
+  GPU stays idle while the CPU decodes and resizes masks and reads PNGs (149 s of the 437 s), and the OpenCV
+  worker threads of those steps share the cores with the ONNX Runtime threads. Two causes fit the profile and
+  nothing else in it: the GPU clocking down during its idle gaps (a short burst of kernels then runs at a lower
+  clock), and CPU threads of OpenCV and ONNX Runtime competing. The unified loop removes both structural
+  differences: both routes now call the estimator with the same batched pattern, and the CPU-side work of the
+  mask source runs on the decode threads, overlapped with the model. Reading the `inference` ms per crop of the
+  "YOLOX + RTMPose-133" and "Masks + RTMPose-133" rows of the table above settles it: equal means the loop
+  removed the gap; unequal with a lower GPU clock in the mask route (`nvidia-smi --query-gpu=clocks.sm -l 1`
+  beside the run) means clock-down, unequal with equal clocks means thread competition, to be checked by
+  `cv2.setNumThreads(1)` in the mask source.
+
+### Decode producers: threads or processes
+
+`python/tools/prototypes/decode_soak.py` opens the five videos of the profiling clip at once, decodes random
+windows of 10 s in each and closes them, over and over, in one mode, with a watchdog that counts a step (open
+until the first frame, decode, close) that makes no progress for 60 s as a hang. In process mode the reader's own
+stall timeout (60 s without a frame) kills the child, which is counted as a recovered stall; a hung decode
+thread cannot be killed, so it is abandoned and counted as a leaked thread.
+
+| Run | Mode | Length | Windows | Frames/s (all videos) | Hangs open / decode / close | Recovered stalls | Errors |
+|---|---|---|---|---|---|---|---|
+| Smoke test, 2 s windows | thread | 38 s | 83 | 178 | 0 / 0 / 0 | - | 0 |
+| Smoke test, 2 s windows | process | 34 s | 62 | 154 | 0 / 0 / 0 | 0 | 0 |
+| Soak, 10 s windows | thread | 30 min | pending (operator) | | | - | |
+| Soak, 10 s windows | process | 30 min | pending (operator) | | | | |
+
+Default: **threads** until the soak run says otherwise. Neither mode hung in the smoke test, threads decode
+about 15% faster in it (the process mode copies each 4K frame out of shared memory), and threads are what the
+loop was measured with. A hang in the soak run's thread mode, or any leaked thread, moves the default to
+processes (`--decode process`, `DetectionPipeline(decode_mode="process")`); the one constant to change is
+`DEFAULT_DECODE_MODE` in `pipeline.py`.
+
+### Smoke test of the unified loop
+
+One second of two captures of the real-session copy used for the migration check (not the profiling clip: four
+cameras, 4K and FHD, 120 fps; 484 camera-frames), SOMA-77 with the flip test, `onnxruntime-gpu`, RTX 4080 SUPER,
+the machine in ordinary use (browser, desktop; not the quiet machine of the measurements above), decode on threads.
+The stage times are summed over the threads of the loop.
+
+| Route | wall s | decode (sum of 4 threads) | box source | crop + preprocess | inference | heatmap decode + gate | preview encode | GPU % mean (range) | GPU memory peak above idle |
+|---|---|---|---|---|---|---|---|---|---|
+| YOLOX + SOMA-77, 374 persons | 21.4 | 21.8 | 12.3 | 0.4 | 8.4 (22.6 ms per person) | 0.3 | 0.1 | 74 (65-93) | 6.4 GB |
+| Masks + SOMA-77, 480 persons | 13.4 | 22.0 | 3.5 | 0.9 | 11.6 (24.2 ms per person) | 0.5 | 0.1 | 83 (76-94) | 5.4 GB |
+
+Reading: the model costs 11-12 ms per crop (flip included), as in the single-person prototype; with masks the
+inference thread is the bound and the GPU is busy 83% of the time on average over a 13 s run that includes loading
+the model, so the 85% criterion is within reach on the clip; with YOLOX the serial batch-1 YOLOX model calls
+(about 12 ms per frame on the inference thread) take a share of the inference thread and the GPU is waiting for
+them, which a re-exported batched YOLOX would remove. Peak GPU memory is YOLOX-x, ViT-H with 16-crop batches
+and the CUDA context together; the decode threads hold no GPU memory.
+
+### Results of the unified loop
+
+Same material, hardware and commands as above, run on the finished loop (`POSETRAK_PROFILE_DETECTION=<json>`
+set; the loop's stage times are summed over its threads, so they add up to more than the wall time when the
+stages overlap, and "outside stages" is then not meaningful). Pending the operator's measurement on a quiet
+machine; the commands are in the stage 3 report.
+
+| Route | wall s | decode | box source | crop + preprocess | inference | heatmap decode + gate | hand pass | preview encode | db write | GPU % |
+|---|---|---|---|---|---|---|---|---|---|---|
+| YOLOX + SOMA-77, all three persons | pending | | | | | | - | | | |
+| Masks + SOMA-77, all three persons | pending | | | | | | - | | | |
+| Run boxes + SOMA-77 (boxes of the YOLOX run) | pending | | | | | | - | | | |
+| YOLOX + RTMPose-133 | pending | | | | | | - | | | |
+| Masks + RTMPose-133, no hand pass | pending | | | | | | - | | | |
+| Masks + RTMPose-133, hand pass | pending | | | | | | | | | |
 
 ## 4. Model weights and licence
 
@@ -240,9 +327,19 @@ What follows for posetrak:
 - The weights are downloaded on first use from the Hugging Face repository into the user's model
   cache, the way RTMPose checkpoints already are, after the user has been shown both licence texts
   and accepted them. The accepted licence version is stored with the downloaded file.
+  Implementation (`posetrak/detection/model_weights.py`): the model directory is `~/.posetrak/models`
+  (`POSETRAK_MODEL_DIR`), the files are `gem-x/onnx/vitpose.onnx` and its `.data` file (about 3.4 GB), fetched with
+  `huggingface_hub`. The two texts are fetched from the vendors' published pages at the time of acceptance; a text
+  that cannot be fetched cannot be shown, so it cannot be accepted and the run falls back to RTMPose. The "version"
+  of an accepted licence is the SHA-256 of the text that was shown, stored in `licence-acceptance.json` beside the
+  weights with the notice lines; the weights are not used without that record. `POSETRAK_SOMA77_MODEL` names an
+  `onnx/vitpose.onnx` the user licensed on their own and bypasses download and record. The acceptance is asked
+  in the detection dialogs and the segmentation panel (a dialog with a tab per licence and a progress dialog for
+  the download), and by `detect run` (the texts in a pager and a confirmation, or `--accept-licences`).
 - The installer does not bundle the weights; bundling would require the notice file and both
   agreements in the installer, and waits for the answer on the DINOv3 terms.
-- The about box and the user documentation carry the NVIDIA notice line and "Built with DINOv3".
+- The about box (Help, About PoseTrak) and the user documentation (`docs/user-guide/pose-models.md`) carry the
+  NVIDIA notice line and "Built with DINOv3".
 - SOMA-77 is the recommended model: the detection dialogs and `detect run` preselect it and offer
   the download with the licences. A user who declines the licences, or has no weights, gets
   RTMPose-133 (with ViTPose where configured), and the pipeline says why. Both stay selectable.
@@ -296,3 +393,12 @@ DINOv3 License Agreement at the versions read when the draft was written.
   (RTMPose source run plus `soma77_extract.py`) on the same clip.
 - Keypoints of the native SOMA run equal those of the prototype on the same boxes (same options)
   to within 0.5 px, apart from the documented decode change of half a cell.
+
+### Status of the acceptance criteria
+
+- One `detect run` makes a SOMA-77 run from YOLOX boxes (default), from masks (`--segmentation`) and from an
+  existing run (`--from-run`), each without a prior RTMPose pass: built and covered by unit tests with fake models;
+  the full-size runs are in the operator's measurement.
+- GPU utilisation of at least 85% on the profiling clip, and the throughput of at least twice the prototype
+  route's: to be measured (the table above).
+- Parity with the prototype: see the status document.

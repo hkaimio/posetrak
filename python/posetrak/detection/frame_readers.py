@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import multiprocessing
 import queue
+import time
 import traceback
 from collections.abc import Callable, Iterator
 from multiprocessing import shared_memory
@@ -34,6 +35,13 @@ FrameReader = Callable[[str, int, int], Iterator[tuple[int, np.ndarray]]]
 PROCESS_SLOTS = 3
 #: Seconds the loop waits for the child before it checks that the child is alive.
 _POLL_S = 1.0
+#: Seconds without a frame from a live child after which it is killed and the reader raises: a decoder that hangs
+#: on open, decode or close is the failure the process mode exists to survive.
+STALL_TIMEOUT_S = 60.0
+
+
+class DecodeStalled(TimeoutError):
+    """The decode process produced nothing for STALL_TIMEOUT_S seconds and was killed."""
 
 
 def thread_reader(path: str, first_frame: int, last_frame: int) -> Iterator[tuple[int, np.ndarray]]:
@@ -77,12 +85,16 @@ def process_reader(path: str, first_frame: int, last_frame: int) -> Iterator[tup
     shape = None
 
     def receive():
+        waited_since = time.monotonic()
         while True:
             try:
                 return ready.get(timeout=_POLL_S)
             except queue.Empty:
                 if not child.is_alive():
                     raise RuntimeError(f"decode process for {path} died (exit code {child.exitcode})") from None
+                if time.monotonic() - waited_since > STALL_TIMEOUT_S:
+                    child.kill()
+                    raise DecodeStalled(f"decode process for {path} gave no frame for {STALL_TIMEOUT_S:.0f} s") from None
 
     try:
         while True:

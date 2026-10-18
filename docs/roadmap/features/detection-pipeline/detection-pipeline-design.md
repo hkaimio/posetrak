@@ -219,7 +219,7 @@ What this says about the hypotheses above:
 - **The hand pass doubles the RTMPose mask route** (918 s against 437 s): the hand model and a second decode
   of the clip. Inside the frame loop the second decode disappears (136 s); the hand model remains
   (349 s, 38% of the route) and is a candidate for batching.
-- **Unexplained, now testable:** RTMPose inference is twice as expensive per crop in the segmentation route (11.5-11.9 ms)
+- **Explained by the unified loop's measurement (see its results below):** RTMPose inference is twice as expensive per crop in the segmentation route (11.5-11.9 ms)
   as in the YOLOX route (5.7 ms) for the same model, device and options. A stand-alone loop of the estimator
   with `cv2.VideoCapture` reads and a Qt core application gives 6.8 ms per crop, so neither explains it.
   Code reading finds no difference in what the two routes ask of the model (the same estimator, the same crop
@@ -277,19 +277,37 @@ and the CUDA context together; the decode threads hold no GPU memory.
 
 ### Results of the unified loop
 
-Same material, hardware and commands as above, run on the finished loop (`POSETRAK_PROFILE_DETECTION=<json>`
-set; the loop's stage times are summed over its threads, so they add up to more than the wall time when the
-stages overlap, and "outside stages" is then not meaningful). Pending the operator's measurement on a quiet
-machine; the commands are in the stage 3 report.
+Same material, hardware and commands as above (idle machine, work-copy database migrated to session version 66,
+`POSETRAK_PROFILE_DETECTION` set, `nvidia-smi` once a second), run on the finished loop with decode on threads.
+The stage times are summed over the threads of the loop, so they add up to more than the wall time; "outside
+stages" is not meaningful and is left out. GPU memory is the peak above the idle level of the desktop.
 
-| Route | wall s | decode | box source | crop + preprocess | inference | heatmap decode + gate | hand pass | preview encode | db write | GPU % |
-|---|---|---|---|---|---|---|---|---|---|---|
-| YOLOX + SOMA-77, all three persons | pending | | | | | | - | | | |
-| Masks + SOMA-77, all three persons | pending | | | | | | - | | | |
-| Run boxes + SOMA-77 (boxes of the YOLOX run) | pending | | | | | | - | | | |
-| YOLOX + RTMPose-133 | pending | | | | | | - | | | |
-| Masks + RTMPose-133, no hand pass | pending | | | | | | - | | | |
-| Masks + RTMPose-133, hand pass | pending | | | | | | | | | |
+| Route | wall s | decode | box source | crop + preprocess | inference | heatmap decode + gate | hand pass | preview encode | db write | GPU % mean | GPU memory GB |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| YOLOX + SOMA-77, all persons (15,960 crops) | 586 | 211 | 158 | 19 | 392 | 18 | - | 4 | 2 | 79 | 6.5 |
+| Masks + SOMA-77, all persons (17,850 crops) | 506 | 196 | 64 | 28 | 449 | 20 | - | 4 | 2 | 82 | 5.4 |
+| Run boxes + SOMA-77 (boxes of run `b05e51a9`, 17,337 crops) | 484 | 208 | - | 30 | 429 | 19 | - | 4 | 2 | 80 | 5.5 |
+| YOLOX + RTMPose-133 | 311 | 217 | 159 | 31 | 125 | 1 | - | 4 | 2 | 39 | 3.5 |
+| Masks + RTMPose-133, no hand pass | 247 | 209 | 65 | 43 | 202 | 2 | - | 5 | 2 | 31 | 1.3 |
+| Masks + RTMPose-133, hand pass | 677 | 209 | 65 | 99 | 315 | 4 | 253 | 5 | 2 | 29 | 1.9 |
+
+Findings:
+
+- **Throughput.** The masks + SOMA-77 route takes 506 s for the three persons of the clip. The prototype route is
+  1,454 s (source pass 437 s plus 3 x 339 s), so the loop is 2.9 times faster; the criterion of 2 times holds.
+- **GPU use.** 79-82% on the SOMA routes, short of 85%. Inference is 90% of the inference thread's work (about
+  25 ms per person, the flip test included) and decode (196-211 s over four threads, the slowest camera about 60 s)
+  is below the wall time, so the model is the bound and the GPU is idle only where the inference thread does
+  other work: crop preparation (1.2-1.7 ms per crop) and, with YOLOX, the serial model calls (13 ms per frame).
+  Reaching 85% needs that work off the inference thread (crop preparation in the decode threads, a batched YOLOX).
+- **Hand pass.** 677 s against 918 s before (no second decode). The hand model is 253 s (253 ms per batch of hand
+  crops, hand detector per crop).
+- **RTMPose cost gap.** It remains: 7.8 ms per crop in the YOLOX route and 11.3 ms in the mask route (5.7 and
+  11.7 before). The GPU clock explains it: while the model is busy the SM clock averages 2757 MHz in the YOLOX route
+  and 985 MHz in the mask route (1,377 MHz with the hand pass), because in the mask route the GPU is idle
+  between short bursts (31% utilisation) and clocks down. The same model call costs twice as much at the lower
+  clock. It is a property of a lightly loaded GPU, not of the code path; it disappears when the GPU is kept busy,
+  as the SOMA routes do (2745 MHz).
 
 ## 4. Model weights and licence
 

@@ -1657,3 +1657,25 @@ def test_session_v64_to_v65_keys_the_keypoint_manifest_by_observation_source():
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("INSERT INTO pose_sequence_keypoints VALUES ('s1', 'hand_l', 0, 'x', 'hand21')")
     assert get_schema_version(conn) == 65
+
+
+def test_session_v65_to_v66_adds_detection_run_inputs_and_links_prototype_runs():
+    import sqlite3
+
+    from posetrak.db.db import _migrate_session_v65_to_v66
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE detection_runs (id TEXT PRIMARY KEY, config_json TEXT)")
+    conn.executemany("INSERT INTO detection_runs VALUES (?, ?)", [
+        ("src", None),
+        ("proto", '{"source_detection_run": "src", "flip_test": true}'),
+        ("dangling", '{"source_detection_run": "gone"}'),
+        ("marker", '{"dictionary": "DICT_4X4_50"}'),
+        ("broken", "not json"),
+    ])
+    _migrate_session_v65_to_v66(conn)
+    _migrate_session_v65_to_v66(conn)
+    rows = dict(conn.execute("SELECT id, source_detection_run_id FROM detection_runs"))
+    assert rows == {"src": None, "proto": "src", "dangling": None, "marker": None, "broken": None}
+    assert conn.execute("SELECT COUNT(*) FROM detection_runs WHERE seg_quality_run_id IS NOT NULL OR seg_revision IS NOT NULL").fetchone()[0] == 0
+    assert get_schema_version(conn) == 66

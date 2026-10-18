@@ -29,7 +29,7 @@ REGISTRY_SCHEMA_VERSION: Final[int] = 16
 #: Seconds a connection waits for another writer's lock before failing. The C++
 #: tracker's connections use the same value.
 BUSY_TIMEOUT_S: Final[float] = 60.0
-SESSION_SCHEMA_VERSION: Final[int] = 65
+SESSION_SCHEMA_VERSION: Final[int] = 66
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -2063,6 +2063,31 @@ def _migrate_session_v64_to_v65(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v65_to_v66(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 65 to 66.
+
+    v66 adds the run inputs of detection_runs: seg_quality_run_id, seg_revision and
+    source_detection_run_id. They stay NULL for existing runs, except that a run whose
+    config_json names ``source_detection_run`` (the pose-model spike's prototype runs) gets
+    that run in source_detection_run_id when it exists.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(detection_runs)")}
+    for name, decl in (
+        ("seg_quality_run_id", "TEXT REFERENCES seg_quality_runs(id)"),
+        ("seg_revision", "INTEGER"),
+        ("source_detection_run_id", "TEXT REFERENCES detection_runs(id)"),
+    ):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE detection_runs ADD COLUMN {name} {decl}")
+    conn.execute(
+        "UPDATE detection_runs SET source_detection_run_id = json_extract(config_json, '$.source_detection_run')"
+        " WHERE source_detection_run_id IS NULL AND config_json IS NOT NULL AND json_valid(config_json)"
+        " AND json_extract(config_json, '$.source_detection_run') IN (SELECT id FROM detection_runs)"
+    )
+    _set_schema_version(conn, 66)
+    conn.commit()
+
+
 def _migrate_session_v57_to_v58(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 57 to 58.
 
@@ -2417,6 +2442,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 64
     if actual == 64:
         _migrate_session_v64_to_v65(conn)
+        actual = 65
+    if actual == 65:
+        _migrate_session_v65_to_v66(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

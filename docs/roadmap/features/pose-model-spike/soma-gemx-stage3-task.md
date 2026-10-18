@@ -94,6 +94,11 @@ Also:
 
 ## Rules
 
+- **Before the first build in the new worktree**, ask the operator to exclude the worktree directory
+  from F-Secure scanning, and wait until they confirm. F-Secure blocks freshly linked executables
+  (the build then fails with `LNK1104`), and every blocked path has to be unblocked by hand; an
+  exclusion added afterwards does not release them. This applies to the Meson build (C++ and its
+  tests) and to anything else that writes executables or DLLs into the worktree.
 - Never write to a real session or registry database. Every run writes into a copy made outside the
   repository.
 - Agent background tasks are killed after about 20 minutes. The acceptance measurements need a quiet

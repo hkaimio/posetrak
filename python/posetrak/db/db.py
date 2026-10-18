@@ -29,7 +29,7 @@ REGISTRY_SCHEMA_VERSION: Final[int] = 16
 #: Seconds a connection waits for another writer's lock before failing. The C++
 #: tracker's connections use the same value.
 BUSY_TIMEOUT_S: Final[float] = 60.0
-SESSION_SCHEMA_VERSION: Final[int] = 64
+SESSION_SCHEMA_VERSION: Final[int] = 65
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -2047,6 +2047,22 @@ def _migrate_session_v63_to_v64(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v64_to_v65(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 64 to 65.
+
+    v65 adds pose_sequence_keypoints.obs_source and makes it part of the primary key, so a
+    sequence can name the slots of each of its observation sources (a SOMA body blob and the
+    hand21 blobs of refined hands). Existing rows get 'body'. See
+    030_pose_sequence_keypoints_obs_source.sql.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(pose_sequence_keypoints)")}
+    if "obs_source" not in columns:
+        sql = (_DB_DIR / "migrations" / "030_pose_sequence_keypoints_obs_source.sql").read_text(encoding="utf-8")
+        conn.executescript(sql)
+    _set_schema_version(conn, 65)
+    conn.commit()
+
+
 def _migrate_session_v57_to_v58(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 57 to 58.
 
@@ -2398,6 +2414,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 63
     if actual == 63:
         _migrate_session_v63_to_v64(conn)
+        actual = 64
+    if actual == 64:
+        _migrate_session_v64_to_v65(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

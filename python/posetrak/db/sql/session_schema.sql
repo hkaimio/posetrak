@@ -319,17 +319,27 @@ CREATE TABLE IF NOT EXISTS pose_observation_edits (
 CREATE UNIQUE INDEX IF NOT EXISTS pose_observation_edits_unique
     ON pose_observation_edits (sequence_id, camera_instance_id, video_frame);
 
--- Keypoint-slot manifest (marker-based-mocap design doc §4.3; the
--- extensibility seam sketched in docs/data-model-and-storage.md §3). A
--- sequence with no rows here keeps today's implied-by-pose_model layout;
--- a sequence with rows (marker-based-mocap object sequences) declares its
--- own per-slot name/source, e.g. "hilt:c0" / "aruco".
+-- Keypoint manifest: names the slots of the keypoint blobs of one pose_observation_sequences row, per observation
+-- source. Written by finalisation for every new sequence (a body pose model's keypoints, the hand21 keypoints of each
+-- refined hand source, an object's marker corners). The reader binds a slot to the skeleton marker whose landmark
+-- equals the row's name. A source of a sequence without rows here has the COCO-133 layout implied by
+-- pose_observation_sequences.pose_model (every sequence finalised before this table was filled).
 CREATE TABLE IF NOT EXISTS pose_sequence_keypoints (
+    -- the sequence the slot belongs to: pose_observation_sequences.id
     sequence_id   TEXT NOT NULL REFERENCES pose_observation_sequences(id),
+    -- the pose_observations.source whose kp_blob the row indexes: 'body', 'hand_l' or 'hand_r' (the '.refined' variant
+    -- of a hand source uses its plain source's rows). 'body' also stands for the primary row of a sequence that has no
+    -- body, such as the 'markers' row of an object sequence.
+    obs_source    TEXT NOT NULL DEFAULT 'body',
+    -- slot (0-based) in that kp_blob, an array of float32 (x, y, confidence)
     keypoint_idx  INTEGER NOT NULL,
+    -- landmark the slot is matched against skeleton Marker.landmark with: '<model>:<keypoint>' ('soma77:LeftHand',
+    -- 'coco133:left_elbow', 'hand21:left_index_1'), or '<marker>:c<0-3>' for a marker corner. A name without a model
+    -- prefix (older SOMA sequences) also matches the landmark '<source>:<name>'.
     name          TEXT NOT NULL,
+    -- model or detector the slot comes from: 'soma77', 'coco133', 'hand21' or 'aruco'
     source        TEXT NOT NULL,
-    PRIMARY KEY (sequence_id, keypoint_idx)
+    PRIMARY KEY (sequence_id, obs_source, keypoint_idx)
 );
 
 -- A single tracker execution record: one row per tracker execution, written by posetrak-tracker when it creates the run and updated when it ends.

@@ -32,19 +32,34 @@ import numpy as np
 BODY_SOURCE = "body"
 _REFINED_SUFFIX = ".refined"
 
-# Keep in sync with posetrak.detection.hand_refinement's _HAND_BASE_IDX /
-# _HAND_N_KP (hand21 keypoints are written at COCO-133 offset 91 for the left
-# hand, 112 for the right hand). Duplicated rather than imported so this
-# low-level db module doesn't depend on the detection pipeline package.
+# Keep in sync with posetrak.detection.pose_models (COCO133_HAND_BASE, HAND21_NAMES) and the C++ session
+# loader. Duplicated rather than imported so this low-level db module doesn't depend on the detection
+# pipeline package.
 #
 # Maps a *base* source name (any '.refined' suffix already stripped) to its
-# (start_index, count) placement in the merged array. 'body' isn't listed
-# here — it's the base layer that establishes the merged array's width,
-# handled separately below; only overlay sources place into a sub-range of it.
+# (start_index, count) placement in the merged array of a COCO-133-wide body row, whose hand slots the
+# hand rows overwrite. 'body' isn't listed here — it's the base layer that establishes the merged
+# array's width, handled separately below; only overlay sources place into a sub-range of it.
 _SOURCE_PLACEMENT = {
     "hand_l": (91, 21),
     "hand_r": (112, 21),
 }
+_COCO133_WIDTH = 133
+
+
+def _placement(base: str, body_width: int, primary_source: str) -> tuple[int, int] | None:
+    """(start, count) of overlay source *base* in the merged array of a *body_width*-wide primary row.
+
+    A COCO-133-wide row holds the hand slots, which the overlay overwrites. A narrower person body row
+    (SOMA-77) has none: the left hand is appended after it, and the right hand after the left. Other
+    narrow primary rows (object markers) take no overlay.
+    """
+    start, count = _SOURCE_PLACEMENT[base]
+    if body_width >= _COCO133_WIDTH:
+        return start, count
+    if primary_source != BODY_SOURCE:
+        return None
+    return body_width + (count if base == "hand_r" else 0), count
 
 
 def _split_source(source: str) -> tuple[str, bool]:
@@ -114,10 +129,13 @@ def merge_observation_sources(
         for base, is_refined, kp in overlay_rows:
             if is_refined != pass_is_refined:
                 continue
-            start, count = _SOURCE_PLACEMENT[base]
-            n = min(count, kp.shape[0], merged.shape[0] - start)
-            if n <= 0:
+            placement = _placement(base, body.shape[0], primary_source)
+            if placement is None:
                 continue
+            start, count = placement
+            n = min(count, kp.shape[0])
+            if start + n > merged.shape[0]:
+                merged = np.concatenate([merged, np.zeros((start + n - merged.shape[0], 3), dtype=merged.dtype)])
             merged[start:start + n] = kp[:n]
 
     return merged
@@ -157,11 +175,13 @@ def refined_indices(rows: list[tuple[str, np.ndarray]]) -> frozenset[int]:
     changing that one's return shape.
     """
     refined: set[int] = set()
+    body_width = next((kp.shape[0] for source, kp in rows if source == BODY_SOURCE), _COCO133_WIDTH)
     for source, kp in rows:
         base, is_refined = _split_source(source)
         if not is_refined or base not in _SOURCE_PLACEMENT:
             continue
-        start, count = _SOURCE_PLACEMENT[base]
+        placement = _placement(base, body_width, BODY_SOURCE)
+        start, count = placement
         n = min(count, kp.shape[0])
         refined.update(range(start, start + n))
     return frozenset(refined)

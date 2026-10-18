@@ -32,6 +32,7 @@ import numpy as np
 
 from posetrak.detection.frame_source import iter_frames
 from posetrak.detection.pipeline import CameraInfo
+from posetrak.detection.pose_models import COCO133_HAND_BASE
 
 _log = logging.getLogger(__name__)
 
@@ -71,10 +72,9 @@ _HAND_CONF_SCALE = 5.0
 _N_KP_133 = 133
 _WRIST_IDX = {"left": 9, "right": 10}
 _ELBOW_IDX = {"left": 7, "right": 8}
-# Canonical source of truth for the hand21 -> COCO-133 index mapping;
-# posetrak.db.observation_merge and the C++ session loader reference these
-# values (91/112/21) in their own comments rather than importing this module.
-_HAND_BASE_IDX = {"left": 91, "right": 112}
+# The hand21 -> COCO-133 index mapping lives in pose_models; posetrak.db.observation_merge and the C++ session
+# loader repeat the values (91/112/21) for sequences that have no keypoint manifest.
+_HAND_BASE_IDX = COCO133_HAND_BASE
 _HAND_N_KP = 21
 _REGION_TYPE = {"left": "hand_l", "right": "hand_r"}
 

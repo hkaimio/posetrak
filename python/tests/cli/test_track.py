@@ -239,6 +239,26 @@ def _seed_run_prerequisites(db_path: Path) -> tuple[str, str]:
 
 class TestTrackRun:
     @patch("posetrak.cli.track.run_tracker")
+    def test_run_names_the_missing_pose_model(self, mock_run, seeded_session_db_path: Path, tmp_path: Path) -> None:
+        from posetrak.detection.pose_models import SOMA77
+        from posetrak.skeleton.compose import compose_default
+
+        seq_id, skel_id = _seed_run_prerequisites(seeded_session_db_path)
+        conn = sqlite3.connect(str(seeded_session_db_path))
+        conn.execute("UPDATE skeletons SET yaml_content = ? WHERE id = ?",
+                     (compose_default("male", ["coco133", "hand21"]), skel_id))
+        conn.executemany(
+            "INSERT INTO pose_sequence_keypoints (sequence_id, obs_source, keypoint_idx, name, source)"
+            " VALUES (?, 'body', ?, ?, ?)", [(seq_id, *row) for row in SOMA77.manifest_rows()])
+        conn.commit()
+        conn.close()
+        result = _invoke(["track", "run", "--sequence", seq_id, "--skeleton", skel_id,
+                          "--output-dir", str(tmp_path / "out")], seeded_session_db_path)
+        assert result.exit_code != 0
+        assert "soma77" in result.output and "no marker bound" in result.output
+        mock_run.assert_not_called()
+
+    @patch("posetrak.cli.track.run_tracker")
     def test_run_basic(self, mock_run, seeded_session_db_path: Path, tmp_path: Path) -> None:
         from posetrak.tracker.runner import TrackerResult
         run_id = generate_id()

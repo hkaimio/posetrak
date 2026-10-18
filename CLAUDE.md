@@ -220,10 +220,13 @@ the pose/detection pipeline:
 (marker runs; reflective-dot detection currently rides in an `'aruco'` run, with its
 parameters under `dot_detection` in `config_json`). `detection_runs.capture_object_id` is
 NULL for person runs. `tracking_run_persons.capture_object_id` is set when a subject of a
-tracking run is an object; `person_id` is a subject index either way. A sequence whose
-`kp_blob` is not a person pose model's layout carries a `pose_sequence_keypoints` manifest
-(`keypoint_idx`, `name`, `source`); a sequence with no manifest rows keeps the layout
-implied by `pose_model`. `SessionReader` matches manifest `name` against `Marker::landmark`.
+tracking run is an object; `person_id` is a subject index either way. Every new sequence
+carries a `pose_sequence_keypoints` manifest per observation source (`obs_source`, `keypoint_idx`,
+`name` = model-qualified landmark such as `soma77:LeftHand`, `source`; the pose models are in
+`posetrak/detection/pose_models.py`); a source with no manifest rows (older sequences) keeps the
+COCO-133 layout implied by `pose_model`. `SessionReader` binds a source by its own manifest only,
+matching manifest `name` against `Marker::landmark`. Default skeletons are composed from layers
+(`posetrak skeleton compose`, `python -m posetrak.skeleton.compose` regenerates them).
 See `docs/data-model-and-storage.md` §3 and
 `docs/roadmap/features/marker-based-mocap/productization-architecture-and-plan.md`.
 

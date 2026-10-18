@@ -219,3 +219,23 @@ def test_infer_body_width_with_custom_primary_source():
     rows_by_frame = [[("markers", markers)]]
     assert infer_body_width(rows_by_frame, primary_source="markers") == 8
     assert infer_body_width(rows_by_frame, primary_source="body") is None
+
+
+def test_hand_rows_are_appended_after_a_narrow_person_body_row():
+    body = np.full((77, 3), 1.0, dtype=np.float32)
+    left = np.full((21, 3), 2.0, dtype=np.float32)
+    right = np.full((21, 3), 3.0, dtype=np.float32)
+    merged = merge_observation_sources([("body", body), ("hand_r", right), ("hand_l", left)])
+    assert merged.shape == (77 + 42, 3)
+    assert np.all(merged[:77] == 1.0) and np.all(merged[77:98] == 2.0) and np.all(merged[98:] == 3.0)
+    # the right hand alone still has its own place after the left hand's
+    only_right = merge_observation_sources([("body", body), ("hand_r", right)])
+    assert only_right.shape == (119, 3) and np.all(only_right[98:] == 3.0) and np.all(only_right[77:98] == 0.0)
+    assert refined_indices([("body", body), ("hand_l.refined", left)]) == frozenset(range(77, 98))
+
+
+def test_an_object_row_takes_no_hand_overlay():
+    markers = np.full((4, 3), 1.0, dtype=np.float32)
+    merged = merge_observation_sources([("markers", markers), ("hand_l", np.ones((21, 3), np.float32))],
+                                       primary_source="markers")
+    assert merged.shape == (4, 3)

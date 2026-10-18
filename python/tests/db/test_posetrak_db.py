@@ -1634,3 +1634,26 @@ def test_session_v63_to_v64_marks_existing_runs_complete_and_is_repeatable():
 def test_new_session_has_run_status_columns(session_db: sqlite3.Connection) -> None:
     columns = [r[1] for r in session_db.execute("PRAGMA table_info(tracking_runs)")]
     assert {"status", "completed_at", "failure"} <= set(columns)
+
+
+def test_session_v64_to_v65_keys_the_keypoint_manifest_by_observation_source():
+    import sqlite3
+
+    from posetrak.db.db import _migrate_session_v64_to_v65
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE pose_observation_sequences (id TEXT PRIMARY KEY)")
+    conn.execute(
+        "CREATE TABLE pose_sequence_keypoints (sequence_id TEXT NOT NULL REFERENCES pose_observation_sequences(id),"
+        " keypoint_idx INTEGER NOT NULL, name TEXT NOT NULL, source TEXT NOT NULL,"
+        " PRIMARY KEY (sequence_id, keypoint_idx))")
+    conn.execute("INSERT INTO pose_observation_sequences (id) VALUES ('s1')")
+    conn.executemany("INSERT INTO pose_sequence_keypoints VALUES ('s1', ?, ?, 'soma77')", [(0, "Hips"), (1, "Spine1")])
+    _migrate_session_v64_to_v65(conn)
+    _migrate_session_v64_to_v65(conn)
+    assert conn.execute("SELECT obs_source, keypoint_idx, name, source FROM pose_sequence_keypoints ORDER BY 2").fetchall() == [
+        ("body", 0, "Hips", "soma77"), ("body", 1, "Spine1", "soma77")]
+    conn.execute("INSERT INTO pose_sequence_keypoints VALUES ('s1', 'hand_l', 0, 'hand21:left_hand_root', 'hand21')")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO pose_sequence_keypoints VALUES ('s1', 'hand_l', 0, 'x', 'hand21')")
+    assert get_schema_version(conn) == 65

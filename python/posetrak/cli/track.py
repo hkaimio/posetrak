@@ -20,6 +20,7 @@ from posetrak.db.manage_config import resolve_default_tracker_config
 from posetrak.export.bvh import export_bvh
 from posetrak.export.gltf import export_gltf
 from posetrak.export.usd import export_usd
+from posetrak.skeleton.binding import missing_pose_model_message, missing_pose_models
 from posetrak.tracker.runner import (
     MultiPersonResult,
     PersonRunSpec,
@@ -318,6 +319,10 @@ def cmd_run(
     ).fetchone()
     if seq_row is None:
         fail(f"Sequence '{sequence_id}' not found.")
+    models = missing_pose_models(
+        conn, sequence_id, conn.execute("SELECT yaml_content FROM skeletons WHERE id = ?", (skeleton_id,)).fetchone()[0])
+    if models:
+        fail(missing_pose_model_message(models))
 
     # Cameras (for velocity-cameras resolution)
     seq_cameras: list[str] = []
@@ -530,6 +535,11 @@ def resolve_trial_persons(
                 "<config> <id> directly to pick one."
             )
         seq_row = seq_rows[0]
+        skeleton_row = conn.execute(
+            "SELECT yaml_content FROM skeletons WHERE id = ?", (person_row["default_skeleton_id"],)).fetchone()
+        models = missing_pose_models(conn, seq_row["seq_id"], skeleton_row[0]) if skeleton_row else None
+        if models:
+            raise ValueError(f"{name!r}: {missing_pose_model_message(models)}")
         resolved.append(ResolvedPerson(
             name=name,
             sequence_id=seq_row["seq_id"],

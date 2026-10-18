@@ -328,28 +328,39 @@ project root; tools that read paths must resolve against the registry's `project
 when the path is not absolute.
 
 ### Pose blob extensibility: the keypoint manifest
-`PoseObservation.kp_blob` from a person's pose detector has its keypoint count and
-ordering implied by the model name (`pose_model`).  A sequence whose observations come
-from another source carries a per-sequence manifest instead, so the blob is indexed by
-`keypoint_idx` rather than by model convention:
+A `PoseObservation.kp_blob` has its keypoint count and ordering named by a per-source
+manifest, so the blob is indexed by `keypoint_idx` and the name of the slot rather than by
+model convention.  The manifest is kept per observation source of the sequence (`body`,
+`hand_l`, `hand_r`), because the rows of one sequence come from different keypoint
+vocabularies:
 
 ```sql
 CREATE TABLE pose_sequence_keypoints (
     sequence_id   TEXT NOT NULL REFERENCES pose_observation_sequences(id),
+    obs_source    TEXT NOT NULL DEFAULT 'body',  -- pose_observations.source the row indexes
     keypoint_idx  INTEGER NOT NULL,
-    name          TEXT NOT NULL,   -- landmark name: "<marker name>:c<corner 0-3>"
-    source        TEXT NOT NULL,   -- where the slot comes from, e.g. "aruco"
-    PRIMARY KEY (sequence_id, keypoint_idx)
+    name          TEXT NOT NULL,   -- landmark: "<model>:<keypoint>" or "<marker name>:c<corner 0-3>"
+    source        TEXT NOT NULL,   -- model or detector: "soma77", "coco133", "hand21", "aruco"
+    PRIMARY KEY (sequence_id, obs_source, keypoint_idx)
 );
 ```
 
-A sequence with no manifest rows -- every person sequence -- keeps the layout implied by
-`pose_model`, so nothing existing changes.  Today the manifest is written for object
-sequences (`finalise_object_to_db`, `source = 'aruco'`).  The C++ `SessionReader` matches
-each row's `name` against `Marker::landmark` to bind a blob slot to a skeleton marker,
-and sizes the per-frame blob as `max(keypoint_idx) + 1` rather than by how many slots
-happened to match, so a skeleton that uses only a subset of the slots still reads the
-blob correctly.
+Finalisation writes the manifest of every new sequence: the body blob named by its pose
+model (`soma77:LeftForeArm`, `coco133:left_elbow`; `posetrak.detection.pose_models` is the
+registry), each refined-hand source by the hand21 names of its side (`hand21:left_index_1`),
+and an object sequence by its marker corners (`source = 'aruco'`).  A source with no
+manifest rows -- every sequence finalised before the manifest was written for all sequences
+-- keeps the COCO-133 layout implied by `pose_model`, with the hand rows at COCO indices 91
+and 112.  The C++ `SessionReader` binds each slot of a source with manifest rows to the
+skeleton marker whose `Marker::landmark` equals the row's `name` (a name without a model
+prefix also matches `<source>:<name>`), and only those; the implied COCO map is used only
+for a source without rows.  A COCO-133 or hand21 slot is also bound to the marker whose
+`openpose_keypoint` is its COCO-133 index, so skeletons with `openpose_keypoint` markers and
+no landmarks keep working.  The per-frame blob is sized as `max(keypoint_idx) + 1` rather
+than by how many slots happened to match.  A skeleton that binds no slot of a manifest
+fails the run with a message naming the pose model.  Hand rows are laid over the COCO hand
+slots of a COCO-133-wide body row (`posetrak.db.observation_merge`); after a narrower body
+row (SOMA-77, 77 slots) the left hand is appended and then the right hand.
 
 ### Capture objects and marker detection runs
 A tracked rigid prop is a `capture_objects` row (`capture_id`, `name`,
@@ -977,8 +988,8 @@ inter-tool exchange if a specific consumer requires it.
 - **obs_blob compression**: decide between page-level `zstd_vfs` (transparent, no code
   changes) vs. per-blob application-layer compression (more portable).
 - **Pose blob extensibility**: resolved.  The `pose_sequence_keypoints` manifest (§3) is
-  implemented and used by object sequences; person sequences without manifest rows keep
-  the layout implied by `pose_model`.
+  implemented per observation source; sources without manifest rows keep the layout implied
+  by `pose_model`.
 
 ---
 

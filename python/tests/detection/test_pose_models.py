@@ -50,3 +50,13 @@ def test_manifest_rows_and_stored_model_names():
 def test_viewer_models_use_the_registry_names():
     assert COCO133.names == pm.COCO133_NAMES and SOMA77.names == pm.SOMA77_NAMES
     assert get_pose_model("soma77-dinov3-vitpose") is SOMA77
+
+
+def test_trunk_and_body_keypoints_are_registered_for_the_body_models():
+    assert [pm.COCO133.keypoint_names[i] for i in pm.COCO133.trunk_indices()] == [
+        "left_shoulder", "right_shoulder", "left_hip", "right_hip"]
+    assert pm.COCO133.body_indices() == list(range(17))
+    assert [pm.SOMA77.keypoint_names[i] for i in pm.SOMA77.trunk_indices()] == [
+        "Hips", "Spine1", "Spine2", "Neck1", "LeftArm", "RightArm"]
+    assert set(pm.SOMA77.trunk) <= set(pm.SOMA77.body)
+    assert not pm.HAND21.trunk and not pm.HAND21.body

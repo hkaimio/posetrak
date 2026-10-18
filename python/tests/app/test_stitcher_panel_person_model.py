@@ -84,3 +84,30 @@ def test_populate_known_persons_syncs_to_stitcher(qapp, session_db) -> None:
 
     panel = StitcherPanel(session_db, run_id)
     assert "Alice" in panel._stitcher._persons
+
+
+def test_stitcher_lists_the_stretches_the_assignment_report_asks_to_check(qapp, tmp_path) -> None:
+    import json
+
+    from app.pose.stitcher_panel import StitcherPanel
+    from posetrak.detection.assign_run import report_path
+
+    conn = create_session(tmp_path / "session.db")
+    run_id = _seed_detection_run(conn)
+    report_path(tmp_path / "session.db", run_id).write_text(json.dumps({"checks": [
+        {"kind": "contact", "t0": 5.0, "t1": 6.0, "persons": ["Alice", "Bob"], "frames": []},
+        {"kind": "handover", "t0": 1.0, "t1": 2.0, "persons": ["Alice"], "frames": []}]}))
+
+    panel = StitcherPanel(conn, run_id)
+
+    assert [panel._check_combo.itemText(i) for i in range(1, 3)] == [
+        "    1.00-2.00 s  handover  Alice", "    5.00-6.00 s  contact  Alice, Bob"]
+    conn.close()
+
+
+def test_stitcher_without_a_report_has_no_check_list(qapp, session_db) -> None:
+    from app.pose.stitcher_panel import StitcherPanel
+
+    panel = StitcherPanel(session_db, _seed_detection_run(session_db))
+
+    assert panel._check_combo.count() == 0

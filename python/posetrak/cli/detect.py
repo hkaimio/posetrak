@@ -522,6 +522,94 @@ def cmd_import_2d(
 
 
 # ---------------------------------------------------------------------------
+# detect assign
+# ---------------------------------------------------------------------------
+
+
+@detect_group.command("assign")
+@click.argument("run_id")
+@click.option("--persons", type=click.IntRange(min=1), default=None,
+              help="Number of persons in the run. Default: the number of --subjects, else the number of persons "
+                   "seen together for a fifth of the time.")
+@click.option("--subjects", default=None, metavar="NAME[,NAME...]",
+              help="Names of the capture's persons, given in order of first appearance to the persons no existing "
+                   "assignment row names.")
+@click.option("--fill-only", "fill_only", is_flag=True, default=False,
+              help="The run already has assignment rows (from the stitcher): keep every one of them and assign only "
+                   "the boxes they do not cover. The rows also name the persons: one row per person is enough.")
+@click.option("--replace", "replace", is_flag=True, default=False,
+              help="The run already has assignment rows: read them as seeds that name the persons, then replace "
+                   "all of them.")
+@click.option("--finalise", "do_finalise", is_flag=True, default=False,
+              help="Also build the person sequences, as saving the assignments in the stitcher does.")
+@click.option("--dry-run", is_flag=True, default=False, help="Print the report; write nothing.")
+@click.option("--report", "report_path", type=click.Path(dir_okay=False, path_type=Path), default=None,
+              help="Where to write the report for the stitcher (default: next to the session database).")
+@click.pass_context
+def cmd_assign(ctx: click.Context, run_id: str, persons: int | None, subjects: str | None, fill_only: bool,
+               replace: bool, do_finalise: bool, dry_run: bool, report_path: Path | None) -> None:
+    """Assign the track fragments of a detection run to persons from the cameras' geometry.
+
+    The boxes' trunk keypoints are matched across the calibrated cameras into 3D persons that are followed in
+    time, and every box takes the person it projects to. The step writes the same assignment rows as the
+    stitcher, and prints a report: the cameras' agreement (a bad calibration shows there), and the stretches to
+    check, where persons are in contact or the person was carried over a gap by weak cues. The report is also
+    written as JSON, next to the session database, for the stitcher. Where persons touch, segmentation is the
+    better source of identity.
+
+    A run that already has assignment rows is left alone unless --fill-only or --replace says what may happen
+    to them.
+    """
+    from posetrak.detection.assign_run import (
+        AssignError, assign_run, format_report, report_path as default_report_path, save_report, write_assignment,
+    )
+
+    session_path: str | None = ctx.obj.get("session")
+    if session_path is None:
+        fail("--session / POSETRAK_SESSION_DB is required for 'detect assign'.")
+    if fill_only and replace:
+        fail("--fill-only and --replace exclude each other.")
+    try:
+        session = open_session(Path(session_path))
+        full_id = resolve_id_prefix(session, "detection_runs", run_id)
+    except (FileNotFoundError, ValueError) as exc:
+        fail(str(exc))
+    names = [n.strip() for n in subjects.split(",") if n.strip()] if subjects else None
+    if names and persons is not None and persons < len(names):
+        fail(f"--persons {persons} is fewer than the {len(names)} --subjects.")
+    existing = "fill" if fill_only else "replace" if replace else "refuse"
+    try:
+        result = assign_run(session, full_id, persons=persons, subjects=names, existing=existing)
+    except AssignError as exc:
+        fail(str(exc))
+    labels = {r["id"]: r["label"] for r in session.execute(
+        "SELECT cv.id, ci.label FROM capture_videos cv JOIN camera_instances ci ON ci.id = cv.camera_instance_id "
+        "JOIN detection_runs dr ON dr.shot_id = cv.shot_id WHERE dr.id = ?", (full_id,))}
+    click.echo(format_report(result, labels))
+    if dry_run:
+        return
+    write_assignment(session, full_id, result, existing)
+    out = report_path or default_report_path(session_path, full_id)
+    save_report(result, out)
+    click.echo(f"Wrote {len(result.rows)} assignment rows and the report {out}.", err=True)
+    if do_finalise:
+        from app.pose.finalise import TrackAssignment, conf_scale_for_model, finalise_to_db
+
+        run = session.execute("SELECT shot_id, sync_config_id, pose_model FROM detection_runs WHERE id = ?",
+                              (full_id,)).fetchone()
+        rows = [*result.kept, *result.rows]
+        try:
+            finalise_to_db(
+                session=session, detection_run_id=full_id, shot_id=run["shot_id"],
+                sync_config_id=run["sync_config_id"],
+                assignments=[TrackAssignment(r.svid, r.tid, r.person, r.first, r.last) for r in rows],
+                pose_model=run["pose_model"], confidence_scale=conf_scale_for_model(run["pose_model"]))
+        except RuntimeError as exc:
+            fail(str(exc))
+        click.echo("Built the person sequences.", err=True)
+
+
+# ---------------------------------------------------------------------------
 # detect list
 # ---------------------------------------------------------------------------
 

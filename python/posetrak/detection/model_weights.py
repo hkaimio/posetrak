@@ -5,7 +5,7 @@
 """model_weights.py — the GEM-X 2D pose weights: licences, download on first use, location.
 
 The weights of the SOMA-77 model are not part of the repository or the installer; they are governed by the
-NVIDIA Open Model License and, assumed until NVIDIA answers, the DINOv3 License (design:
+NVIDIA Open Model License and the DINOv3 License (design:
 docs/roadmap/features/detection-pipeline/detection-pipeline-design.md, section 4). They are downloaded from the
 ``nvidia/GEM-X`` Hugging Face repository into the model directory after the user has been shown the text of both
 licences and has accepted them. The texts are bundled with posetrak (``posetrak/data/licences``), so showing and

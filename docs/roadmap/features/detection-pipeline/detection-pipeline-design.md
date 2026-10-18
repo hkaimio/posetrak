@@ -229,7 +229,8 @@ What this says about the hypotheses above:
 
 ### Decode producers: threads or processes
 
-`python/tools/prototypes/decode_soak.py` opens the five videos of the profiling clip at once, decodes random
+`python/tools/prototypes/decode_soak.py` takes any set of camera videos (here the five videos of the profiling
+clip), opens them at once, decodes random
 windows of 10 s in each and closes them, over and over, in one mode, with a watchdog that counts a step (open
 until the first frame, decode, close) that makes no progress for 60 s as a hang. In process mode the reader's own
 stall timeout (60 s without a frame) kills the child, which is counted as a recovered stall; a hung decode

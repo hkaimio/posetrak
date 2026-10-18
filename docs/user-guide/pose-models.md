@@ -15,8 +15,7 @@ The first time you choose SOMA-77 (in the detection dialogs, in the segmentation
 needs no internet connection; only the download does):
 
 * the NVIDIA Open Model License Agreement, and
-* the DINOv3 License Agreement (the model's image backbone is DINOv3; until NVIDIA confirms otherwise Posetrak
-  assumes its terms apply).
+* the DINOv3 License Agreement (the model's image backbone is DINOv3).
 
 If you accept both, the weights (about 3.4 GB) are downloaded from the `nvidia/GEM-X` repository on Hugging
 Face into `~/.posetrak/models` (set `POSETRAK_MODEL_DIR` to put them elsewhere) and your acceptance is stored

@@ -107,6 +107,8 @@ class AssignParams:
     # --- report
     # Two persons closer than this are in contact.
     contact_m: float = 0.6
+    # A hand-over with another person closer than this (at either end) puts the whole next track up for checking.
+    handover_risk_m: float = 1.5
     # Boxes this close in time to a contact or a split are listed for checking.
     check_margin_s: float = 0.5
     # A stretch of a fragment labelled by its neighbours alone, longer than this, is listed.

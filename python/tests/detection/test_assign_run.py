@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from posetrak.detection.assign_run import AssignError, assign_run, write_assignment
+from posetrak.detection.assign_run import AssignError, AssignResult, assign_run, format_report, write_assignment
 from tests.detection.synthetic_people import build_session
 
 STARTS = [(-2.0, -0.6), (2.0, 0.6)]
@@ -154,3 +154,14 @@ def test_a_pose_model_without_trunk_keypoints_is_refused(swapped) -> None:
 
     with pytest.raises(AssignError, match="no registered trunk keypoints"):
         assign_run(conn, run_id)
+
+
+def test_the_report_marks_a_camera_that_agrees_much_less_than_the_others() -> None:
+    cameras = {name: {"boxes": 100, "clustered_fraction": fraction, "median_rel_reproj_err": 0.015}
+               for name, fraction in (("a", 0.95), ("b", 0.9), ("c", 0.3))}
+    result = AssignResult([], [], [], [], cameras, [], {})
+
+    lines = format_report(result, {}).splitlines()
+
+    assert [("calibration or sync?" in line) for line in lines if line.startswith("  ") and "boxes" in line] == [
+        False, False, True]

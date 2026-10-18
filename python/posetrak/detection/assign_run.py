@@ -357,9 +357,15 @@ def assign_run(
     for c in kept:
         ts = sorted((t for t in tracks if label.get(t.id) == c), key=lambda t: t.first())
         for a, b in zip(ts, ts[1:]):
-            # the person is carried from one track to the next by weak cues, unless a seed pins both
+            # The person is carried from one track to the next by weak cues, unless a seed pins both. With another
+            # person near at either end, the identity of the whole next track rests on that decision.
             if b.first() > a.last() and not (a.id in anchors and b.id in anchors):
-                checks.append(Check("handover", t0 + a.last() * dt, t0 + b.first() * dt, [name_of[c]]))
+                near = any(
+                    (x := ta.interpolate(track_pos.get(o, {}), i, dt, prm.interp_gap_s)) is not None
+                    and np.linalg.norm(x - y) < prm.handover_risk_m
+                    for o in kept if o != c for i, y in ((a.last(), a.pos[a.last()]), (b.first(), b.pos[b.first()])))
+                checks.append(Check("handover", t0 + a.last() * dt, t0 + (b.last() if near else b.first()) * dt,
+                                    [name_of[c]]))
 
     persons_info = [{"name": name_of[c], "instants": len(track_pos.get(c, ())), "first_s": t0 + min(pos[c]) * dt,
                      "last_s": t0 + max(pos[c]) * dt, "seeded": c < len(seed_names)} for c in kept]
@@ -406,11 +412,15 @@ def format_report(result: AssignResult, cam_label: dict[str, str]) -> str:
                    + (" (named by a seed)" if p["seeded"] else ""))
     out.append("Cameras (clustered: share of boxes that agree with another camera; err: median trunk reprojection "
                "error / box height; a camera far above the others has a calibration or sync problem):")
+    fractions = [c["clustered_fraction"] for c in result.cameras.values()]
+    errors = [c["median_rel_reproj_err"] for c in result.cameras.values() if c["median_rel_reproj_err"] is not None]
     for svid, c in result.cameras.items():
         e = c["median_rel_reproj_err"]
-        label = cam_label.get(svid, svid[:8])
-        out.append(f"  {label}: {c['boxes']} boxes, clustered {c['clustered_fraction']:.0%}"
-                   + (f", err {e:.3f}" if e is not None else ""))
+        # a camera that agrees much less than the others: its calibration or its synchronisation is suspect
+        odd = len(fractions) > 2 and (c["clustered_fraction"] < 0.6 * float(np.median(fractions))
+                                      or (e is not None and e > 1.5 * float(np.median(errors))))
+        out.append(f"  {cam_label.get(svid, svid[:8])}: {c['boxes']} boxes, clustered {c['clustered_fraction']:.0%}"
+                   + (f", err {e:.3f}" if e is not None else "") + ("   <- calibration or sync?" if odd else ""))
     by_kind = Counter(c.kind for c in result.checks)
     out.append("To check: " + (", ".join(f"{n} {k}" for k, n in sorted(by_kind.items())) or "nothing"))
     for c in sorted(result.checks, key=lambda c: c.t0)[:30]:

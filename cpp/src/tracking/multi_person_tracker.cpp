@@ -36,6 +36,27 @@ Eigen::MatrixXd diag_to_covariance_matrix(Eigen::VectorXd const& diag) {
 
 }  // namespace
 
+std::string hand_stage_cost_warning(Skeleton const& skeleton, TrackerConfig const& config,
+                                    bool has_stage_rows) {
+    bool has_child_groups = false;
+    for (auto const& group : skeleton.groups())
+        has_child_groups = has_child_groups || !group.freeflyer_joint.empty();
+    if (!has_child_groups)
+        return {};
+    if (!has_stage_rows) {
+        return "the skeleton has hand groups but the tracker configuration has no "
+               "tracker_config_stages rows, so every hand marker is tracked in one stage; "
+               "this costs several times the time and memory of the hierarchical form "
+               "(parent stage restricted with active_joint_groups)";
+    }
+    if (config.active_joint_groups.empty()) {
+        return "the tracker configuration has hand stages but no active_joint_groups, so the "
+               "parent stage tracks the whole skeleton and the hand stages run in addition; "
+               "set active_joint_groups to the parent group (e.g. [\"main\"]) to restrict it";
+    }
+    return {};
+}
+
 // ---------------------------------------------------------------------------
 // CSV export helpers (moved verbatim from cli/track.cpp)
 // ---------------------------------------------------------------------------
@@ -539,8 +560,13 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
     // tracker_config with any tracker_config_stages rows needs its DB rows kept
     // full-skeleton-width even though *ctx->layout* above may be group-scoped,
     // so a child stage can later merge into DOFs *ctx->layout* doesn't cover.
-    if (!reader.load_tracker_config_stages(full_config_id).empty()) {
+    bool const has_stage_rows = !reader.load_tracker_config_stages(full_config_id).empty();
+    if (has_stage_rows) {
         ctx->full_layout = SkeletonLayout::from_full_skeleton(skeleton_ptr);
+    }
+    if (auto warning = hand_stage_cost_warning(ctx->skeleton, ctx->tracker_config, has_stage_rows);
+        !warning.empty()) {
+        fmt::print(stderr, "Warning: {}\n", warning);
     }
 
     ctx->exporter = std::make_unique<TrackingExporter>(spec.output_dir, ctx->skeleton, *ctx->layout,

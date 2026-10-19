@@ -26,6 +26,7 @@ test_sources = files(
   'test_pinocchio_integration.cpp',
   'test_trajectory_stream.cpp',
   'test_rts_smoother.cpp',
+  'test_hand_stage_warning.cpp',
   'test_relative_observations.cpp',
   'test_triangulation.cpp',
   'test_inverse_kinematics.cpp',

@@ -48,9 +48,10 @@ Built, see
 pose-model independent wrist and elbow input through the pose model registry, the `hand21`
 manifest of refined rows (written at finalisation, binds the default skeleton's hand21 markers for
 COCO-133 and SOMA-77 runs), the pass inside the frame loop, `detect run --refine-hands` for every
-box source. The measurement on the labelled trial found no consistent gain for SOMA runs, so the
-pass is off by default for them (design section 3); the default awaits the operator's visual review
-of rendered hand pose.
+box source. With the default skeleton, whose hand stages carry hand21 markers only, the refined
+hands improved fingers, forearm twist and hand orientation on the labelled trial and had the fewest
+flaws in the rendered comparison, so the pass is on by default for SOMA runs (design section 3).
+The default is provisional until a capture made to measure hand tracking confirms it.
 
 ## Known issues
 

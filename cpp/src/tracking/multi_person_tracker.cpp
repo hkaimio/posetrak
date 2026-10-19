@@ -916,14 +916,14 @@ void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet,
                         ? expand_state_to_full_layout(it->state, *ctx.layout, *ctx.full_layout)
                               .to_error_vector()
                         : it->state.to_error_vector();
-                Eigen::MatrixXd const cov_for_write =
-                    ctx.full_layout && it->covariance.size() > 0
-                        ? diag_to_covariance_matrix(expand_cov_diag_to_full_layout(
-                              it->covariance.diagonal(), *ctx.layout, *ctx.full_layout,
+                Eigen::VectorXd const cov_for_write =
+                    ctx.full_layout && it->covariance_diag.size() > 0
+                        ? expand_cov_diag_to_full_layout(
+                              it->covariance_diag, *ctx.layout, *ctx.full_layout,
                               ctx.tracker_config.init_joint_std * ctx.tracker_config.init_joint_std,
                               ctx.tracker_config.init_velocity_std *
-                                  ctx.tracker_config.init_velocity_std))
-                        : it->covariance;
+                                  ctx.tracker_config.init_velocity_std)
+                        : it->covariance_diag;
                 ctx.result_writer->write_smoothed_frame(step_idx, it->timestamp, state_vec,
                                                         cov_for_write);
             }

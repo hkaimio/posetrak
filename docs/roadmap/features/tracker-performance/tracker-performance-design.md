@@ -60,11 +60,11 @@ one that should be the default.
    restricted to its group only when the run is given the parent's joint groups (`--joint-groups
    main` of the tracker's database mode, `TrackerConfig::active_joint_groups`); without them the
    parent stage tracks the whole skeleton and the hand stages run in addition (section 3). The
-   groups are a command-line option today and are not stored with the configuration or the run.
-   Needed: `tracker_configs.active_joint_groups` so the parent groups are part of the stored
-   configuration; a bundled default tracker configuration with stage rows and `["main"]`; and a
-   check when a run starts that warns when a skeleton with hand groups is tracked with a
-   configuration without stage rows, or with stage rows and an unrestricted parent.
+   groups are stored with the configuration (`tracker_configs.active_joint_groups`, a JSON array;
+   the command line overrides it); `posetrak track run --config` copies the configuration's stage
+   rows; a bundled hierarchical configuration (stage rows and `["main"]`) is the default for
+   skeletons with hand groups; and a run start prints a warning when such a skeleton is tracked
+   single-stage, or hierarchically with an unrestricted parent.
 2. **Do not keep the full smoothed covariance.** The result writer stores only `cov_diag`. If no
    consumer of `SmoothedFrame::covariance` needs more than its diagonal (the hierarchical child
    stages read the smoothed *state* of the parent through `BatchTrajectoryStream`; this has to be
@@ -81,8 +81,8 @@ one that should be the default.
 5. **Lower tracker rate.** `tracker_configs.tracker_fps` exists (120 Hz in the runs measured).
    Measured in section 3: a step at 60 Hz pools two video frames of every camera, so the update
    handles twice the observations and the run is slower, not faster, and moves every failure event.
-   A lower rate would save time only if a step decimated the observations instead of pooling them;
-   not pursued until the options above are measured.
+   A lower rate would save time only if a step decimated the observations instead of pooling them.
+   Dropped as a cost option; `tracker_fps` stays as a configuration value.
 6. **Fewer markers in the main stage.** Dropping 44 of the 48 body-crop finger keypoints from the
    tracked markers (they localise poorly: a median of 0.20 of the hand size against 0.05-0.07 from
    a hand crop) removes most of `m` in a single-stage run and nothing in a hierarchical one, where
@@ -95,7 +95,9 @@ one that should be the default.
    options do not touch.
 8. **Per-person threads outside contact.** `MultiPersonTracker::run()` steps persons sequentially;
    persons are independent outside contact windows (open issue on single-threaded tracking).
-   Near-linear speed-up in the number of persons for most frames.
+   Built (`--serial-persons` turns it off; results are identical). In the three-person trial only
+   23% of the frames have no contact coupling, and the measured gain is within the noise of the
+   machine (section 5), so it is not a cost lever for that trial.
 
 A fixed-lag or windowed smoother also bounds memory, but it changes the estimator and belongs to
 iterative tracking (snapshots, restart over a changed range), which is a separate feature. Options
@@ -273,6 +275,77 @@ far a configuration moves the result, not which side is right.
   nor failed yet.
 - **60 Hz moves every event, in both forms, by 7-148 cm.** Pooling two frames per step changes the result
   everywhere; on cost and on movement alone it has nothing to recommend it.
+
+## 5. Results of the changes
+
+Capture: the four-camera 85.13 s sequence of part a (10,214 steps at 120 Hz, one person) and the
+three-person trial of part b (28.36 s, five cameras, about 10,200 steps in all). Configuration: SOMA-77
+skeleton, parent marker set of 33 markers (`m33`, the 44 body-crop finger markers removed), 120 Hz, RTS
+smoothing, `optbuild/` release build on the development PC, run in database copies by
+`scripts/tracker_baseline.py`; accuracy by `scripts/tracker_score.py`.
+
+**Memory per change** (part a, 40 s slice, peak resident GB; each row adds one change to the rows above it):
+
+| Build | parent `main`, m33 | single-stage, m33 |
+|---|---|---|
+| before | 3.81 | 9.73 |
+| + tracked window only | 3.63 | 9.83 |
+| + cache released after smoothing | 2.71 | 9.39 |
+| + diagonal covariance | 2.20 | 7.95 |
+
+The window change only helps sub-range runs (a 5 s slice of the same run fell from 2.3 to 1.3 GB). A
+compact observation record was not built: observations are not what dominates (a fixed working set of about
+3.6 GB for the single-stage form plus a cache that grows with the steps), and the hierarchical runs are
+below the limit without it. Disk spill was not built for the same reason. The changed build gives the same
+results as the old one on the slice, and threaded and serial three-person runs give identical results.
+
+**Full runs** (wall seconds and peak resident GB; real-time factor = wall time / sequence time):
+
+| Run | Persons x cameras | Before | After | Real-time factor after |
+|---|---|---|---|---|
+| parent `main`, m33, part a | 1 x 4 | 425 s / 7.2 GB | 535 s / 4.3 GB | 6.3 |
+| parent `main`, m33, part b, threaded | 3 x 5 | 528 s / 8.0 GB | 572 s / 6.0 GB | 20.2 (6.7 per person) |
+| parent `main`, m33, part b, serial | 3 x 5 | | 529 s / 6.0 GB | 18.7 (6.2 per person) |
+| single-stage, m33, part a | 1 x 4 | 530 s / 19.4 GB | 531 s / 13.4 GB | 6.2 |
+| single-stage, m33, part b | 3 x 5 | | 649 s / 21.4 GB | 22.9 (7.6 per person) |
+
+The wall times after the changes are 0-26% above those before with code that does no more work: the
+machine was shared and the two sets were run at different times, so wall-time differences below about 25%
+in this table are noise (memory is not affected). The same trial with all 120 markers took 2,385 to 2,648 s
+single-stage, 84-93 times real time (28-31 per person).
+
+**Accuracy against the label-fed run** (subjects 1 and 2, the subjects with a reference run; mean / median /
+p90 joint distance in cm over the labelled range):
+
+| Configuration | Subject 1 | Subject 2 |
+|---|---|---|
+| single-stage, 120 markers | 14.0 / 7.8 / 34.4 | 7.3 / 4.2 / 15.3 |
+| single-stage, m33 | 16.4 / 8.3 / 42.8 | 6.9 / 3.9 / 15.7 |
+| parent `main`, 120 markers | 18.8 / 9.2 / 49.2 | 7.2 / 4.2 / 15.9 |
+| parent `main`, m33 | 18.5 / 9.5 / 46.2 | 7.3 / 4.1 / 16.1 |
+
+Largest joint distance to the label-fed run in the six failure events (cm; 40 cm flags an event, and every
+variant flags the same five):
+
+| Configuration | u3-timo-legs | u4-fall | u4-jitter | u4-lleg | u4-rarm | u4-rarm2 |
+|---|---|---|---|---|---|---|
+| single-stage, 120 markers | 37 | 156 | 107 | 83 | 78 | 64 |
+| single-stage, m33 | 30 | 108 | 89 | 71 | 52 | 94 |
+| parent `main`, m33 | 37 | 127 | 116 | 61 | 57 | 78 |
+
+**Reading.** The restricted form loses no failure event (the same five are flagged) but does not match the
+single-stage run everywhere: against the single-stage run with the same 33 markers it is closer to the
+label-fed run in two of the six events (`u4-lleg`, `u4-rarm2`), further in the other four, and 2 cm worse
+on average and 3 cm worse at the 90th percentile for subject 1. The single-stage form with 33 markers is as
+fast as the restricted one but peaks at 13.4 GB (part a) and 21.4 GB (part b), above the 8 GB limit; only the
+restricted form meets the memory acceptance without a disk spill. The default therefore ships as the
+restricted form, `["main"]`, with this accuracy difference stated; the single-stage form with 33 markers is
+the choice when accuracy matters more than memory and 16 GB or more is available.
+
+None of the baseline sequences has `hand21` rows (the detection runs come from the spike pipeline, not the
+refine-hands path), so these figures say nothing about the hand stages; on these sequences the hand stages
+of the default configuration track without finger observations. Measuring them needs a detection run with
+refined hands on a copy of the session.
 
 ## 4. Acceptance
 

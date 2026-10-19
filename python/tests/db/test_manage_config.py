@@ -611,6 +611,33 @@ def test_resolve_default_tracker_config_falls_back_to_baseline(
     ).fetchone()[0] == 1
 
 
+def test_resolve_default_tracker_config_picks_the_hierarchical_default_for_hand_groups(
+    session_db: sqlite3.Connection,
+) -> None:
+    """A skeleton with a child-stage group gets the hierarchical default (stage rows, parent
+    stage restricted by active_joint_groups); a skeleton without one gets the baseline."""
+    from posetrak.db.manage_config import HIERARCHICAL_CONFIG_ID
+
+    _, trial_id = _make_capture_and_trial(session_db)
+    hand_groups = "groups:" + chr(10) + "- name: HandL" + chr(10) + "  freeflyer_joint: forearm.L" + chr(10)
+    for sid, groups in (("flat", ""), ("hands", hand_groups)):
+        session_db.execute(
+            "INSERT INTO skeletons (id, name, yaml_content, created_at) VALUES (?, ?, ?, '2026-01-01')",
+            (sid, sid, "name: s" + chr(10) + "joints: []" + chr(10) + groups),
+        )
+    session_db.commit()
+
+    assert resolve_default_tracker_config(session_db, trial_id=trial_id, skeleton_ids=["flat"]) == BASELINE_CONFIG_ID
+    chosen = resolve_default_tracker_config(session_db, trial_id=trial_id, skeleton_ids=["flat", "hands"])
+    assert chosen == HIERARCHICAL_CONFIG_ID
+    row = session_db.execute("SELECT active_joint_groups FROM tracker_configs WHERE id = ?", (chosen,)).fetchone()
+    assert json.loads(row["active_joint_groups"]) == ["main"]
+    groups = session_db.execute(
+        "SELECT group_name FROM tracker_config_stages WHERE tracker_config_id = ? ORDER BY group_name", (chosen,)
+    ).fetchall()
+    assert [g["group_name"] for g in groups] == ["HandL", "HandR"]
+
+
 def test_resolve_default_tracker_config_uses_trial_default(
     session_db: sqlite3.Connection, tmp_path: Path
 ) -> None:

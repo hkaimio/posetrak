@@ -1179,6 +1179,24 @@ def test_migrate_adds_the_hard_mask_distance_column() -> None:
         conn.close()
 
 
+def test_migrate_adds_the_active_joint_groups_column() -> None:
+    """Registry v16->v17 and session v66->v67 add tracker_configs.active_joint_groups
+    to a table that lacks it, and are safe to repeat."""
+    import sqlite3
+
+    from posetrak.db.db import _migrate_registry_v16_to_v17, _migrate_session_v66_to_v67
+
+    for migrate, version in ((_migrate_registry_v16_to_v17, 17), (_migrate_session_v66_to_v67, 67)):
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE tracker_configs (id TEXT PRIMARY KEY)")
+        migrate(conn)
+        migrate(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tracker_configs)")}
+        assert "active_joint_groups" in cols
+        assert get_schema_version(conn) == version
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # PRAGMA foreign_keys
 # ---------------------------------------------------------------------------

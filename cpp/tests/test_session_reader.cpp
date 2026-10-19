@@ -224,7 +224,8 @@ static void create_fixture_db() {
             dot_seg_mask_tracklet_window INTEGER,
             dot_seg_mask_min_tracklet_fraction REAL,
             dot_seg_mask_cost_scale_at_zero_fraction REAL,
-            dot_seg_mask_hard_distance_px REAL
+            dot_seg_mask_hard_distance_px REAL,
+            active_joint_groups TEXT
         );
     )");
 
@@ -421,6 +422,9 @@ static void create_fixture_db() {
              "INSERT INTO tracker_configs "
              "(id,name,created_at,alpha,beta,process_noise_std,measurement_noise_std,tracker_fps) "
              "VALUES ('tc1','test','2024-01-01',0.5,2.0,0.15,20.0,120.0);");
+    exec_sql(db,
+             "INSERT INTO tracker_configs (id,name,created_at,tracker_fps,active_joint_groups) "
+             "VALUES ('tc_main','parent main','2024-01-01',120.0,'[\"main\"]');");
 
     // Pose observation sequence
     exec_sql(db,
@@ -870,6 +874,16 @@ TEST_CASE("SessionReader load_tracker_config", "[session_reader]") {
             Catch::Approx(TrackerConfig{}.dot_assignment_gate_mahalanobis));
     REQUIRE(cfg.tracker.dot_tracklet_gate_multiplier ==
             Catch::Approx(TrackerConfig{}.dot_tracklet_gate_multiplier));
+}
+
+TEST_CASE("SessionReader load_tracker_config reads the parent stage's joint groups",
+          "[session_reader]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    REQUIRE(reader.load_tracker_config("tc1").tracker.active_joint_groups.empty());
+    REQUIRE(reader.load_tracker_config("tc_main").tracker.active_joint_groups ==
+            std::vector<std::string>{"main"});
 }
 
 TEST_CASE("SessionReader load_sequence_info", "[session_reader]") {

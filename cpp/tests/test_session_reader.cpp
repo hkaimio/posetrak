@@ -958,6 +958,31 @@ TEST_CASE("SessionReader load_observations", "[session_reader]") {
     REQUIRE(first.camera_id == 0);
 }
 
+TEST_CASE("SessionReader load_observations loads only the requested time window",
+          "[session_reader]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    auto cameras = reader.load_cameras("sess1", "ec1", "sc1");
+    auto skeleton = make_test_skeleton();
+
+    // The fixture has frames at t = 0 and t = 1/120 s, four keypoints each.
+    auto const half_step = 0.5 / 120.0;
+    auto const first_only = reader.load_observations("seq1", cameras, skeleton, 0.1, 0, false, 0.5,
+                                                     0.0, 0.0, 10, 0.0, {}, 0.0, 0.0, half_step);
+    REQUIRE(first_only.total_observations() == 4);
+    REQUIRE(first_only.max_time() == Catch::Approx(0.0));
+
+    auto const second_only = reader.load_observations("seq1", cameras, skeleton, 0.1, 0, false, 0.5,
+                                                      0.0, 0.0, 10, 0.0, {}, 0.0, half_step);
+    REQUIRE(second_only.total_observations() == 4);
+    REQUIRE(second_only.min_time() == Catch::Approx(1.0 / 120.0).margin(1e-5));
+
+    REQUIRE_THROWS_AS(reader.load_observations("seq1", cameras, skeleton, 0.1, 0, false, 0.5, 0.0,
+                                               0.0, 10, 0.0, {}, 0.0, 5.0, 6.0),
+                      std::runtime_error);
+}
+
 TEST_CASE("SessionReader load_cameras_for_sequence", "[session_reader]") {
     auto db_path = ensure_fixture();
     SessionReader reader(db_path.string());

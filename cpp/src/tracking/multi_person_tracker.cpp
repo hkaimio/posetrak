@@ -274,13 +274,25 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
     if (!quiet) {
         fmt::print("Loading observations from sequence '{}'\n", full_sequence_id);
     }
+    // Only the tracked window is loaded when the caller gave one. The margin covers the
+    // initialisation search, which runs forward from the start but is bounded by the end, and a
+    // frame's observations whose timestamps straddle a window edge. Without an explicit start the
+    // start is derived from the first observations of the whole sequence, so nothing is cut.
+    constexpr double kObservationWindowMarginS = 1.0;
+    double const inf = std::numeric_limits<double>::infinity();
+    double const window_start = std::isnan(opts.override_start_time)
+                                    ? -inf
+                                    : opts.override_start_time - kObservationWindowMarginS;
+    double const window_end = std::isnan(opts.override_end_time)
+                                  ? inf
+                                  : opts.override_end_time + kObservationWindowMarginS;
     ctx->observations = reader.load_observations(
         full_sequence_id, ctx->cameras_by_name, ctx->skeleton, opts.min_confidence, spec.person_id,
         ctx->tracker_config.use_relative_observations, ctx->tracker_config.relative_min_confidence,
         ctx->tracker_config.pose_noise_std, ctx->tracker_config.cross_pair_max_px,
         ctx->tracker_config.cross_pair_max_n, ctx->tracker_config.edited_kp_noise_std,
         ctx->tracker_config.confidence_threshold_marker_names,
-        ctx->tracker_config.confidence_threshold_override);
+        ctx->tracker_config.confidence_threshold_override, window_start, window_end);
 
     // A dots-track skeleton (has_dot_track) can legitimately have zero labeled
     // observations here by construction -- load_observations() itself already

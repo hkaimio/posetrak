@@ -314,3 +314,80 @@ def test_scene_marker_delete_scoped_to_group(
     )
     # room8's tag:3 (same label, different group) must survive.
     assert result.output.count("tag:3") == 1
+
+
+# ---------------------------------------------------------------------------
+# box-video: the verdict decides whether anything is written
+# ---------------------------------------------------------------------------
+
+_BOX_YAML = """\
+name: box
+units: meters
+markers:
+  - {name: m1, type: aruco, dictionary: DICT_4X4_50, id: "1", size: 0.1, corners: [[0,0,0],[0.1,0,0],[0.1,0.1,0],[0,0.1,0]]}
+"""
+
+
+def _fake_box_result(ok: bool):
+    from app.setup.box_video import BoxVideoResult, CameraRow
+    from app.setup.extrinsics_solver import CalibResult, CamCalibState
+
+    state = CamCalibState(video_id="cam1", label="cam1", K=np.eye(3), K_orig=np.eye(3),
+                          dist=np.zeros((1, 4)), fisheye=False, R=np.eye(3), t=np.zeros((3, 1)))
+    row = CameraRow("cam1", True, 3, 40, 1.0 if ok else 80.0, 1.0, 2.0, ok)
+    return BoxVideoResult(
+        calibration=CalibResult(cameras={"cam1": state}, points_3d=[], reprojection_errors={},
+                                unsolved=[], pair_matches={}),
+        rows=[row], windows=[], dropped=[], anchor_ts=1.0, final_ts=1.0, aligned_to_final=False,
+        alignment_rms_m=None, residuals=[("rig_1_c0", "cam1", 1.0)], max_median_error_px=5.0, messages=[])
+
+
+@pytest.fixture()
+def box_session(tmp_path):
+    from posetrak.db.manage_marker_body import import_marker_body_str
+
+    path = tmp_path / "box.db"
+    conn = create_session(path)
+    session_id = create_mocap_session(conn, location="x")
+    conn.execute("INSERT INTO captures (id, session_id, capture_number) VALUES ('cap1', ?, 1)", (session_id,))
+    conn.execute("INSERT INTO camera_models (id, manufacturer, model_name) VALUES ('m', 'T', 'C')")
+    conn.execute("INSERT INTO camera_instances (id, camera_model_id, label) VALUES ('i1', 'm', 'cam1')")
+    body_id = import_marker_body_str(conn, _BOX_YAML, name="box")
+    conn.commit()
+    conn.close()
+    return path, body_id
+
+
+def _run_box_video(path, body_id, extra=()):
+    return CliRunner().invoke(main, [
+        "--session", str(path), "extrinsics", "box-video", "--capture", "cap1", "--marker-body", body_id[:8],
+        "--reference-camera", "cam1", *extra])
+
+
+@pytest.mark.parametrize("ok", [False, True])
+def test_box_video_writes_only_a_passing_calibration(box_session, monkeypatch, ok):
+    path, body_id = box_session
+    monkeypatch.setattr("posetrak.cli.extrinsics_rig.calibrate_from_box_video",
+                        lambda *a, **k: _fake_box_result(ok))
+
+    res = _run_box_video(path, body_id, ["--write"])
+
+    conn = sqlite3.connect(path)
+    n_calibrations = conn.execute("SELECT COUNT(*) FROM extrinsic_calibrations").fetchone()[0]
+    linked = conn.execute("SELECT extrinsic_calibration_id FROM captures").fetchone()[0]
+    assert "cam1" in res.output  # the error table is always printed
+    if ok:
+        assert res.exit_code == 0 and n_calibrations == 1 and linked
+    else:
+        assert res.exit_code != 0 and n_calibrations == 0 and linked is None
+
+
+def test_box_video_is_a_dry_run_without_write(box_session, monkeypatch):
+    path, body_id = box_session
+    monkeypatch.setattr("posetrak.cli.extrinsics_rig.calibrate_from_box_video",
+                        lambda *a, **k: _fake_box_result(True))
+
+    res = _run_box_video(path, body_id)
+
+    assert res.exit_code == 0 and "dry run" in res.output
+    assert sqlite3.connect(path).execute("SELECT COUNT(*) FROM extrinsic_calibrations").fetchone()[0] == 0

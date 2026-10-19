@@ -405,7 +405,7 @@ class TestDetectRunSegmentation:
     @patch("app.pose.finalise.auto_assign_and_finalise")
     @patch("posetrak.cli.detect.create_estimator")
     @patch("posetrak.cli.detect.DetectionPipeline")
-    def test_soma_segmentation_run_leaves_hand_refinement_off_unless_asked(
+    def test_soma_segmentation_run_refines_hands_unless_told_not_to(
         self, mock_pipeline_cls, mock_create, mock_finalise, monkeypatch,
         seeded_session_db_path: Path, capture_id: str, sync_id: str,
     ) -> None:
@@ -418,9 +418,9 @@ class TestDetectRunSegmentation:
                 "--segmentation", seg_id, "--pose-model", "soma77-vitpose-h"]
 
         _invoke(args, seeded_session_db_path)
-        assert mock_pipeline_cls.call_args.kwargs["hand_pass"] is None
-        _invoke([*args, "--refine-hands"], seeded_session_db_path)
         assert mock_pipeline_cls.call_args.kwargs["hand_pass"] is not None
+        _invoke([*args, "--no-refine-hands"], seeded_session_db_path)
+        assert mock_pipeline_cls.call_args.kwargs["hand_pass"] is None
 
     def test_segmentation_rejects_yolo_only_flags(
         self, seeded_session_db_path: Path, capture_id: str, sync_id: str,
@@ -548,7 +548,7 @@ class TestDetectRunModels:
     @patch("posetrak.cli.detect.YOLOXDetector")
     @patch("posetrak.cli.detect.create_estimator")
     @patch("posetrak.cli.detect.DetectionPipeline")
-    def test_hand_pass_runs_in_the_loop_for_yolox_boxes_when_asked(
+    def test_hand_pass_runs_in_the_loop_for_yolox_boxes_by_default_for_soma_only(
         self, mock_pipeline_cls, mock_create, mock_det_cls, model, monkeypatch,
         seeded_session_db_path: Path, capture_id: str, sync_id: str,
     ) -> None:
@@ -570,7 +570,7 @@ class TestDetectRunModels:
         hand_pass = mock_pipeline_cls.call_args.kwargs["hand_pass"]
         assert isinstance(hand_pass, StubHandPass) and hand_pass.pose_model == model
         self._run(seeded_session_db_path, capture_id, sync_id, "--pose-model", model)
-        assert mock_pipeline_cls.call_args.kwargs["hand_pass"] is None
+        assert (mock_pipeline_cls.call_args.kwargs["hand_pass"] is not None) == model.startswith("soma77")
 
 
 def _insert_run(db: Path, capture_id: str, sync_id: str) -> str:

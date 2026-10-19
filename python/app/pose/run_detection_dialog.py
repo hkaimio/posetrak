@@ -252,14 +252,13 @@ class RunDetectionDialog(QDialog):
         form.addRow("Confidence:", self._conf_spin)
 
         self._refine_hands_check = QCheckBox("Refine hands")
+        self._refine_hands_check.setChecked(True)
         self._refine_hands_check.setToolTip(
             "Re-detect each tracked wrist's hand in a tight crop (rtmlib.Hand) on the "
-            "frame already decoded and add the refined finger keypoints. On by default for "
-            "RTMPose-133; off for SOMA-77, whose hand keypoints it did not improve."
+            "frame already decoded and add the refined finger keypoints. Without it a "
+            "SOMA-77 run tracks no finger pose."
         )
         form.addRow("", self._refine_hands_check)
-        self._pose_combo.currentTextChanged.connect(self._on_pose_model_changed)
-        self._on_pose_model_changed(self._pose_combo.currentText())
 
         if self._bbox_source_combo is not None:
             # setCurrentIndex() above (when defaulting to a segmentation)
@@ -323,10 +322,6 @@ class RunDetectionDialog(QDialog):
         return w
 
     # ------------------------------------------------------------------
-
-    def _on_pose_model_changed(self, pose_model: str) -> None:
-        """Hand refinement is on by default for the models it was validated on, not for SOMA-77."""
-        self._refine_hands_check.setChecked(not pose_model.startswith("soma77"))
 
     def _on_bbox_source_changed(self, _index: int) -> None:
         """Detector/confidence are YOLO-only -- disable them (not hide, so

@@ -141,6 +141,18 @@ def merge_observation_sources(
     return merged
 
 
+def pad_to_common_width(merged: dict[int, np.ndarray]) -> None:
+    """Zero-pad, in place, the merged arrays of a camera's frames to the widest one.
+
+    A narrow (SOMA-77) body row grows by the hand rows that exist for its frame, so frames without a hand
+    detection are narrower than the others; the padded slots have zero confidence.
+    """
+    width = max((kp.shape[0] for kp in merged.values()), default=0)
+    for frame, kp in merged.items():
+        if kp.shape[0] < width:
+            merged[frame] = np.concatenate([kp, np.zeros((width - kp.shape[0], 3), dtype=kp.dtype)])
+
+
 def infer_body_width(
     rows_by_frame: Iterable[list[tuple[str, np.ndarray]]],
     primary_source: str = BODY_SOURCE,

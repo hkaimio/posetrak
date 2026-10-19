@@ -43,11 +43,15 @@ finalized 2026-07-14 and validated live 2026-07-15.
 
 ## Hand refinement for SOMA-77 runs and without segmentation
 
-Planned, see
+Built, see
 [hand-refinement-without-segmentation-design.md](hand-refinement-without-segmentation-design.md):
-pose-model independent wrist input, a `hand21` manifest for refined rows, the pass inside the
-single-pass detection loop, `detect run --refine-hands` for every box source, and a measurement of
-its value on SOMA runs.
+pose-model independent wrist and elbow input through the pose model registry, the `hand21`
+manifest of refined rows (written at finalisation, binds the default skeleton's hand21 markers for
+COCO-133 and SOMA-77 runs), the pass inside the frame loop, `detect run --refine-hands` for every
+box source. With the default skeleton, whose hand stages carry hand21 markers only, the refined
+hands improved fingers, forearm twist and hand orientation on the labelled trial and had the fewest
+flaws in the rendered comparison, so the pass is on by default for SOMA runs (design section 3).
+The default is provisional until a capture made to measure hand tracking confirms it.
 
 ## Known issues
 

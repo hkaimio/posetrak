@@ -97,6 +97,11 @@ def test_worker_runs_the_hand_pass_in_the_loop_for_133_point_models(db_path, mon
     seen = []
 
     class FakeHandPass:
+        supports = staticmethod(lambda pose_model: True)
+
+        def __init__(self, pose_model=None):
+            pass
+
         def refine(self, items):
             seen.append(len(items))
             return [[("hand_l", np.zeros((21, 3), np.float32), 1.0)] for _ in items]

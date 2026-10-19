@@ -13,15 +13,18 @@ for the validated formulas these tests pin down.
 from __future__ import annotations
 
 import sqlite3
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from posetrak.db.db import create_session
 from posetrak.detection.pipeline import CameraInfo
+from posetrak.detection.pose_models import COCO133, SOMA77
 from app.pose.db_cache import create_detection_run
 from posetrak.detection.hand_refinement import (
     HandCandidate,
+    HandPass,
     HandRefinementPipeline,
     _ELBOW_IDX,
     _HAND_CONF_SCALE,
@@ -164,6 +167,47 @@ class TestDetectHandInCrop:
 # HandRefinementPipeline._refine_one
 # ---------------------------------------------------------------------------
 
+# Stands in for a HandRefinementPipeline that has met a COCO-133 run: _refine_one reads only its arm slots.
+_COCO_PIPELINE = SimpleNamespace(_arms=COCO133.arm_indices())
+
+
+class TestHandPassPoseModels:
+    """The wrist and elbow slots come from the pose model, not from COCO-133 indices."""
+
+    def test_soma_wrist_and_elbow_are_the_hand_and_forearm_joints(self):
+        arms = SOMA77.arm_indices()
+        assert arms == {"left": (14, 13), "right": (42, 41)}
+        assert SOMA77.keypoint_names[14] == "LeftHand" and SOMA77.keypoint_names[41] == "RightForeArm"
+
+    @pytest.mark.parametrize("model,supported", [
+        ("soma77-vitpose-h", True), ("rtmpose-l-133kp", True), ("rtmpose-l-17kp", False), (None, False),
+    ])
+    def test_supports_models_that_name_a_wrist_and_an_elbow(self, model, supported):
+        assert HandPass.supports(model) is supported
+
+    def test_refines_the_hands_of_a_soma_pose(self):
+        kp = np.zeros((77, 3), dtype=np.float32)
+        kp[14] = [200.0, 200.0, 5.0]
+        kp[13] = [150.0, 200.0, 5.0]
+        img = np.zeros((400, 400, 3), dtype=np.uint8)
+        model = SimpleNamespace(calls=[])
+
+        def hand_model(crops):
+            model.calls.append(len(crops))
+            kps = np.full((1, 21, 2), 60.0, dtype=np.float32)
+            return [(kps, np.full((1, 21), 0.8, dtype=np.float32)) for _ in crops]
+
+        rows = HandPass(model=hand_model, pose_model="soma77-vitpose-h").refine([(img, kp)])
+        assert model.calls == [1]                       # only the left wrist is confident
+        assert [region for region, _, _ in rows[0]] == ["hand_l"]
+
+    def test_a_pose_of_another_width_is_left_alone(self):
+        img = np.zeros((400, 400, 3), dtype=np.uint8)
+        rows = HandPass(model=lambda crops: [], pose_model="soma77-vitpose-h").refine(
+            [(img, np.zeros((133, 3), dtype=np.float32))])
+        assert rows == [[]]
+
+
 class TestRefineOne:
     def test_returns_only_the_confident_hand(self, monkeypatch):
         kp = np.zeros((133, 3), dtype=np.float32)
@@ -181,7 +225,7 @@ class TestRefineOne:
 
         monkeypatch.setattr("posetrak.detection.hand_refinement.detect_hand_in_crop", fake_detect)
 
-        results = HandRefinementPipeline._refine_one(None, object(), kp, img)
+        results = HandRefinementPipeline._refine_one(_COCO_PIPELINE, object(), kp, img)
         assert calls == [((200.0, 200.0), (150.0, 200.0))]  # only left, with elbow anchor
 
         assert len(results) == 1
@@ -204,7 +248,7 @@ class TestRefineOne:
             "posetrak.detection.hand_refinement.detect_hand_in_crop",
             lambda *a, **k: called.append(1),
         )
-        results = HandRefinementPipeline._refine_one(None, object(), kp, img)
+        results = HandRefinementPipeline._refine_one(_COCO_PIPELINE, object(), kp, img)
         assert results == []
         assert called == []
 
@@ -216,7 +260,7 @@ class TestRefineOne:
             "posetrak.detection.hand_refinement.detect_hand_in_crop",
             lambda *a, **k: None,
         )
-        results = HandRefinementPipeline._refine_one(None, object(), kp, img)
+        results = HandRefinementPipeline._refine_one(_COCO_PIPELINE, object(), kp, img)
         assert results == []
 
 

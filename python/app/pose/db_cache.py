@@ -17,7 +17,12 @@ import numpy as np
 
 from posetrak.db.db import generate_id
 from posetrak.detection import stage_timing as st
-from posetrak.db.observation_merge import BODY_SOURCE, infer_body_width, merge_observation_sources
+from posetrak.db.observation_merge import (
+    BODY_SOURCE,
+    infer_body_width,
+    merge_observation_sources,
+    pad_to_common_width,
+)
 from posetrak.db.run_status import touch_progress
 
 _CROP_JPEG_QUALITY = 75
@@ -737,9 +742,11 @@ def read_observations_with_edits(
             # to whichever row is
             # present rather than dropping the frame.
             kp = rows[0][1]
+        result[frame] = kp
+    pad_to_common_width(result)
+    for frame, kp in result.items():
         if frame in edits:
             _apply_edit(kp, *edits[frame])
-        result[frame] = kp
 
     # Include ghost frames: edit rows with no backing pose_observations row.
     for frame, (edit_kp, mask) in edits.items():

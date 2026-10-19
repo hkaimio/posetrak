@@ -26,6 +26,7 @@ from app.pose.db_cache import DOT_REGION_TYPE
 from posetrak.db.observation_merge import (
     infer_body_width,
     merge_observation_sources,
+    pad_to_common_width,
     refined_indices,
 )
 
@@ -99,6 +100,7 @@ def read_timeline_status(
         merged = merge_observation_sources(rows, default_width=default_width)
         obs_by_frame[frame] = merged if merged is not None else rows[0][1]
         refined_by_frame[frame] = refined_indices(rows)
+    pad_to_common_width(obs_by_frame)
 
     frames = sorted(set(obs_by_frame) | set(edits))
     if not frames:

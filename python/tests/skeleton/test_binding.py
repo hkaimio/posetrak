@@ -7,6 +7,7 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
+import yaml
 
 from posetrak.detection.pose_models import HAND21, SOMA77
 from posetrak.skeleton import compose
@@ -55,3 +56,12 @@ def test_hand_rows_bind_through_their_side(conn):
 
 def test_a_sequence_without_a_manifest_is_left_to_the_tracker(conn):
     assert missing_pose_models(conn, "s", COCO_ONLY) is None
+
+
+def test_refined_hand_rows_bind_20_hand_markers_of_the_default_skeleton_whatever_the_body_model():
+    # The hand21 manifest of a refined row does not depend on the body model, so a COCO-133 and a SOMA-77
+    # run bind the same hand markers (the hand root has none: the wrist marker of the body layer serves).
+    landmarks = {m["landmark"] for m in yaml.safe_load(WITH_SOMA)["markers"] if "landmark" in m}
+    for side in ("left", "right"):
+        bound = [i for i in range(len(HAND21.keypoint_names)) if HAND21.landmark(i, side) in landmarks]
+        assert len(bound) == 20 and 0 not in bound

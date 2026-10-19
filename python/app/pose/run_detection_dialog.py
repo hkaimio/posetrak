@@ -255,8 +255,8 @@ class RunDetectionDialog(QDialog):
         self._refine_hands_check.setChecked(True)
         self._refine_hands_check.setToolTip(
             "Re-detect each tracked wrist's hand in a tight crop (rtmlib.Hand) on the "
-            "frame already decoded and add the refined finger keypoints. "
-            "Only has an effect for 133-keypoint pose models."
+            "frame already decoded and add the refined finger keypoints. Without it a "
+            "SOMA-77 run tracks no finger pose."
         )
         form.addRow("", self._refine_hands_check)
 

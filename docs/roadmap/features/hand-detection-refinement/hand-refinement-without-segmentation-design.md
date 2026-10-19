@@ -29,10 +29,17 @@ and 112. On a SOMA-77 run it silently does nothing.
 1. **Pose-model independent input.** The wrist and elbow positions come from the run's pose model
    through the pose model registry (SOMA `LeftHand`/`LeftForeArm`, COCO `left_wrist`/`left_elbow`),
    not fixed indices. The check on `"133"` is replaced by "the model names a wrist and an elbow".
+   `PoseModelSpec.wrists` / `elbows` hold the keypoint names per side and `arm_indices()` resolves them;
+   `HandPass(pose_model=...)`, `HandPass.supports(pose_model)` and `HandRefinementPipeline` use them. The
+   older COCO-133-only module constants (`_WRIST_IDX`, `_ELBOW_IDX`, `_HAND_BASE_IDX`) remain for the hand
+   redetection of the keypoint editor, which works on COCO-133 sequences.
 2. **Own layout.** Refined rows are written with a `hand21` manifest under `obs_source = 'hand_l' |
    'hand_r'` (see [pose-model skeleton binding](../pose-model-skeleton-binding/pose-model-skeleton-binding-design.md)),
    so the tracker binds them to `hand21:` landmark markers whatever the body model. The fixed offsets
-   stay only for old sequences without manifests.
+   stay only for old sequences without manifests. Finalisation already writes this manifest for every
+   sequence that has hand rows, so nothing changed in the stored layout: a COCO-133 and a SOMA-77 run bind
+   the same 20 `hand21:` markers of the default skeleton (the hand root has none; the wrist marker of the
+   body layer serves).
 3. **Same frame loop.** In the single-pass detection pipeline the hand pass runs on the frame already
    decoded, after the body model, instead of decoding the video again.
 4. **Every box source.** `detect run` allows `--refine-hands` for every box source. With YOLOX
@@ -43,18 +50,72 @@ and 112. On a SOMA-77 run it silently does nothing.
    size, so it is a possible second backend that needs no extra model download, but it adds 77-channel
    inference per hand. Not built unless the measurement below prefers it.
 
-## 3. Open question: is it worth it on SOMA runs
+## 3. Is it worth it on SOMA runs
 
-The spike's hand-crop test gave no tracker-level gain, but it judged body joints and its finger labels
-were unreviewed. What is measured:
+### Method
 
-- On the labelled trial, SOMA runs with and without refined hands, hierarchical tracker configuration
-  (hands in their own stages): wrist and hand-stage marker distance to the label-fed run, the
-  failure-event table, and visual review of hand pose on the rendered video.
-- Pass cost per frame from the detection profiling.
+Labelled aikido trial (three people, five cameras), one person over 51.7-56.8 s, the range with the operator's
+labels. Reference: the label-fed run of that range. Input: SOMA-77 detection with mask boxes, with and
+without the hand pass on the same boxes. Tracker: the hierarchical two-hand configuration, optimised
+build, the reference's calibration. Distances are mean / maximum over 52.5-56.8 s of the joint origins
+(wrist = hand joint, fingers = finger and thumb joints) to the reference; twist is the difference of the
+hand's rotation about the forearm axis to the reference, orientation the geodesic angle of the hand frame.
 
-If refined hands do not improve the hands, the pass stays available and off by default for SOMA runs;
-it stays on by default for COCO-133 runs, where it was validated.
+Skeleton configurations (all SOMA body markers, the hand21 markers added with `skeleton compose`):
+
+- *base*: spike skeleton, SOMA finger markers in the hand stages, no hand21 markers, sequence without hands.
+- *both*: SOMA finger markers and hand21 markers in the hand stages (the hand rows bind the hand21 markers,
+  the body row binds the 44 SOMA finger markers too).
+- *hand21 only*: the layout of the default skeleton: wrist and the index and little-finger base joints of
+  SOMA in the main stage, the hand stages hold the hand21 markers only.
+
+### Results
+
+| Run | wrist cm | fingers cm | body cm | forearm twist L / R deg | hand orientation L / R deg |
+|---|---|---|---|---|---|
+| base, no hands | 23.4 / 72.4 | 26.0 / 81.9 | 13.6 / 55.3 | 25.8 / 23.6 | 49.0 / 95.0 |
+| hands, both | 25.9 / 73.7 | 28.6 / 83.3 | 14.9 / 56.5 | 42.5 / 24.6 | 68.1 / 104.2 |
+| hands, hand21 only | 24.5 / 70.3 | 27.6 / 82.4 | 14.7 / 54.6 | 33.6 / 20.4 | 60.0 / 72.4 |
+| no hands, hand21 only layout | 23.8 / 73.0 | 28.9 / 84.2 | 14.8 / 55.3 | 38.3 / 33.2 | 106.7 / 94.2 |
+
+Outside the four failure events (calm windows 52.5-53.1, 53.7-53.8, 54.5-55.3, 56.4-56.8 s), mean wrist
+distance: base 12.0, hands both 14.1, hands hand21 only 11.6, no hands hand21 only 13.6 cm; fingers 13.0,
+14.4, 12.6, 19.2 cm. In the four failure events (right arm lost twice, left leg, fall) every
+configuration is 66-126 cm from the reference, with and without hands.
+
+- The hands do not move the failures: the strongest-peak body errors of the falls dominate every hand
+  figure, and the wrist distance is the body's.
+- With the default skeleton layout the refined hands help the fingers (12.6 against 19.2 cm without hands,
+  calm windows) and the forearm twist of the right hand (15 against 35 deg), and are neutral on the wrist
+  (11.6 against 13.6 cm). Against the spike skeleton, which keeps the SOMA fingers in the hand stages, they
+  are no better (wrist 12.0 base, 11.6 hand21 only) and worse with both finger sets (14.1, twist 46 deg);
+  the likely cause is two observations of the same knuckles with different noise scales, not tested separately.
+- Over the whole range the refined hands are not better than the body model's own fingers (wrist 24.5
+  against 23.4 cm, twist L 34 against 26 deg). One person and one 4-second range is a small sample.
+- The 'both' configuration is the worst, which supports the default skeleton's layout: hand21 markers
+  only in the hand stages, the SOMA finger markers beyond the two base joints out of the skeleton.
+
+Pass cost: 3058 camera-frames (5 cameras, 5.1 s) took 259 s without and 463 s with the hand pass, which is
+67 ms per camera-frame of wall time (the hand detector at batch size 1 per crop, 42 ms per camera-frame,
+dominates the hand model stage; the hand pose model is batched). Detection of this range is 1.8 times as
+slow with the pass.
+
+### Decision
+
+The comparison that sets the default is the one with the default skeleton, whose hand stages carry
+the `hand21:` markers only (the SOMA finger keypoints of the body crop are not tracked; see the
+skeleton binding design, section 2.4). Without the pass a SOMA run has no finger observations at all,
+and the measurement shows it: with the pass the fingers are 12.6 against 19.2 cm in the calm
+windows, the right forearm twist 20 against 33 deg and the hand orientation 60 / 72 against
+107 / 94 deg. In the rendered comparison video of the tracked runs the run with refined hands has
+the fewest flaws of the four. The comparison with the spike skeleton, which keeps the SOMA fingers
+in the hand stages, shows no gain, but that skeleton is not a default.
+
+The pass is therefore **on by default for SOMA runs**, for every box source (`detect run`, the
+Refine hands checkbox), at 1.8 times the detection time; `--no-refine-hands` turns it off. For
+COCO-133 runs it stays on by default with mask boxes, where it was validated. The default is
+provisional: the trial was not captured for hand accuracy (one person, about four seconds), and a capture made to measure hand tracking is to confirm it. Batching
+the hand detector (42 ms per camera-frame at batch size 1) is the way to reduce the cost.
 
 ## 4. Acceptance
 

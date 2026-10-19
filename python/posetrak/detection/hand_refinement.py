@@ -33,7 +33,7 @@ import numpy as np
 from posetrak.detection import stage_timing as st
 from posetrak.detection.frame_source import iter_frames
 from posetrak.detection.pipeline import CameraInfo
-from posetrak.detection.pose_models import COCO133_HAND_BASE
+from posetrak.detection.pose_models import COCO133, COCO133_HAND_BASE, HAND_OBS_SOURCE, spec_for_pose_model
 
 _log = logging.getLogger(__name__)
 
@@ -67,17 +67,14 @@ _GATE_FLOOR_PX = 40.0
 # edited_kp_noise_std.
 _HAND_CONF_SCALE = 5.0
 
-# COCO-133 keypoint indices (see app/pose/kp_models.py). Hand refinement only
-# runs against the 133-point whole-body layout — a 17-point model has no
-# hand keypoints to refine at all.
-_N_KP_133 = 133
-_WRIST_IDX = {"left": 9, "right": 10}
-_ELBOW_IDX = {"left": 7, "right": 8}
-# The hand21 -> COCO-133 index mapping lives in pose_models; posetrak.db.observation_merge and the C++ session
-# loader repeat the values (91/112/21) for sequences that have no keypoint manifest.
-_HAND_BASE_IDX = COCO133_HAND_BASE
+# The wrist and elbow slots come from the pose model's registry entry, so the pass works for every model that
+# names them.
 _HAND_N_KP = 21
-_REGION_TYPE = {"left": "hand_l", "right": "hand_r"}
+_REGION_TYPE = HAND_OBS_SOURCE
+# The COCO-133 slots, for the hand redetection of the editing UI, which works on COCO-133 sequences only.
+_WRIST_IDX = {side: w for side, (w, _) in COCO133.arm_indices().items()}
+_ELBOW_IDX = {side: e for side, (_, e) in COCO133.arm_indices().items()}
+_HAND_BASE_IDX = COCO133_HAND_BASE
 
 # rtmlib.Hand's RTMPose stage input size (square). Used to derive noise_scale
 # from the hand crop's own pixel size the same way the whole-body pipeline
@@ -226,14 +223,19 @@ def hand_rows_of(candidates: dict[str, HandCandidate]) -> list[tuple[str, np.nda
     return rows
 
 
-def hand_wrists(kp: np.ndarray) -> dict[str, tuple[tuple[float, float], tuple[float, float] | None]]:
-    """``{side: (wrist, elbow or None)}`` of the sides of COCO-133 keypoints *kp* whose wrist is confident."""
+def hand_wrists(
+    kp: np.ndarray, arms: dict[str, tuple[int, int]],
+) -> dict[str, tuple[tuple[float, float], tuple[float, float] | None]]:
+    """``{side: (wrist, elbow or None)}`` of the sides of keypoints *kp* whose wrist is confident.
+
+    *arms* is ``PoseModelSpec.arm_indices()`` of the model *kp* comes from.
+    """
     out = {}
-    for side in ("left", "right"):
-        wx, wy, wc = kp[_WRIST_IDX[side]]
+    for side, (wrist_idx, elbow_idx) in arms.items():
+        wx, wy, wc = kp[wrist_idx]
         if wc <= 0.0:
             continue
-        ex, ey, ec = kp[_ELBOW_IDX[side]]
+        ex, ey, ec = kp[elbow_idx]
         out[side] = ((float(wx), float(wy)), (float(ex), float(ey)) if ec > 0.0 else None)
     return out
 
@@ -269,14 +271,26 @@ class HandBatchModel:
 
 
 class HandPass:
-    """Refined hand keypoints for the COCO-133 poses of a batch of frames, the hand crops batched.
+    """Refined hand keypoints for the poses of a batch of frames, the hand crops batched.
+
+    *pose_model* is the stored model name of the poses (COCO-133 when not given); it says which keypoints are
+    the wrists and elbows.
 
     Used inside the detection loop on the frames already decoded; ``HandRefinementPipeline`` is the same
     refinement as a second pass over a stored run.
     """
 
-    def __init__(self, model: HandBatchModel | None = None) -> None:
+    def __init__(self, model: HandBatchModel | None = None, pose_model: str | None = None) -> None:
         self._model = model
+        spec = spec_for_pose_model(pose_model) if pose_model else COCO133
+        self._arms = spec.arm_indices() if spec is not None else {}
+        self._width = len(spec.keypoint_names) if spec is not None else 0
+
+    @staticmethod
+    def supports(pose_model: str | None) -> bool:
+        """True if *pose_model* names a wrist and an elbow."""
+        spec = spec_for_pose_model(pose_model)
+        return spec is not None and bool(spec.arm_indices())
 
     @property
     def model(self) -> HandBatchModel:
@@ -285,12 +299,12 @@ class HandPass:
         return self._model
 
     def refine(self, items: list[tuple[np.ndarray, np.ndarray]]) -> list[list[tuple[str, np.ndarray, float]]]:
-        """For each ``(frame, kp133[133, 3])`` the ``(region_type, hand_kp, noise_scale)`` rows of its hands."""
+        """For each ``(frame, keypoints[N, 3])`` the ``(region_type, hand_kp, noise_scale)`` rows of its hands."""
         plans = []                                   # (item index, side, plan)
         for index, (frame, kp) in enumerate(items):
-            if kp.shape[0] != _N_KP_133:
+            if kp.shape[0] != self._width:
                 continue
-            for side, (wrist, elbow) in hand_wrists(kp).items():
+            for side, (wrist, elbow) in hand_wrists(kp, self._arms).items():
                 plan = plan_hand_crop(frame.shape, wrist, elbow)
                 if plan is not None:
                     plans.append((index, side, plan))
@@ -331,6 +345,8 @@ class HandRefinementPipeline:
         self._session = session
         self._stop_event = stop_event or threading.Event()
         self._hand_model = None
+        self._arms: dict[str, tuple[int, int]] = {}
+        self._width = 0
 
     def _get_hand_model(self):
         if self._hand_model is None:
@@ -349,7 +365,7 @@ class HandRefinementPipeline:
 
         Returns the number of (frame, track, side) hand detections that
         passed the gate and were written. No-ops (returns 0) if the run's
-        pose model isn't the 133-point whole-body layout.
+        pose model names no wrist and elbow.
 
         *on_camera_done* (done, total), if given, fires after each camera
         finishes -- mirrors DetectionPipeline.run()'s own callback of the
@@ -361,9 +377,11 @@ class HandRefinementPipeline:
             "SELECT pose_model FROM detection_runs WHERE id=?", (run_id,)
         ).fetchone()
         pose_model = row["pose_model"] if row else None
-        if not pose_model or "133" not in pose_model:
-            _log.info("run: pose model %r has no hand keypoints, skipping", pose_model)
+        if not HandPass.supports(pose_model):
+            _log.info("run: pose model %r names no wrist and elbow, skipping", pose_model)
             return 0
+        spec = spec_for_pose_model(pose_model)
+        self._arms, self._width = spec.arm_indices(), len(spec.keypoint_names)
 
         total_refined = 0
         for i, cam in enumerate(cameras):
@@ -406,7 +424,7 @@ class HandRefinementPipeline:
             if frame_rows is not None:
                 for row in frame_rows:
                     kp = np.frombuffer(bytes(row["keypoints"]), dtype=np.float32).reshape(-1, 3)
-                    if kp.shape[0] != _N_KP_133:
+                    if kp.shape[0] != self._width:
                         continue
                     for region_type, hand_kp, noise_scale in self._refine_one(hand_model, kp, img):
                         updates.append((
@@ -437,7 +455,7 @@ class HandRefinementPipeline:
         and passed the gate — ready to write as new detection_keypoints rows.
         """
         candidates = {}
-        for side, (wrist, elbow) in hand_wrists(kp).items():
+        for side, (wrist, elbow) in hand_wrists(kp, self._arms).items():
             result = detect_hand_in_crop(hand_model, img, wrist, elbow)
             if result is not None:
                 candidates[side] = result

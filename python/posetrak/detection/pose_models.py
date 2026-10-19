@@ -30,6 +30,15 @@ class PoseModelSpec:
     parents: tuple[int, ...] = ()                # parent keypoint index per keypoint (-1 root), if the model is a tree
     trunk: tuple[str, ...] = ()                  # keypoints of the torso, for telling persons apart across cameras
     body: tuple[str, ...] = ()                   # keypoints of the whole body without face and fingers
+    wrists: tuple[str, str] = ()                 # (left, right) wrist keypoint names; empty if the model has none
+    elbows: tuple[str, str] = ()                 # (left, right) elbow keypoint names
+
+    def arm_indices(self) -> dict[str, tuple[int, int]]:
+        """``{side: (wrist index, elbow index)}`` of the sides this model names a wrist and an elbow for."""
+        if not (self.wrists and self.elbows):
+            return {}
+        return {side: (self.keypoint_names.index(w), self.keypoint_names.index(e))
+                for side, w, e in zip(("left", "right"), self.wrists, self.elbows)}
 
     def trunk_indices(self) -> list[int]:
         """Blob indices of the trunk keypoints."""
@@ -98,7 +107,10 @@ SOMA77_BODY = (
     "RightLeg", "RightShin", "RightFoot", "RightToeBase",
 )
 
-SOMA77 = PoseModelSpec("soma77", SOMA77_NAMES, SOMA77_FLIP_PAIRS, SOMA77_PARENTS, SOMA77_TRUNK, SOMA77_BODY)
+SOMA77 = PoseModelSpec(
+    "soma77", SOMA77_NAMES, SOMA77_FLIP_PAIRS, SOMA77_PARENTS, SOMA77_TRUNK, SOMA77_BODY,
+    wrists=("LeftHand", "RightHand"), elbows=("LeftForeArm", "RightForeArm"),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +171,10 @@ COCO133_FLIP_PAIRS = tuple(
 
 COCO133_TRUNK = ("left_shoulder", "right_shoulder", "left_hip", "right_hip")
 
-COCO133 = PoseModelSpec("coco133", COCO133_NAMES, COCO133_FLIP_PAIRS, trunk=COCO133_TRUNK, body=COCO133_NAMES[:17])
+COCO133 = PoseModelSpec(
+    "coco133", COCO133_NAMES, COCO133_FLIP_PAIRS, trunk=COCO133_TRUNK, body=COCO133_NAMES[:17],
+    wrists=("left_wrist", "right_wrist"), elbows=("left_elbow", "right_elbow"),
+)
 
 
 # ---------------------------------------------------------------------------

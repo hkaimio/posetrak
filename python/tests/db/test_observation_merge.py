@@ -239,3 +239,19 @@ def test_an_object_row_takes_no_hand_overlay():
     merged = merge_observation_sources([("markers", markers), ("hand_l", np.ones((21, 3), np.float32))],
                                        primary_source="markers")
     assert merged.shape == (4, 3)
+
+
+def test_pad_to_common_width_widens_soma_frames_without_hand_rows():
+    from posetrak.db.observation_merge import pad_to_common_width
+
+    body = np.ones((77, 3), dtype=np.float32)
+    hand = np.ones((21, 3), dtype=np.float32)
+    merged = {
+        0: merge_observation_sources([("body", body)]),
+        1: merge_observation_sources([("body", body), ("hand_l", hand), ("hand_r", hand)]),
+    }
+    assert [m.shape[0] for m in merged.values()] == [77, 119]
+    pad_to_common_width(merged)
+    assert merged[0].shape == (119, 3)
+    assert not merged[0][77:].any()
+    assert merged[0][:77].all()

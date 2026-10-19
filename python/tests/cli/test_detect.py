@@ -402,6 +402,26 @@ class TestDetectRunSegmentation:
         assert finalise_kwargs["detection_run_id"] == "run-1"
         assert finalise_kwargs["persons_ordered"] == ["alice"]
 
+    @patch("app.pose.finalise.auto_assign_and_finalise")
+    @patch("posetrak.cli.detect.create_estimator")
+    @patch("posetrak.cli.detect.DetectionPipeline")
+    def test_soma_segmentation_run_refines_hands_unless_told_not_to(
+        self, mock_pipeline_cls, mock_create, mock_finalise, monkeypatch,
+        seeded_session_db_path: Path, capture_id: str, sync_id: str,
+    ) -> None:
+        monkeypatch.setattr("posetrak.cli.detect.resolve_pose_model", lambda requested, **_: (requested, None))
+        seg_id = self._seed_segmentation(seeded_session_db_path, capture_id)
+        mock_finalise.return_value = ["seq1"]
+        mock_pipeline_cls.return_value.cameras = ["cam"]
+        mock_pipeline_cls.return_value.run.return_value = PipelineResult(detection_run_id="run-1")
+        args = ["detect", "run", "--capture", capture_id, "--sync", sync_id, "--start", "0", "--end", "1",
+                "--segmentation", seg_id, "--pose-model", "soma77-vitpose-h"]
+
+        _invoke(args, seeded_session_db_path)
+        assert mock_pipeline_cls.call_args.kwargs["hand_pass"] is not None
+        _invoke([*args, "--no-refine-hands"], seeded_session_db_path)
+        assert mock_pipeline_cls.call_args.kwargs["hand_pass"] is None
+
     def test_segmentation_rejects_yolo_only_flags(
         self, seeded_session_db_path: Path, capture_id: str, sync_id: str,
     ) -> None:
@@ -524,23 +544,33 @@ class TestDetectRunModels:
         assert isinstance(box_source, RunBoxSource) and box_source.source_run_id == source
         assert finalised == [("run-2", source, "rtmpose-l-133kp")]
 
+    @pytest.mark.parametrize("model", ["rtmpose-l-133kp", "soma77-vitpose-h"])
     @patch("posetrak.cli.detect.YOLOXDetector")
     @patch("posetrak.cli.detect.create_estimator")
     @patch("posetrak.cli.detect.DetectionPipeline")
-    def test_hand_pass_runs_in_the_loop_for_yolox_boxes_when_asked(
-        self, mock_pipeline_cls, mock_create, mock_det_cls, monkeypatch,
+    def test_hand_pass_runs_in_the_loop_for_yolox_boxes_by_default_for_soma_only(
+        self, mock_pipeline_cls, mock_create, mock_det_cls, model, monkeypatch,
         seeded_session_db_path: Path, capture_id: str, sync_id: str,
     ) -> None:
-        sentinel = object()
-        monkeypatch.setattr("posetrak.detection.hand_refinement.HandPass", lambda: sentinel)
-        mock_create.return_value = self._estimator()
+        from posetrak.detection.hand_refinement import HandPass as RealHandPass
+
+        class StubHandPass:
+            supports = staticmethod(RealHandPass.supports)
+
+            def __init__(self, pose_model=None):
+                self.pose_model = pose_model
+
+        monkeypatch.setattr("posetrak.detection.hand_refinement.HandPass", StubHandPass)
+        monkeypatch.setattr("posetrak.cli.detect.resolve_pose_model", lambda requested, **_: (requested, None))
+        mock_create.return_value = self._estimator(model)
         mock_pipeline_cls.return_value.cameras = ["cam"]
         mock_pipeline_cls.return_value.run.return_value = PipelineResult(detection_run_id="run-1")
 
-        self._run(seeded_session_db_path, capture_id, sync_id, "--pose-model", "rtmpose-l-133kp", "--refine-hands")
-        assert mock_pipeline_cls.call_args.kwargs["hand_pass"] is sentinel
-        self._run(seeded_session_db_path, capture_id, sync_id, "--pose-model", "rtmpose-l-133kp")
-        assert mock_pipeline_cls.call_args.kwargs["hand_pass"] is None
+        self._run(seeded_session_db_path, capture_id, sync_id, "--pose-model", model, "--refine-hands")
+        hand_pass = mock_pipeline_cls.call_args.kwargs["hand_pass"]
+        assert isinstance(hand_pass, StubHandPass) and hand_pass.pose_model == model
+        self._run(seeded_session_db_path, capture_id, sync_id, "--pose-model", model)
+        assert (mock_pipeline_cls.call_args.kwargs["hand_pass"] is not None) == model.startswith("soma77")
 
 
 def _insert_run(db: Path, capture_id: str, sync_id: str) -> str:

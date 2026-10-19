@@ -22,7 +22,7 @@ Part a: the 85 s single-person sequence with the SOMA-77 skeleton (variants sing
 Part b: the three-person trial 38-66 s that the failure events were judged on (variants hier120, single120, hier60, main120, main60),
         then the event table of each variant against hier120 (the configuration of the spike's runs).
 Both parts write ``<work-dir>/<part>/results.json`` and ``results.md`` and can be resumed: a variant with a
-result file is skipped (``--force`` reruns it). ``--only NAME[,NAME]`` selects variants; ``--end-time-s S`` cuts a run
+result file is skipped (``--force`` reruns it). ``--only NAME[,NAME]`` selects variants, ``--label L`` keeps a result as ``NAME-L`` (a rerun with another binary), ``--binary`` names the tracker (a copy of optbuild's, so a rebuild cannot replace it mid-run), ``--serial-persons`` turns off the threads of part b; ``--end-time-s S`` cuts a run
 short (a smoke test of the commands, not a measurement).
 
 Peak resident memory is the largest working set of the tracker process, sampled twice a second. The per-step
@@ -72,7 +72,7 @@ PART_B = {
     "persons": [("a2cc3890", "b9c65ead", 0), ("3ddc1cd5", "2284a0cb", 0), ("361b8931", "ff9e2118", 0)],
     "variants": {"hier120": (True, 120.0), "single120": (False, 120.0), "hier60": (True, 60.0),
                  "main120": (True, 120.0, ("main",)), "main60": (True, 60.0, ("main",)),
-                 "main120m33": (True, 120.0, ("main",), "m33")},
+                 "main120m33": (True, 120.0, ("main",), "m33"), "single120m33": (False, 120.0, None, "m33")},
     "window": (38.08, 66.44),
 }
 
@@ -139,16 +139,22 @@ class PeakMemory(threading.Thread):
     def __init__(self) -> None:
         super().__init__(daemon=True)
         self.peak = 0
+        self.timeline: list[tuple[float, float]] = []  # (seconds since start, resident GB), every 5 s
         self._stop_flag = threading.Event()
 
     def run(self) -> None:
         me = psutil.Process()
+        started = time.perf_counter()
+        next_sample = 0.0
         while not self._stop_flag.wait(0.5):
             try:
                 total = sum(p.memory_info().rss for p in me.children(recursive=True))
             except psutil.Error:
                 continue
             self.peak = max(self.peak, total)
+            if time.perf_counter() - started >= next_sample:
+                self.timeline.append((round(time.perf_counter() - started, 1), round(total / 2**30, 2)))
+                next_sample += 5.0
 
     def stop(self) -> int:
         self._stop_flag.set()
@@ -186,7 +192,7 @@ def conn_window(db: Path, sequence_id: str) -> tuple[float, float]:
         return conn.execute("SELECT time_start_s, time_end_s FROM pose_observation_sequences WHERE id = ?", (sequence_id,)).fetchone()
 
 
-def run_variant(work: Path, db: Path, part: dict, name: str, end_time: float | None, binary: Path, serial_persons: bool = False) -> dict:
+def run_variant(work: Path, db: Path, part: dict, name: str, end_time: float | None, binary: Path, serial_persons: bool = False, key: str | None = None) -> dict:
     hierarchical, fps, *rest = part["variants"][name]
     groups = list(rest[0]) if rest and rest[0] else None
     reduced = len(rest) > 1 and rest[1] == "m33"
@@ -197,7 +203,8 @@ def run_variant(work: Path, db: Path, part: dict, name: str, end_time: float | N
                            reduced_skeleton(conn, full_id(conn, "skeletons", skel)) if reduced else full_id(conn, "skeletons", skel), config_id, pid)
              for seq, skel, pid in part["persons"]]
     conn.close()
-    out_dir = work / name
+    key = key or name
+    out_dir = work / key
     shutil.rmtree(out_dir, ignore_errors=True)
     start, end = part["window"] or conn_window(db, specs[0].sequence_id)
     if end_time is not None:
@@ -218,8 +225,8 @@ def run_variant(work: Path, db: Path, part: dict, name: str, end_time: float | N
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
     run_ids = [r for r in result.run_ids if r]
-    entry = {"variant": name, "hierarchical": hierarchical, "parent_groups": groups, "tracker_fps": fps, "config_id": config_id, "exit_code": result.exit_code,
-             "wall_s": wall, "peak_rss_gb": peak / 2**30, "run_ids": run_ids, "binary": str(binary),
+    entry = {"variant": key, "hierarchical": hierarchical, "parent_groups": groups, "tracker_fps": fps, "config_id": config_id, "exit_code": result.exit_code,
+             "wall_s": wall, "peak_rss_gb": peak / 2**30, "rss_timeline_gb": memory.timeline, "run_ids": run_ids, "binary": str(binary),
              "step_timings": step_timings(out_dir), "log": log, "runs": [run_stats(conn, r) | {"run_id": r} for r in run_ids]}
     conn.close()
     return entry
@@ -279,6 +286,7 @@ def main() -> int:
     ap.add_argument("--binary", type=Path, default=DEFAULT_BINARY,
                     help="posetrak-tracker executable (a copy of optbuild's, so that a rebuild does not replace it mid-run)")
     ap.add_argument("--serial-persons", action="store_true", help="part b: step the persons one after another (the default threads them in frames without contact)")
+    ap.add_argument("--label", help="keep the result as <variant>-<label>, so a rerun with another binary does not replace the earlier one")
     ap.add_argument("--force", action="store_true", help="rerun variants that already have a result")
     ap.add_argument("--events", type=Path, help="part b: events.json of the evaluation set (enables the event table)")
     args = ap.parse_args()
@@ -294,12 +302,13 @@ def main() -> int:
     results = json.loads(results_path.read_text()) if results_path.exists() else {}
     names = args.only.split(",") if args.only else list(part["variants"])
     for name in names:
-        if name in results and not args.force:
-            print(f"[{name}] already done, skipping", flush=True)
+        key = f"{name}-{args.label}" if args.label else name
+        if key in results and not args.force:
+            print(f"[{key}] already done, skipping", flush=True)
             continue
-        results[name] = run_variant(work, db, part, name, args.end_time_s, args.binary, args.serial_persons)
+        results[key] = run_variant(work, db, part, name, args.end_time_s, args.binary, args.serial_persons, key)
         results_path.write_text(json.dumps(results, indent=1))
-        print(f"[{name}] exit {results[name]['exit_code']}  {results[name]['wall_s']:.0f} s  peak {results[name]['peak_rss_gb']:.1f} GB", flush=True)
+        print(f"[{key}] exit {results[key]['exit_code']}  {results[key]['wall_s']:.0f} s  peak {results[key]['peak_rss_gb']:.1f} GB", flush=True)
     events = event_table(db, results, "hier120", args.events) if args.part == "b" else {}
     write_markdown(work / "results.md", results, events)
     print((work / "results.md").read_text())

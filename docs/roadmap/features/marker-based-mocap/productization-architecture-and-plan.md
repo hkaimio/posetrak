@@ -932,7 +932,7 @@ never reads definitions; sessions without markers are unaffected (N3);
 | `label_marker_slots_gui.py`, `label_dot_ground_truth.py`, `refine_dot_ground_truth.py`, `build_gt_frame_manifest.py`, `eval_dot_detection.py`, `eval_fk_prediction.py`, `validate_dot_detector.py`, `sweep_dot_detection.py`, `sweep_linker_and_b2.py` | → `python/tools/gt/` (validation harness, redesign doc §2), kept as tools with a README |
 | `render_tracking_debug_frames.py`, `render_dot_detection_overview_video.py` | → `posetrak track render-debug`, `posetrak detect render` (tests exist) |
 | `annotate_dots_manually.py`, `estimate_streak_exposure_ratio.py` | keep as tools (tested) |
-| `calibrate_extrinsics_from_moving_box.py`, `reframe_box_rig.py`, `spot_check_box_calibration.py` | → `posetrak extrinsics-rig from-moving-box` (WS7; belongs to the extrinsics feature) |
+| `calibrate_extrinsics_from_moving_box.py`, `reframe_box_rig.py`, `spot_check_box_calibration.py` | the first became `posetrak extrinsics box-video` and was deleted (WS7; belongs to the extrinsics feature); the other two stay as tools |
 | `prototype_*` (dot_blob_detector, streak_detector, motion_gated_linker, fk_marker_prediction, multi_camera_fusion, shin_rigid_cluster_fit, pen_band_tracking, track_pen_trajectory, ball_tracking) | → `python/tools/prototypes/` with an index noting what each validated and which production module absorbed it |
 | `prototype_person_marker_assignment.py`, `prototype_hybrid_*`, `prototype_fused_*`, `prototype_marker_normal_assignment.py`, `prototype_marker_person_filter.py`, `prototype_tracklet_smoothed_assignment.py`, `render_person_marker_assignment_video.py`, `render_hybrid_assignment_video.py`, `render_marker_normal_debug_frame.py`, `prototype_ball_cutie_segmentation.py`, `cutie_segment_ball_all_cameras.py` | superseded (redesign doc §0; ball status entries) → `python/tools/prototypes/superseded/` for the duration of the plan, deleted when the workstream that replaces each one is done (per Harri: keep during migration, remove before completing the plan). The `prototypes/` index records which workstream retires which file, so "before completing the plan" is a checklist, not a memory. |
 | `catalog/*.calibrated.*.yaml`, `catalog/reallusion-no-waist.dot-augmented.*.yaml`, `catalog/ball.*`, `pen.*`, `pad.*` | move to the data drive beside the session DB; keep `catalog/modules/` only |
@@ -1165,11 +1165,10 @@ exactly the per-capture-script problem this plan exists to end.
 
 ### WS7 — Extrinsics from a moving box (M, independent)
 
-Promote `calibrate_extrinsics_from_moving_box.py` into
-`posetrak extrinsics-rig from-moving-box` (stationary-window finder +
-per-window free marker groups + final-position anchor). Belongs to the
-extrinsics feature; listed here because Harri flagged the ~2 px vs
->10 px result as worth keeping and the script is on this branch.
+Done: `calibrate_extrinsics_from_moving_box.py` became
+`posetrak extrinsics box-video` (stationary-window finder + per-window free
+marker groups + anchor window, with a per-camera error verdict), see
+[calibration robustness](../extrinsics-improvements/calibration-robustness-design.md) §1.
 
 ### Deferred / research (not scheduled)
 

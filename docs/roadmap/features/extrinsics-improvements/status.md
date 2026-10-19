@@ -23,11 +23,38 @@ last_updated = 2026-08-15
 See [extrinsics-improvements-design.md](extrinsics-improvements-design.md) for
 the problem statement, requirements, and full technical design.
 
-**Planned: calibration robustness** — see
-[calibration-robustness-design.md](calibration-robustness-design.md): fail-loud moving-box
-calibration and safe camera relabeling (first release of the SOMA/GEM-X productization), an
-intrinsics quality check (second release), and re-solving against stored room tags and
-extrinsics refinement from keypoints (separate work).
+**Calibration robustness** — see
+[calibration-robustness-design.md](calibration-robustness-design.md). Built for the first release of the
+SOMA/GEM-X productization (stage 7): fail-loud moving-box calibration as `posetrak extrinsics box-video`
+and the dialog entry "Calibrate from box video…" (`app/setup/box_video.py`; the prototype script is
+deleted), and safe camera relabeling as `posetrak capture reassign-camera` and the capture panel's
+"Cameras…" button (`posetrak/db/reassign_camera.py`). Still planned: an intrinsics quality check (second
+release), and re-solving against stored room tags and extrinsics refinement from keypoints (separate
+work).
+
+**2026-10-19: box-video calibration checked on real captures (database copies, dry runs and one `--write`).**
+
+- *Succeeding capture* (six cameras, stationary windows 7-31 s, gopro13_02 as the reference camera): the
+  final rest position is seen by all cameras and anchors the solve. Median reprojection errors 0.76-1.33 px
+  (maximum 9.8 px), `Calibration OK`. Written with `--write` to a copy, the extrinsics equal the ones the
+  prototype stored for the same capture: camera centres within 0.01 mm and rotations within 0.001 degrees
+  (the test tolerance). The prototype's printed errors and positions were identical to the command's.
+- *Failing capture* (four cameras; range 100-115 s of the second clip; the box is set down at 111.7 s and
+  is at rest in view of two cameras, ace2 and gopro13_02): windows at 100.4-103.9 s are seen by all four
+  cameras and anchor the solve (102.85 s), the world frame is aligned to the final rest position (box fit
+  1.0 mm RMS). Medians 6.10 (gopro-11_mini_01), 1.39, 1.13 and 2.68 px, but means of 217-540 px and maxima
+  of 735-2030 px: `Calibration FAILED`, exit 1, no `extrinsic_calibrations` row added (3 before and
+  after). The prototype on the same range anchored on the final rest position, left gopro13_01 unsolved
+  and printed the result without failing.
+- Scanning 63-104 s of the same clip (58 windows, all cameras see most of them) gives medians of 9-20 px
+  in every camera and fails as well; the prototype's mean errors (13-40 px) match. The box video of that
+  capture cannot be solved with the stored intrinsics, which the error table now says.
+- The command takes about 2.5 min for a 25 s range and about 12 min for a 40 s range with 58 windows
+  (4K 120 fps, four to six cameras): frame reading dominates.
+- The relabeling test on a copy of the second clip's capture: exchanging the cameras of gopro13_01 and
+  gopro13_02 through `capture reassign-camera` leaves every video's file path, sync points and sync lookups
+  unchanged. In that session `sync_points.camera_instance_id` holds the video id for every row written by
+  the sync dialog, not a camera id.
 
 **2026-08-15: the OnePlus rotation mismatch found — resolves the "root cause
 still open" mystery from the Phase 9 capture-2 validation below.** Found

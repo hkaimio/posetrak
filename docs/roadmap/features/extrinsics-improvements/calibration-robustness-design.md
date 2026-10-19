@@ -11,23 +11,42 @@ tracking improvement is bounded by it.
 
 ## 1. Moving-box tool fails silently
 
-`python/tools/calibrate_extrinsics_from_moving_box.py` (a prototype, the method behind the calibration
-box video) anchors the world frame on the box's final resting position and assumes it is at rest in
-view of every camera. On a capture where the box was set down only after the stated range and seen by
-two of four cameras, it produced reprojection errors of 100-800 px and printed the result as a normal
-solve.
+The method behind the calibration box video anchors the world frame on the box's final resting position
+and assumes it is at rest in view of every camera. On a capture where the box was set down only after
+the stated range and seen by two of four cameras, it produced reprojection errors of 100-800 px and
+printed the result as a normal solve.
 
-Changes, as part of productizing the tool into the `extrinsics_rig` command it was written for:
+It is `posetrak extrinsics box-video` (`posetrak/cli/extrinsics_rig.py`) and the dialog "Calibrate from
+box video…" of the extrinsics status dialog, both running `app/setup/box_video.py`. The box is a marker
+body definition, the videos are the capture's, the synchronisation is its first sync configuration.
 
-- Rank stationary windows by camera coverage and corner count; drop windows with too few corners.
-- Anchor on a window every camera sees; align to the final rest frame afterwards when it is seen by
-  fewer cameras.
-- Fail with a non-zero exit and a per-camera error table when any camera's median reprojection error
-  exceeds a threshold (default 5 px), instead of printing a result.
-- Expose it in the calibration dialog as "Calibrate from box video".
+- **Windows.** One reference camera is scanned for runs of frames where the box's detected corners
+  barely move. Each window is looked up in every camera and detected there. A window with fewer than 8
+  detected corners (all cameras together), or seen by fewer than two cameras (a camera sees a window
+  with at least one whole marker), is dropped; the dropped ones are listed with the reason.
+  `--exclude-window-ts` drops chosen windows.
+- **Anchor.** The kept windows are ranked by the number of cameras that see them, then by being the
+  final rest position, then by corner count. The best one gives the fixed control points; the others add
+  their corners as free points, one set of points per window. When the final rest position is not the
+  anchor, the solved scene is moved rigidly (a fit of the final window's triangulated corners to the box
+  geometry) so that the world frame is the box at its final rest position. When
+  that window has too few corners seen by two cameras, the world frame stays the anchor window's box and
+  the report says so.
+- **Verdict.** A per-camera table (windows seen, observed box corners, median, mean and maximum
+  reprojection error) is always printed. The calibration fails, with a non-zero exit and nothing written,
+  when a camera is unsolved, has no box observation at all (its error cannot be judged), or has a median
+  error above `--max-median-error` (default 5 px). The dialog shows the same table and enables saving
+  only a passing result.
+- **Output.** Only with `--write` a new `extrinsic_calibrations` row (method `moving-box-anchor`) is
+  stored and linked to the capture; the default is a dry run. `--residuals` writes every box-corner
+  observation's error.
+- **Options.** `--marker-body` (the box geometry; its id is the rig id), `--rig-dict` (ArUco
+  dictionary for markers the body does not name), `--world-z-offset`, `--exclude-window-ts`,
+  `--min-window-corners`, `--max-median-error`, `--residuals` (per-observation errors as CSV).
 
-**In the productization, first release**: the failure modes produce wrong extrinsics without warning,
-and every later result depends on them.
+A box that ends at rest in view of some cameras only is no longer a failure by itself: if an earlier
+window is seen by all cameras it anchors the solve. The error table is what fails a capture where no
+such window exists or a camera's fit is poor.
 
 ## 2. Room tags as scene markers
 
@@ -44,11 +63,21 @@ tags without a calibration object in view.
 ## 3. Safe camera relabeling
 
 Sync points belong to a capture video row (`sync_points.shot_video_id`), so fixing a wrong camera
-label by swapping file paths between `capture_videos` rows silently breaks the synchronisation. A
-"reassign camera" operation changes `capture_videos.camera_instance_id` (and the intrinsics reference
-that follows the camera mode) and leaves file paths and sync points with their videos; it refuses when
-detection or tracking runs already reference the capture, unless the user confirms that they will be
-recomputed.
+label by swapping file paths between `capture_videos` rows silently breaks the synchronisation. The
+"reassign camera" operation (`posetrak/db/reassign_camera.py`) changes `capture_videos.camera_instance_id`
+(and, when the new camera is of another model, `camera_mode_id` and the intrinsics calibration that
+follows the mode) and leaves file paths and sync points with their videos. Cameras of several videos
+can be exchanged in one call, and no two videos of a capture may end with the same camera. It refuses
+when detection runs, pose observation sequences or tracking runs reference the capture, unless the
+caller confirms that they will be recomputed; they are not rewritten and keep the old camera ids. A
+linked extrinsic calibration belongs to cameras by id, so the operation warns about it.
+
+`sync_points.camera_instance_id` has two meanings in existing data: sync points written by the
+synchronisation dialog hold the video id there, imported ones the camera id. Only the latter follow
+the video to its new camera.
+
+Where: `posetrak capture reassign-camera --capture ID --assign VIDEO=CAMERA ...` and the "Cameras…"
+button of the capture panel in the main viewer.
 
 **In the productization, first release**: small, and it prevents a silent corruption of the
 synchronisation that has happened on real captures.

@@ -27,6 +27,7 @@ from posetrak.db.db import (
 from posetrak.db.import_extrinsics import import_extrinsics
 from posetrak.db.import_session_yaml import import_session_yaml
 from posetrak.db.import_sync_json import import_sync_json
+from posetrak.db.reassign_camera import Assignment, CameraReassignError, reassign_cameras
 from posetrak.db.trial_export import open_source_readonly
 
 from posetrak.cli._camera import resolve_camera_instance
@@ -639,6 +640,63 @@ def capture_add_video(
         conn.close()
 
     click.echo(f"capture_video_id: {video_id}")
+
+
+@capture_group.command("reassign-camera")
+@click.option("--capture", required=True, metavar="UUID", help="captures.id (or prefix)")
+@click.option("--assign", "assignments", multiple=True, required=True, metavar="VIDEO=CAMERA",
+              help="Move a video to a camera: capture_videos.id (or prefix) = camera label or "
+                   "camera_instances.id (or prefix). Repeat to exchange the cameras of videos.")
+@click.option("--camera-mode", "modes", multiple=True, metavar="VIDEO=MODE_ID",
+              help="Camera mode of the new camera, for a video moved to a camera of another "
+                   "model whose model has several modes")
+@click.option("--recompute", is_flag=True,
+              help="Allow the change although detection or tracking results exist for the "
+                   "capture; they keep the old camera ids and must be recomputed")
+@click.pass_obj
+def capture_reassign_camera(
+    obj: dict, capture: str, assignments: tuple[str, ...], modes: tuple[str, ...], recompute: bool,
+) -> None:
+    """Change which camera recorded a video, keeping its sync points.
+
+    Fixes a wrong camera label. Never swap file paths between videos instead:
+    the sync points belong to the video row and would stay with the wrong file.
+    """
+    conn = _open_session_required(obj)
+    try:
+        capture_id = _resolve(conn, "captures", capture)
+        video_ids = [r[0] for r in conn.execute("SELECT id FROM capture_videos WHERE shot_id = ?", (capture_id,))]
+
+        def video(prefix: str) -> str:
+            hits = [v for v in video_ids if v.startswith(prefix)]
+            if len(hits) != 1:
+                raise click.ClickException(f"{prefix!r} matches {len(hits)} videos of the capture")
+            return hits[0]
+
+        def pairs(values: tuple[str, ...], opt: str) -> dict[str, str]:
+            out = {}
+            for v in values:
+                key, sep, val = v.partition("=")
+                if not sep or not key or not val:
+                    raise click.UsageError(f"{opt} must be VIDEO=VALUE, got {v!r}")
+                out[video(key)] = val
+            return out
+
+        mode_by_video = pairs(modes, "--camera-mode")
+        todo = []
+        for vid, cam in pairs(assignments, "--assign").items():
+            row = conn.execute("SELECT id FROM camera_instances WHERE label = ?", (cam,)).fetchone()
+            cam_id = row[0] if row else _resolve(conn, "camera_instances", cam)
+            todo.append(Assignment(vid, cam_id, mode_by_video.get(vid)))
+        try:
+            warnings = reassign_cameras(conn, capture_id, todo, confirm_recompute=recompute)
+        except CameraReassignError as exc:
+            raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(f"Reassigned {len(todo)} video(s).")
+    for w in warnings:
+        click.echo(f"WARNING: {w}", err=True)
 
 
 # ---------------------------------------------------------------------------

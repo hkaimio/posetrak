@@ -89,15 +89,17 @@ one that should be the default.
    the fingers already sit in the hand stages (the restricted form of section 3 has them out of the
    parent stage).
 7. **Load only the requested window, and smaller observations.** The tracker loads every
-   observation of the sequence whatever time range is tracked, about 5.6 GB resident for the 85 s
-   four-camera sequence (5.5 million observations, about 1 kB each). Loading the requested window
-   only, and a compact in-memory observation record, bound the part of the memory that the smoother
-   options do not touch.
-8. **Per-person threads outside contact.** `MultiPersonTracker::run()` steps persons sequentially;
-   persons are independent outside contact windows (open issue on single-threaded tracking).
-   Built (`--serial-persons` turns it off; results are identical). In the three-person trial only
-   23% of the frames have no contact coupling, and the measured gain is within the noise of the
-   machine (section 5), so it is not a cost lever for that trial.
+   observation of the sequence whatever time range is tracked: about 1 GB resident for the 85 s
+   four-camera sequence (section 5; a 5 s slice peaks 1.0 GB lower when only its window is loaded).
+   The window is loaded alone; a compact in-memory observation record is not worth building at that
+   size. The smoother's per-step cache, not the observations, is what grows with a long run.
+8. **Per-person threads outside contact.** `MultiPersonTracker::run()` steps the persons one after
+   another within each frame; outside contact windows they are independent, so they could step on
+   separate threads. Tried and not kept: in the three-person trial only 23% of the frames have no
+   contact coupling, and the threaded run was slower than the sequential one (572 against 529 s),
+   because the persons' threads compete for the cores the UKF's own sigma-point loops (OpenMP)
+   already use. Worth retrying only on captures where the persons are apart most of the time, with
+   the UKF's thread count capped per person.
 
 A fixed-lag or windowed smoother also bounds memory, but it changes the estimator and belongs to
 iterative tracking (snapshots, restart over a changed range), which is a separate feature. Options
@@ -215,7 +217,8 @@ and there are half as many steps) and saves memory only because it has half as m
 follows the model of finding 4: about 5.6 GB for the observation load plus 1.3 MB per step
 (5.6 + 10,214 x 1.3 MB = 18.9 GB against 19.7 GB measured; 4.8 + 5,106 x 1.3 MB = 11.4 GB against 11.7 GB),
 2.5 times over the acceptance limit, with the smoother's share (about 14 GB) larger than the observation
-load's. The restricted form removes most of that.
+load's. The restricted form removes most of that. (Section 5 measures the observation load itself at
+about 1 GB: the model's 5.6 GB intercept is mostly a fixed working set of the filter, not observations.)
 
 **Part b, three-person trial** (28.4 s, 38.1-66.4 s, three persons in one run, optimized build, smoother on):
 
@@ -276,17 +279,28 @@ far a configuration moves the result, not which side is right.
 - **60 Hz moves every event, in both forms, by 7-148 cm.** Pooling two frames per step changes the result
   everywhere; on cost and on movement alone it has nothing to recommend it.
 
+## 4. Acceptance
+
+- A 10 000-step hierarchical run of a SOMA-77 skeleton peaks below 8 GB resident memory.
+- The run time of the default configuration is reported as a real-time factor per person and
+  camera count, and is the baseline later optimisation is measured against.
+- The default configuration loses no failure event against the single-stage run on the labelled
+  trial, and is chosen on the evaluation harness's distance to the label-fed run where the two differ
+  (the event table measures how far a configuration moves the result, not which result is right).
+- A tracking run records the parent stage's joint groups through its configuration.
+
 ## 5. Results of the changes
 
 Capture: the four-camera 85.13 s sequence of part a (10,214 steps at 120 Hz, one person) and the
 three-person trial of part b (28.36 s, five cameras, about 10,200 steps in all). Configuration: SOMA-77
-skeleton, parent marker set of 33 markers (`m33`, the 44 body-crop finger markers removed), 120 Hz, RTS
-smoothing, `optbuild/` release build on the development PC, run in database copies by
+skeleton without its 44 body-crop finger markers (they localise poorly, option 6; the scripts call
+these variants `m33` after the 33 markers left in the parent group), 120 Hz, RTS smoothing,
+`optbuild/` release build on the development PC, run in database copies by
 `scripts/tracker_baseline.py`; accuracy by `scripts/tracker_score.py`.
 
 **Memory per change** (part a, 40 s slice, peak resident GB; each row adds one change to the rows above it):
 
-| Build | parent `main`, m33 | single-stage, m33 |
+| Build | parent `main` | single-stage |
 |---|---|---|
 | before | 3.81 | 9.73 |
 | + tracked window only | 3.63 | 9.83 |
@@ -297,21 +311,21 @@ The window change only helps sub-range runs (a 5 s slice of the same run fell fr
 compact observation record was not built: observations are not what dominates (a fixed working set of about
 3.6 GB for the single-stage form plus a cache that grows with the steps), and the hierarchical runs are
 below the limit without it. Disk spill was not built for the same reason. The changed build gives the same
-results as the old one on the slice, and threaded and serial three-person runs give identical results.
+results as the old one, on the slice and on the full runs (every figure of the accuracy tables below is
+unchanged).
 
 **Full runs** (wall seconds and peak resident GB; real-time factor = wall time / sequence time):
 
 | Run | Persons x cameras | Before | After | Real-time factor after |
 |---|---|---|---|---|
-| parent `main`, m33, part a | 1 x 4 | 425 s / 7.2 GB | 535 s / 4.3 GB | 6.3 |
-| parent `main`, m33, part b, threaded | 3 x 5 | 528 s / 8.0 GB | 572 s / 6.0 GB | 20.2 (6.7 per person) |
-| parent `main`, m33, part b, serial | 3 x 5 | | 529 s / 6.0 GB | 18.7 (6.2 per person) |
-| single-stage, m33, part a | 1 x 4 | 530 s / 19.4 GB | 531 s / 13.4 GB | 6.2 |
-| single-stage, m33, part b | 3 x 5 | | 649 s / 21.4 GB | 22.9 (7.6 per person) |
+| parent `main`, part a | 1 x 4 | 425 s / 7.2 GB | 535 s / 4.3 GB | 6.3 |
+| parent `main`, part b | 3 x 5 | 528 s / 8.0 GB | 529 s / 6.0 GB | 18.7 (6.2 per person) |
+| single-stage, part a | 1 x 4 | 530 s / 19.4 GB | 531 s / 13.4 GB | 6.2 |
+| single-stage, part b | 3 x 5 | | 649 s / 21.4 GB | 22.9 (7.6 per person) |
 
 The wall times after the changes are 0-26% above those before with code that does no more work: the
 machine was shared and the two sets were run at different times, so wall-time differences below about 25%
-in this table are noise (memory is not affected). The same trial with all 120 markers took 2,385 to 2,648 s
+in this table are noise (memory is not affected). The same trial with the body-crop finger markers took 2,385 to 2,648 s
 single-stage, 84-93 times real time (28-31 per person).
 
 **Accuracy against the label-fed run** (subjects 1 and 2, the subjects with a reference run; mean / median /
@@ -319,40 +333,31 @@ p90 joint distance in cm over the labelled range):
 
 | Configuration | Subject 1 | Subject 2 |
 |---|---|---|
-| single-stage, 120 markers | 14.0 / 7.8 / 34.4 | 7.3 / 4.2 / 15.3 |
-| single-stage, m33 | 16.4 / 8.3 / 42.8 | 6.9 / 3.9 / 15.7 |
-| parent `main`, 120 markers | 18.8 / 9.2 / 49.2 | 7.2 / 4.2 / 15.9 |
-| parent `main`, m33 | 18.5 / 9.5 / 46.2 | 7.3 / 4.1 / 16.1 |
+| single-stage, with body-crop fingers | 14.0 / 7.8 / 34.4 | 7.3 / 4.2 / 15.3 |
+| single-stage | 16.4 / 8.3 / 42.8 | 6.9 / 3.9 / 15.7 |
+| parent `main`, with body-crop fingers | 18.8 / 9.2 / 49.2 | 7.2 / 4.2 / 15.9 |
+| parent `main` | 18.5 / 9.5 / 46.2 | 7.3 / 4.1 / 16.1 |
 
 Largest joint distance to the label-fed run in the six failure events (cm; 40 cm flags an event, and every
 variant flags the same five):
 
 | Configuration | u3-timo-legs | u4-fall | u4-jitter | u4-lleg | u4-rarm | u4-rarm2 |
 |---|---|---|---|---|---|---|
-| single-stage, 120 markers | 37 | 156 | 107 | 83 | 78 | 64 |
-| single-stage, m33 | 30 | 108 | 89 | 71 | 52 | 94 |
-| parent `main`, m33 | 37 | 127 | 116 | 61 | 57 | 78 |
+| single-stage, with body-crop fingers | 37 | 156 | 107 | 83 | 78 | 64 |
+| single-stage | 30 | 108 | 89 | 71 | 52 | 94 |
+| parent `main` | 37 | 127 | 116 | 61 | 57 | 78 |
 
 **Reading.** The restricted form loses no failure event (the same five are flagged) but does not match the
-single-stage run everywhere: against the single-stage run with the same 33 markers it is closer to the
+single-stage run everywhere: against the single-stage run with the same markers it is closer to the
 label-fed run in two of the six events (`u4-lleg`, `u4-rarm2`), further in the other four, and 2 cm worse
-on average and 3 cm worse at the 90th percentile for subject 1. The single-stage form with 33 markers is as
-fast as the restricted one but peaks at 13.4 GB (part a) and 21.4 GB (part b), above the 8 GB limit; only the
-restricted form meets the memory acceptance without a disk spill. The default therefore ships as the
-restricted form, `["main"]`, with this accuracy difference stated; the single-stage form with 33 markers is
-the choice when accuracy matters more than memory and 16 GB or more is available.
+on average and 3 cm worse at the 90th percentile for subject 1. Without the body-crop finger markers the
+single-stage form is as fast as the restricted one here, but it peaks at 13.4 GB (part a) and 21.4 GB
+(part b), above the 8 GB limit, and that speed holds only because these sequences have no refined hands: with
+them, the 42 `hand21` markers join the one filter and its cost rises again, while the restricted form keeps
+them in the hand stages. The default therefore ships as the restricted form, `["main"]`, with this accuracy
+difference stated.
 
 None of the baseline sequences has `hand21` rows (the detection runs come from the spike pipeline, not the
 refine-hands path), so these figures say nothing about the hand stages; on these sequences the hand stages
 of the default configuration track without finger observations. Measuring them needs a detection run with
 refined hands on a copy of the session.
-
-## 4. Acceptance
-
-- A 10 000-step hierarchical run of a SOMA-77 skeleton peaks below 8 GB resident memory.
-- The run time of the default configuration is reported as a real-time factor per person and
-  camera count, and is the baseline later optimisation is measured against.
-- The default configuration loses no failure event against the single-stage run on the labelled
-  trial, and is chosen on the evaluation harness's distance to the label-fed run where the two differ
-  (the event table measures how far a configuration moves the result, not which result is right).
-- A tracking run records the parent stage's joint groups through its configuration.

@@ -16,7 +16,6 @@
 #include "posetrak/core/skeleton_layout.hpp"
 #include "posetrak/tracking/dot_predict_profile.hpp"
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -1927,7 +1926,7 @@ Eigen::VectorXd UnscentedKalmanFilter::predict_measurements(
     }
 
     // Debug: log NaN count for first sigma point (mean state)
-    static std::atomic<int> call_count{0};
+    static int call_count = 0;
     if (debug_enabled_ && frame_number_ == 0 && call_count == 0) {
         std::cout << "  [DEBUG] predict_measurements: " << nan_count << " NaN projections out of "
                   << n_obs << "\n";

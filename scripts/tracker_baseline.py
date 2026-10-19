@@ -22,7 +22,7 @@ Part a: the 85 s single-person sequence with the SOMA-77 skeleton (variants sing
 Part b: the three-person trial 38-66 s that the failure events were judged on (variants hier120, single120, hier60, main120, main60),
         then the event table of each variant against hier120 (the configuration of the spike's runs).
 Both parts write ``<work-dir>/<part>/results.json`` and ``results.md`` and can be resumed: a variant with a
-result file is skipped (``--force`` reruns it). ``--only NAME[,NAME]`` selects variants, ``--label L`` keeps a result as ``NAME-L`` (a rerun with another binary), ``--binary`` names the tracker (a copy of optbuild's, so a rebuild cannot replace it mid-run), ``--serial-persons`` turns off the threads of part b; ``--end-time-s S`` cuts a run
+result file is skipped (``--force`` reruns it). ``--only NAME[,NAME]`` selects variants, ``--label L`` keeps a result as ``NAME-L`` (a rerun with another binary), ``--binary`` names the tracker (a copy of optbuild's, so a rebuild cannot replace it mid-run); ``--end-time-s S`` cuts a run
 short (a smoke test of the commands, not a measurement).
 
 Peak resident memory is the largest working set of the tracker process, sampled twice a second. The per-step
@@ -54,7 +54,7 @@ from posetrak.tracker.runner import PersonRunSpec, run_multi_person_tracker  # n
 
 DEFAULT_BINARY = REPO / "optbuild" / "cpp" / "cli" / ("posetrak-tracker.exe" if sys.platform == "win32" else "posetrak-tracker")
 # Tracker output lines kept in the result: stage boundaries, state sizes and phases (with the time they appeared).
-LOG_LINES = re.compile(r"error_state_dim|UKF initialized|Hierarchical stage|Will process|Initializing tracker|smooth|Results exported|tracking_run_id|separate threads", re.I)
+LOG_LINES = re.compile(r"error_state_dim|UKF initialized|Hierarchical stage|Will process|Initializing tracker|smooth|Results exported|tracking_run_id", re.I)
 BASE_CONFIG = "hier-dualhand-c14786ab2fbe221e"  # hierarchical: tracker_config_stages rows for HandL and HandR
 
 # Part a: single-person SOMA-77 sequence of the real capture, 152.8-238.0 s.
@@ -192,7 +192,7 @@ def conn_window(db: Path, sequence_id: str) -> tuple[float, float]:
         return conn.execute("SELECT time_start_s, time_end_s FROM pose_observation_sequences WHERE id = ?", (sequence_id,)).fetchone()
 
 
-def run_variant(work: Path, db: Path, part: dict, name: str, end_time: float | None, binary: Path, serial_persons: bool = False, key: str | None = None) -> dict:
+def run_variant(work: Path, db: Path, part: dict, name: str, end_time: float | None, binary: Path, key: str | None = None) -> dict:
     hierarchical, fps, *rest = part["variants"][name]
     groups = list(rest[0]) if rest and rest[0] else None
     reduced = len(rest) > 1 and rest[1] == "m33"
@@ -219,7 +219,7 @@ def run_variant(work: Path, db: Path, part: dict, name: str, end_time: float | N
         if LOG_LINES.search(line):
             log.append((round(time.perf_counter() - started, 1), line[:160]))
 
-    result = run_multi_person_tracker(db, specs, out_dir, binary_path=binary, start_time=start, end_time=end, joint_groups=groups, serial_persons=serial_persons, on_progress=keep)
+    result = run_multi_person_tracker(db, specs, out_dir, binary_path=binary, start_time=start, end_time=end, joint_groups=groups, on_progress=keep)
     wall = time.perf_counter() - started
     peak = memory.stop()
     conn = sqlite3.connect(db)
@@ -285,7 +285,6 @@ def main() -> int:
     ap.add_argument("--end-time-s", type=float, help="cut each run to this many seconds (smoke test)")
     ap.add_argument("--binary", type=Path, default=DEFAULT_BINARY,
                     help="posetrak-tracker executable (a copy of optbuild's, so that a rebuild does not replace it mid-run)")
-    ap.add_argument("--serial-persons", action="store_true", help="part b: step the persons one after another (the default threads them in frames without contact)")
     ap.add_argument("--label", help="keep the result as <variant>-<label>, so a rerun with another binary does not replace the earlier one")
     ap.add_argument("--force", action="store_true", help="rerun variants that already have a result")
     ap.add_argument("--events", type=Path, help="part b: events.json of the evaluation set (enables the event table)")
@@ -306,7 +305,7 @@ def main() -> int:
         if key in results and not args.force:
             print(f"[{key}] already done, skipping", flush=True)
             continue
-        results[key] = run_variant(work, db, part, name, args.end_time_s, args.binary, args.serial_persons, key)
+        results[key] = run_variant(work, db, part, name, args.end_time_s, args.binary, key)
         results_path.write_text(json.dumps(results, indent=1))
         print(f"[{key}] exit {results[key]['exit_code']}  {results[key]['wall_s']:.0f} s  peak {results[key]['peak_rss_gb']:.1f} GB", flush=True)
     events = event_table(db, results, "hier120", args.events) if args.part == "b" else {}

@@ -41,3 +41,23 @@ data and live outside the repository.
 
 These stay tools, not `posetrak` commands: they operate on labeled sets that
 only exist while a capture is being tuned.
+
+## Keypoint candidates and pose-model picks
+
+A second harness scores the keypoints a pose pipeline picked per (camera, frame, keypoint), and tracking runs
+fed with them, on a frozen evaluation set of operator labels. Its parts:
+
+- `kp_gt.py` — library. `read_candidates()` is the one reader of keypoint candidates: the `kp_candidates` rows of
+  a detection run (blob format of `docs/roadmap/features/keypoint-candidates/keypoint-candidates-design.md`
+  §4.1) or a candidate file of the prototype labeller. `pick_metrics()` reports the within-3%-of-box-height
+  share, the same-candidate share (the pick is the candidate the label holds), picks missing on visible labels
+  and false picks on not-visible ones. `tracker_comparison()` and `event_distance()` compare tracking runs with
+  the label-fed reference run and on the failure events.
+- `kp_eval_set.toml` — the frozen evaluation set: labelled ranges, hard windows, failure-event list, reference
+  runs and the scoring script, named in one place. The data (labels, candidate files, events, SHA-256 of
+  each) is capture data and lives outside the repository: pass `--root` or set `POSETRAK_KP_EVAL_ROOT`; the
+  tracking runs are in the session database of `--db` / `POSETRAK_KP_EVAL_DB`, opened read-only.
+- `eval_kp_candidates.py` — `verify` (checksums), `picks`, `tracker`, `events`.
+
+Picks come from the strongest maximum of the candidates, or from a pose observation sequence
+(`picks --pick-sequence SUBJECT=SEQUENCE`), so a productized pipeline is scored without changing the harness.

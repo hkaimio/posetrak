@@ -64,6 +64,16 @@ def test_build_multi_person_args_appends_optional_flags():
     assert args[-1] == "--smooth"
 
 
+def test_build_multi_person_args_passes_parent_joint_groups():
+    persons = [PersonRunSpec(sequence_id="s", skeleton_id="k", config_id="c", person_id=0)]
+    args = _build_multi_person_args(
+        Path("posetrak-tracker"), Path("session.db"), persons, Path("out"),
+        start_time=None, end_time=None, smooth=False, joint_groups=["main"],
+    )
+
+    assert args[args.index("--joint-groups") + 1:] == ["main"]
+
+
 def test_tracker_binary_name_adds_exe_suffix_on_windows():
     assert _tracker_binary_name("win32") == "posetrak-tracker.exe"
 

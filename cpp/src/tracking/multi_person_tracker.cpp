@@ -854,6 +854,7 @@ void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet,
             fmt::print("Running RTS backward smoother...\n");
         }
         auto smoothed = ctx.tracker->smooth();
+        ctx.tracker->release_smoother_cache();
 
         // Each smoothed frame is labelled with the tracker step its timestamp belongs to.
         // The list is not one-per-step: the warm-up frame before step 1 has no filtered

@@ -489,6 +489,15 @@ class Tracker {
      */
     std::vector<SmoothedFrame> smooth() const;
 
+    /**
+     * @brief Free the forward-pass cache that smooth() reads.
+     *
+     * The cache holds three error_dim x error_dim matrices per tracked frame and is
+     * the largest part of a smoothed run's memory. Call it once smooth() has
+     * returned; smooth() throws afterwards.
+     */
+    void release_smoother_cache();
+
    private:
     /**
      * @brief Initialize UKF with given state and initial covariance

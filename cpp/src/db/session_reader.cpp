@@ -222,7 +222,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
         "dot_seg_mask_min_tracklet_fraction,"
         "       COALESCE(dot_seg_mask_cost_scale_at_zero_fraction, 4.0) AS "
         "dot_seg_mask_cost_scale_at_zero_fraction,"
-        "       COALESCE(dot_seg_mask_hard_distance_px, 0.0) AS dot_seg_mask_hard_distance_px"
+        "       COALESCE(dot_seg_mask_hard_distance_px, 0.0) AS dot_seg_mask_hard_distance_px,"
+        "       active_joint_groups"
         " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -262,7 +263,7 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //         63=dot_seg_mask_enabled, 64=dot_seg_mask_dilate_px,
     //         65=dot_seg_mask_tracklet_window, 66=dot_seg_mask_min_tracklet_fraction,
     //         67=dot_seg_mask_cost_scale_at_zero_fraction,
-    //         68=dot_seg_mask_hard_distance_px
+    //         68=dot_seg_mask_hard_distance_px, 69=active_joint_groups
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -482,6 +483,21 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     apply_real(66, out.tracker.dot_seg_mask_min_tracklet_fraction);
     apply_real(67, out.tracker.dot_seg_mask_cost_scale_at_zero_fraction);
     apply_real(68, out.tracker.dot_seg_mask_hard_distance_px);
+
+    // active_joint_groups: stored as a JSON string array, e.g. ["main"]; NULL or [] tracks the
+    // whole skeleton.
+    if (sqlite3_column_type(stmt.ptr, 69) != SQLITE_NULL) {
+        char const* json_str = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 69));
+        if (json_str) {
+            auto arr = nlohmann::json::parse(json_str, nullptr, /*allow_exceptions=*/false);
+            if (arr.is_array()) {
+                for (auto const& elem : arr) {
+                    if (elem.is_string())
+                        out.tracker.active_joint_groups.push_back(elem.get<std::string>());
+                }
+            }
+        }
+    }
 
     // dot_camera_noise_scale: stored as a JSON object of camera_id (as a string
     // key, e.g. "2") -> scale, e.g. {"2": 1.3, "3": 0.7}.
@@ -848,7 +864,8 @@ ObservationSet SessionReader::load_observations(
     Skeleton const& skeleton, double min_confidence, int person_id, bool use_relative_obs,
     double relative_min_conf, double pose_noise_std, double cross_pair_max_px, int cross_pair_max_n,
     double edited_kp_noise_std, std::vector<std::string> const& confidence_threshold_marker_names,
-    double confidence_threshold_override) {
+    double confidence_threshold_override, double window_start_s, double window_end_s) {
+    bool const windowed = std::isfinite(window_start_s) || std::isfinite(window_end_s);
     std::unordered_set<std::string> confidence_override_set(
         confidence_threshold_marker_names.begin(), confidence_threshold_marker_names.end());
     // Step 0: Read pixels_are_undistorted flag for this sequence
@@ -1119,14 +1136,20 @@ ObservationSet SessionReader::load_observations(
     // them), not a labeled marker/keypoint layout decode_keypoints() can
     // parse -- a dots row sharing this query's person_id would otherwise get
     // pulled into a group here and fail to decode as float32[N,3].
+    // A bounded window keeps only the rows inside it; an unbounded side is not compared.
     Stmt obs_stmt(db_,
                   "SELECT po.camera_instance_id, po.video_frame, po.source, po.timestamp_s,"
                   " po.kp_blob, COALESCE(po.noise_scale, 1.0) AS crop_scale"
                   " FROM pose_observations po"
                   " WHERE po.sequence_id = ? AND po.person_id = ? AND po.source != 'dots'"
+                  " AND (? OR po.timestamp_s >= ?) AND (? OR po.timestamp_s < ?)"
                   " ORDER BY po.camera_instance_id, po.video_frame");
     sqlite3_bind_text(obs_stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_int(obs_stmt.ptr, 2, person_id);
+    sqlite3_bind_int(obs_stmt.ptr, 3, std::isfinite(window_start_s) ? 0 : 1);
+    sqlite3_bind_double(obs_stmt.ptr, 4, std::isfinite(window_start_s) ? window_start_s : 0.0);
+    sqlite3_bind_int(obs_stmt.ptr, 5, std::isfinite(window_end_s) ? 0 : 1);
+    sqlite3_bind_double(obs_stmt.ptr, 6, std::isfinite(window_end_s) ? window_end_s : 0.0);
 
     // Takes a *base* source name (any ".refined" suffix already stripped by
     // split_source below) -- 'hand_l' and 'hand_l.refined' both resolve here
@@ -1486,6 +1509,12 @@ ObservationSet SessionReader::load_observations(
         }
         return false;
     }();
+    if (rows_total == 0 && has_any_labeled_marker && windowed) {
+        throw std::runtime_error("No pose_observations rows found for sequence '" + sequence_id +
+                                 "' with person_id=" + std::to_string(person_id) +
+                                 " in the time window [" + std::to_string(window_start_s) + ", " +
+                                 std::to_string(window_end_s) + ") s");
+    }
     if (rows_total == 0 && has_any_labeled_marker) {
         // Query returned no rows — most likely wrong person_id. Show available IDs.
         Stmt pid_stmt(db_,
@@ -1523,13 +1552,13 @@ ObservationSet SessionReader::load_observations(
     }
 
     ObservationSet obs_set(person_id);
-    for (auto const& [inst_id, obs_list] : seq_observations) {
+    for (auto& [inst_id, obs_list] : seq_observations) {
         auto* cam = inst_to_cam.at(inst_id);
         ObservationSequence seq;
         seq.camera_id = cam->id();
         seq.camera_name = cam->name();
-        seq.observations = obs_list;
-        obs_set.add_sequence(seq);
+        seq.observations = std::move(obs_list);
+        obs_set.add_sequence(std::move(seq));
     }
     return obs_set;
 }

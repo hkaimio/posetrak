@@ -60,11 +60,11 @@ one that should be the default.
    restricted to its group only when the run is given the parent's joint groups (`--joint-groups
    main` of the tracker's database mode, `TrackerConfig::active_joint_groups`); without them the
    parent stage tracks the whole skeleton and the hand stages run in addition (section 3). The
-   groups are a command-line option today and are not stored with the configuration or the run.
-   Needed: `tracker_configs.active_joint_groups` so the parent groups are part of the stored
-   configuration; a bundled default tracker configuration with stage rows and `["main"]`; and a
-   check when a run starts that warns when a skeleton with hand groups is tracked with a
-   configuration without stage rows, or with stage rows and an unrestricted parent.
+   groups are stored with the configuration (`tracker_configs.active_joint_groups`, a JSON array;
+   the command line overrides it); `posetrak track run --config` copies the configuration's stage
+   rows; a bundled hierarchical configuration (stage rows and `["main"]`) is the default for
+   skeletons with hand groups; and a run start prints a warning when such a skeleton is tracked
+   single-stage, or hierarchically with an unrestricted parent.
 2. **Do not keep the full smoothed covariance.** The result writer stores only `cov_diag`. If no
    consumer of `SmoothedFrame::covariance` needs more than its diagonal (the hierarchical child
    stages read the smoothed *state* of the parent through `BatchTrajectoryStream`; this has to be
@@ -81,21 +81,25 @@ one that should be the default.
 5. **Lower tracker rate.** `tracker_configs.tracker_fps` exists (120 Hz in the runs measured).
    Measured in section 3: a step at 60 Hz pools two video frames of every camera, so the update
    handles twice the observations and the run is slower, not faster, and moves every failure event.
-   A lower rate would save time only if a step decimated the observations instead of pooling them;
-   not pursued until the options above are measured.
+   A lower rate would save time only if a step decimated the observations instead of pooling them.
+   Dropped as a cost option; `tracker_fps` stays as a configuration value.
 6. **Fewer markers in the main stage.** Dropping 44 of the 48 body-crop finger keypoints from the
    tracked markers (they localise poorly: a median of 0.20 of the hand size against 0.05-0.07 from
    a hand crop) removes most of `m` in a single-stage run and nothing in a hierarchical one, where
    the fingers already sit in the hand stages (the restricted form of section 3 has them out of the
    parent stage).
 7. **Load only the requested window, and smaller observations.** The tracker loads every
-   observation of the sequence whatever time range is tracked, about 5.6 GB resident for the 85 s
-   four-camera sequence (5.5 million observations, about 1 kB each). Loading the requested window
-   only, and a compact in-memory observation record, bound the part of the memory that the smoother
-   options do not touch.
-8. **Per-person threads outside contact.** `MultiPersonTracker::run()` steps persons sequentially;
-   persons are independent outside contact windows (open issue on single-threaded tracking).
-   Near-linear speed-up in the number of persons for most frames.
+   observation of the sequence whatever time range is tracked: about 1 GB resident for the 85 s
+   four-camera sequence (section 5; a 5 s slice peaks 1.0 GB lower when only its window is loaded).
+   The window is loaded alone; a compact in-memory observation record is not worth building at that
+   size. The smoother's per-step cache, not the observations, is what grows with a long run.
+8. **Per-person threads outside contact.** `MultiPersonTracker::run()` steps the persons one after
+   another within each frame; outside contact windows they are independent, so they could step on
+   separate threads. Tried and not kept: in the three-person trial only 23% of the frames have no
+   contact coupling, and the threaded run was slower than the sequential one (572 against 529 s),
+   because the persons' threads compete for the cores the UKF's own sigma-point loops (OpenMP)
+   already use. Worth retrying only on captures where the persons are apart most of the time, with
+   the UKF's thread count capped per person.
 
 A fixed-lag or windowed smoother also bounds memory, but it changes the estimator and belongs to
 iterative tracking (snapshots, restart over a changed range), which is a separate feature. Options
@@ -213,7 +217,8 @@ and there are half as many steps) and saves memory only because it has half as m
 follows the model of finding 4: about 5.6 GB for the observation load plus 1.3 MB per step
 (5.6 + 10,214 x 1.3 MB = 18.9 GB against 19.7 GB measured; 4.8 + 5,106 x 1.3 MB = 11.4 GB against 11.7 GB),
 2.5 times over the acceptance limit, with the smoother's share (about 14 GB) larger than the observation
-load's. The restricted form removes most of that.
+load's. The restricted form removes most of that. (Section 5 measures the observation load itself at
+about 1 GB: the model's 5.6 GB intercept is mostly a fixed working set of the filter, not observations.)
 
 **Part b, three-person trial** (28.4 s, 38.1-66.4 s, three persons in one run, optimized build, smoother on):
 
@@ -283,3 +288,76 @@ far a configuration moves the result, not which side is right.
   trial, and is chosen on the evaluation harness's distance to the label-fed run where the two differ
   (the event table measures how far a configuration moves the result, not which result is right).
 - A tracking run records the parent stage's joint groups through its configuration.
+
+## 5. Results of the changes
+
+Capture: the four-camera 85.13 s sequence of part a (10,214 steps at 120 Hz, one person) and the
+three-person trial of part b (28.36 s, five cameras, about 10,200 steps in all). Configuration: SOMA-77
+skeleton without its 44 body-crop finger markers (they localise poorly, option 6; the scripts call
+these variants `m33` after the 33 markers left in the parent group), 120 Hz, RTS smoothing,
+`optbuild/` release build on the development PC, run in database copies by
+`scripts/tracker_baseline.py`; accuracy by `scripts/tracker_score.py`.
+
+**Memory per change** (part a, 40 s slice, peak resident GB; each row adds one change to the rows above it):
+
+| Build | parent `main` | single-stage |
+|---|---|---|
+| before | 3.81 | 9.73 |
+| + tracked window only | 3.63 | 9.83 |
+| + cache released after smoothing | 2.71 | 9.39 |
+| + diagonal covariance | 2.20 | 7.95 |
+
+The window change only helps sub-range runs (a 5 s slice of the same run fell from 2.3 to 1.3 GB). A
+compact observation record was not built: observations are not what dominates (a fixed working set of about
+3.6 GB for the single-stage form plus a cache that grows with the steps), and the hierarchical runs are
+below the limit without it. Disk spill was not built for the same reason. The changed build gives the same
+results as the old one, on the slice and on the full runs (every figure of the accuracy tables below is
+unchanged).
+
+**Full runs** (wall seconds and peak resident GB; real-time factor = wall time / sequence time):
+
+| Run | Persons x cameras | Before | After | Real-time factor after |
+|---|---|---|---|---|
+| parent `main`, part a | 1 x 4 | 425 s / 7.2 GB | 535 s / 4.3 GB | 6.3 |
+| parent `main`, part b | 3 x 5 | 528 s / 8.0 GB | 529 s / 6.0 GB | 18.7 (6.2 per person) |
+| single-stage, part a | 1 x 4 | 530 s / 19.4 GB | 531 s / 13.4 GB | 6.2 |
+| single-stage, part b | 3 x 5 | | 649 s / 21.4 GB | 22.9 (7.6 per person) |
+
+The wall times after the changes are 0-26% above those before with code that does no more work: the
+machine was shared and the two sets were run at different times, so wall-time differences below about 25%
+in this table are noise (memory is not affected). The same trial with the body-crop finger markers took 2,385 to 2,648 s
+single-stage, 84-93 times real time (28-31 per person).
+
+**Accuracy against the label-fed run** (subjects 1 and 2, the subjects with a reference run; mean / median /
+p90 joint distance in cm over the labelled range):
+
+| Configuration | Subject 1 | Subject 2 |
+|---|---|---|
+| single-stage, with body-crop fingers | 14.0 / 7.8 / 34.4 | 7.3 / 4.2 / 15.3 |
+| single-stage | 16.4 / 8.3 / 42.8 | 6.9 / 3.9 / 15.7 |
+| parent `main`, with body-crop fingers | 18.8 / 9.2 / 49.2 | 7.2 / 4.2 / 15.9 |
+| parent `main` | 18.5 / 9.5 / 46.2 | 7.3 / 4.1 / 16.1 |
+
+Largest joint distance to the label-fed run in the six failure events (cm; 40 cm flags an event, and every
+variant flags the same five):
+
+| Configuration | u3-timo-legs | u4-fall | u4-jitter | u4-lleg | u4-rarm | u4-rarm2 |
+|---|---|---|---|---|---|---|
+| single-stage, with body-crop fingers | 37 | 156 | 107 | 83 | 78 | 64 |
+| single-stage | 30 | 108 | 89 | 71 | 52 | 94 |
+| parent `main` | 37 | 127 | 116 | 61 | 57 | 78 |
+
+**Reading.** The restricted form loses no failure event (the same five are flagged) but does not match the
+single-stage run everywhere: against the single-stage run with the same markers it is closer to the
+label-fed run in two of the six events (`u4-lleg`, `u4-rarm2`), further in the other four, and 2 cm worse
+on average and 3 cm worse at the 90th percentile for subject 1. Without the body-crop finger markers the
+single-stage form is as fast as the restricted one here, but it peaks at 13.4 GB (part a) and 21.4 GB
+(part b), above the 8 GB limit, and that speed holds only because these sequences have no refined hands: with
+them, the 42 `hand21` markers join the one filter and its cost rises again, while the restricted form keeps
+them in the hand stages. The default therefore ships as the restricted form, `["main"]`, with this accuracy
+difference stated.
+
+None of the baseline sequences has `hand21` rows (the detection runs come from the spike pipeline, not the
+refine-hands path), so these figures say nothing about the hand stages; on these sequences the hand stages
+of the default configuration track without finger observations. Measuring them needs a detection run with
+refined hands on a copy of the session.

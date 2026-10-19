@@ -297,13 +297,19 @@ void ResultWriter::write_frame(int step, double timestamp, Eigen::VectorXd const
 
 void ResultWriter::write_smoothed_frame(int step, double timestamp, Eigen::VectorXd const& state,
                                         Eigen::MatrixXd const& covariance) {
+    if (covariance.size() > 0)
+        write_smoothed_frame(step, timestamp, state, Eigen::VectorXd(covariance.diagonal()));
+    else
+        write_smoothed_frame(step, timestamp, state, Eigen::VectorXd());
+}
+
+void ResultWriter::write_smoothed_frame(int step, double timestamp, Eigen::VectorXd const& state,
+                                        Eigen::VectorXd const& cov_diag) {
     auto state_blob = encode_vector(state);
 
     std::vector<uint8_t> cov_diag_blob;
-    if (covariance.size() > 0) {
-        Eigen::VectorXd diag = covariance.diagonal();
-        cov_diag_blob = encode_vector(diag);
-    }
+    if (cov_diag.size() > 0)
+        cov_diag_blob = encode_vector(cov_diag);
 
     pending_.emplace_back(step, timestamp, std::move(state_blob), std::move(cov_diag_blob), 0, 0,
                           0.0, 0.0, 0, 1);

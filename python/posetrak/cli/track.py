@@ -177,7 +177,19 @@ def _build_run_config(
         )
         if base_config_id is not None:
             _copy_remaining_config_columns(conn, base_config_id, config_id)
+            _copy_config_stages(conn, base_config_id, config_id)
     return config_id
+
+
+def _copy_config_stages(conn: sqlite3.Connection, base_config_id: str, new_config_id: str) -> None:
+    """Copy the base config's tracker_config_stages rows, so a run made from a hierarchical
+    config is hierarchical (the presence of stage rows selects hierarchical mode)."""
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(tracker_config_stages)") if r[1] != "tracker_config_id"]
+    conn.execute(
+        f"INSERT INTO tracker_config_stages (tracker_config_id, {', '.join(cols)})"
+        f" SELECT ?, {', '.join(cols)} FROM tracker_config_stages WHERE tracker_config_id = ?",
+        (new_config_id, base_config_id),
+    )
 
 
 def _copy_remaining_config_columns(
@@ -722,7 +734,9 @@ def cmd_run_persons(
         except ValueError as exc:
             fail(str(exc))
     else:
-        config_id = resolve_default_tracker_config(conn, trial_id=trial_id)
+        config_id = resolve_default_tracker_config(
+            conn, trial_id=trial_id, skeleton_ids=[r.skeleton_id for r in resolved]
+        )
 
     # Default output dir
     if output_dir:

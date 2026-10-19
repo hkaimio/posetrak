@@ -36,6 +36,27 @@ Eigen::MatrixXd diag_to_covariance_matrix(Eigen::VectorXd const& diag) {
 
 }  // namespace
 
+std::string hand_stage_cost_warning(Skeleton const& skeleton, TrackerConfig const& config,
+                                    bool has_stage_rows) {
+    bool has_child_groups = false;
+    for (auto const& group : skeleton.groups())
+        has_child_groups = has_child_groups || !group.freeflyer_joint.empty();
+    if (!has_child_groups)
+        return {};
+    if (!has_stage_rows) {
+        return "the skeleton has hand groups but the tracker configuration has no "
+               "tracker_config_stages rows, so every hand marker is tracked in one stage; "
+               "this costs several times the time and memory of the hierarchical form "
+               "(parent stage restricted with active_joint_groups)";
+    }
+    if (config.active_joint_groups.empty()) {
+        return "the tracker configuration has hand stages but no active_joint_groups, so the "
+               "parent stage tracks the whole skeleton and the hand stages run in addition; "
+               "set active_joint_groups to the parent group (e.g. [\"main\"]) to restrict it";
+    }
+    return {};
+}
+
 // ---------------------------------------------------------------------------
 // CSV export helpers (moved verbatim from cli/track.cpp)
 // ---------------------------------------------------------------------------
@@ -274,13 +295,25 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
     if (!quiet) {
         fmt::print("Loading observations from sequence '{}'\n", full_sequence_id);
     }
+    // Only the tracked window is loaded when the caller gave one. The margin covers the
+    // initialisation search, which runs forward from the start but is bounded by the end, and a
+    // frame's observations whose timestamps straddle a window edge. Without an explicit start the
+    // start is derived from the first observations of the whole sequence, so nothing is cut.
+    constexpr double kObservationWindowMarginS = 1.0;
+    double const inf = std::numeric_limits<double>::infinity();
+    double const window_start = std::isnan(opts.override_start_time)
+                                    ? -inf
+                                    : opts.override_start_time - kObservationWindowMarginS;
+    double const window_end = std::isnan(opts.override_end_time)
+                                  ? inf
+                                  : opts.override_end_time + kObservationWindowMarginS;
     ctx->observations = reader.load_observations(
         full_sequence_id, ctx->cameras_by_name, ctx->skeleton, opts.min_confidence, spec.person_id,
         ctx->tracker_config.use_relative_observations, ctx->tracker_config.relative_min_confidence,
         ctx->tracker_config.pose_noise_std, ctx->tracker_config.cross_pair_max_px,
         ctx->tracker_config.cross_pair_max_n, ctx->tracker_config.edited_kp_noise_std,
         ctx->tracker_config.confidence_threshold_marker_names,
-        ctx->tracker_config.confidence_threshold_override);
+        ctx->tracker_config.confidence_threshold_override, window_start, window_end);
 
     // A dots-track skeleton (has_dot_track) can legitimately have zero labeled
     // observations here by construction -- load_observations() itself already
@@ -527,8 +560,13 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
     // tracker_config with any tracker_config_stages rows needs its DB rows kept
     // full-skeleton-width even though *ctx->layout* above may be group-scoped,
     // so a child stage can later merge into DOFs *ctx->layout* doesn't cover.
-    if (!reader.load_tracker_config_stages(full_config_id).empty()) {
+    bool const has_stage_rows = !reader.load_tracker_config_stages(full_config_id).empty();
+    if (has_stage_rows) {
         ctx->full_layout = SkeletonLayout::from_full_skeleton(skeleton_ptr);
+    }
+    if (auto warning = hand_stage_cost_warning(ctx->skeleton, ctx->tracker_config, has_stage_rows);
+        !warning.empty()) {
+        fmt::print(stderr, "Warning: {}\n", warning);
     }
 
     ctx->exporter = std::make_unique<TrackingExporter>(spec.output_dir, ctx->skeleton, *ctx->layout,
@@ -842,6 +880,7 @@ void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet,
             fmt::print("Running RTS backward smoother...\n");
         }
         auto smoothed = ctx.tracker->smooth();
+        ctx.tracker->release_smoother_cache();
 
         // Each smoothed frame is labelled with the tracker step its timestamp belongs to.
         // The list is not one-per-step: the warm-up frame before step 1 has no filtered
@@ -903,14 +942,14 @@ void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet,
                         ? expand_state_to_full_layout(it->state, *ctx.layout, *ctx.full_layout)
                               .to_error_vector()
                         : it->state.to_error_vector();
-                Eigen::MatrixXd const cov_for_write =
-                    ctx.full_layout && it->covariance.size() > 0
-                        ? diag_to_covariance_matrix(expand_cov_diag_to_full_layout(
-                              it->covariance.diagonal(), *ctx.layout, *ctx.full_layout,
+                Eigen::VectorXd const cov_for_write =
+                    ctx.full_layout && it->covariance_diag.size() > 0
+                        ? expand_cov_diag_to_full_layout(
+                              it->covariance_diag, *ctx.layout, *ctx.full_layout,
                               ctx.tracker_config.init_joint_std * ctx.tracker_config.init_joint_std,
                               ctx.tracker_config.init_velocity_std *
-                                  ctx.tracker_config.init_velocity_std))
-                        : it->covariance;
+                                  ctx.tracker_config.init_velocity_std)
+                        : it->covariance_diag;
                 ctx.result_writer->write_smoothed_frame(step_idx, it->timestamp, state_vec,
                                                         cov_for_write);
             }

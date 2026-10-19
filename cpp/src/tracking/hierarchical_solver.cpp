@@ -362,7 +362,7 @@ void run_one_stage(PersonContext& parent_ctx, StageConfigOverrides const& overri
             state_values.push_back(child_vels[static_cast<Eigen::Index>(j)]);
         }
 
-        Eigen::VectorXd const child_cov_diag = smoothed.covariance.diagonal();
+        Eigen::VectorXd const child_cov_diag = smoothed.covariance_diag;
         std::vector<int> cov_diag_indices;
         std::vector<double> cov_diag_values;
         cov_diag_indices.reserve(2 * error_map.size());

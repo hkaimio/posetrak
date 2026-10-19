@@ -16,6 +16,9 @@
  *   x_{k|N} = x_{k|k}  ⊕  G_k * ( x_{k+1|N} ⊖ x_{k+1|k} )
  *   P_{k|N} = P_{k|k}  +  G_k * ( P_{k+1|N} - P_{k+1|k} ) * G_k^T
  *
+ * Only the diagonal of each P_{k|N} is returned; the backward recursion itself
+ * carries the full matrix of the following frame.
+ *
  * where ⊕ and ⊖ are manifold-aware retraction/log-map operations on the
  * pose manifold SO(3)^m × R^n.
  *
@@ -63,11 +66,16 @@ struct FrameSmootherData {
 };
 
 /// @brief Smoothed state estimate for a single frame.
+///
+/// Only the diagonal of the smoothed covariance is kept: it is all the result
+/// writer and the hierarchical child stages read, and the full matrix would
+/// cost one more error_dim x error_dim block per frame on top of the forward
+/// cache while the backward sweep runs.
 struct SmoothedFrame {
     double timestamp;
     State state;
-    Eigen::MatrixXd covariance;
-    bool tracked = true;  ///< Copied from FrameSmootherData::tracked.
+    Eigen::VectorXd covariance_diag;  ///< diag(P_{k|N}); empty when unavailable
+    bool tracked = true;              ///< Copied from FrameSmootherData::tracked.
 };
 
 /// @brief Tracker step (>= 1) a smoothed frame belongs to, from its timestamp, or

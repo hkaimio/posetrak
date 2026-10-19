@@ -237,7 +237,8 @@ void create_fixture_db(fs::path const& path, int num_frames, double dt) {
             dot_seg_mask_enabled INTEGER, dot_seg_mask_dilate_px REAL,
             dot_seg_mask_tracklet_window INTEGER, dot_seg_mask_min_tracklet_fraction REAL,
             dot_seg_mask_cost_scale_at_zero_fraction REAL,
-            dot_seg_mask_hard_distance_px REAL
+            dot_seg_mask_hard_distance_px REAL,
+            active_joint_groups TEXT
         );
     )");
     exec_sql(db, R"(

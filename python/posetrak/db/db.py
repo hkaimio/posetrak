@@ -24,12 +24,12 @@ from typing import Final
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 16
+REGISTRY_SCHEMA_VERSION: Final[int] = 17
 
 #: Seconds a connection waits for another writer's lock before failing. The C++
 #: tracker's connections use the same value.
 BUSY_TIMEOUT_S: Final[float] = 60.0
-SESSION_SCHEMA_VERSION: Final[int] = 66
+SESSION_SCHEMA_VERSION: Final[int] = 67
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -340,6 +340,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 15
     if actual == 15:
         _migrate_registry_v15_to_v16(conn)
+        actual = 16
+    if actual == 16:
+        _migrate_registry_v16_to_v17(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -801,6 +804,18 @@ def _migrate_registry_v15_to_v16(conn: sqlite3.Connection) -> None:
     if "dot_seg_mask_hard_distance_px" not in _tracker_config_columns(conn):
         conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_hard_distance_px REAL")
     _set_schema_version(conn, 16)
+    conn.commit()
+
+
+def _migrate_registry_v16_to_v17(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 16 to 17.
+
+    v17 adds tracker_configs.active_joint_groups, mirroring the session schema
+    v66->v67 change -- see _migrate_session_v66_to_v67.
+    """
+    if "active_joint_groups" not in _tracker_config_columns(conn):
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN active_joint_groups TEXT")
+    _set_schema_version(conn, 17)
     conn.commit()
 
 
@@ -2088,6 +2103,22 @@ def _migrate_session_v65_to_v66(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v66_to_v67(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 66 to 67.
+
+    v67 adds tracker_configs.active_joint_groups: the joint groups the tracker's
+    main (parent) stage tracks, so that a hierarchical configuration states the
+    form it was made for (parent stage restricted to its group) instead of
+    depending on a command-line option. NULL keeps the previous behaviour, the
+    whole skeleton. Mirrors the registry schema v16->v17 change, since every
+    session embeds a copy of tracker_configs.
+    """
+    if "active_joint_groups" not in _tracker_config_columns(conn):
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN active_joint_groups TEXT")
+    _set_schema_version(conn, 67)
+    conn.commit()
+
+
 def _migrate_session_v57_to_v58(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 57 to 58.
 
@@ -2445,6 +2476,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 65
     if actual == 65:
         _migrate_session_v65_to_v66(conn)
+        actual = 66
+    if actual == 66:
+        _migrate_session_v66_to_v67(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

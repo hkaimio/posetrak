@@ -70,6 +70,19 @@ void export_state_vector(std::ofstream& file, int frame_idx, double timestamp, S
 /// @brief Generate the CSV header line matching export_state_vector()'s column order.
 std::string generate_state_header(SkeletonLayout const& layout);
 
+/// @brief Cost warning for a run whose skeleton has child-stage (hand) groups but is not
+/// tracked in the cheap hierarchical form.
+///
+/// A skeleton with child-stage groups tracked single-stage, or hierarchically with the
+/// parent stage on the whole skeleton (no active_joint_groups), carries every hand marker
+/// through the largest filter: several times the time and memory of a parent stage
+/// restricted to its own group. Returns an empty string when the run is in the cheap form
+/// or the skeleton has no child-stage groups.
+///
+/// @param has_stage_rows True when the tracker configuration has tracker_config_stages rows.
+std::string hand_stage_cost_warning(Skeleton const& skeleton, TrackerConfig const& config,
+                                    bool has_stage_rows);
+
 /// @brief Append one smoothed-joint-angles row (joint_angles.csv format) to *file*.
 void write_smoothed_joint_angles_frame(std::ofstream& file, int frame, double timestamp,
                                        State const& state, SkeletonLayout const& layout);

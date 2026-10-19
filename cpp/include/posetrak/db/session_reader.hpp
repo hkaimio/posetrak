@@ -12,6 +12,7 @@
 #include <sqlite3.h>
 
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <optional>
 #include <string>
@@ -236,6 +237,10 @@ class SessionReader {
     ///   TrackerConfig::confidence_threshold_marker_names). Empty = disabled.
     /// @param confidence_threshold_override Per-marker confidence floor used for the markers
     ///   named above.
+    /// @param window_start_s Load only observations with timestamp >= this (default: all).
+    /// @param window_end_s Load only observations with timestamp < this (default: all). A caller
+    ///   that tracks a time range passes the range plus a margin: the observations of a long
+    ///   sequence are the largest part of the tracker's memory otherwise.
     /// @return ObservationSet ready for the tracker
     ObservationSet
     load_observations(std::string const& sequence_id, std::map<std::string, Camera> const& cameras,
@@ -244,7 +249,9 @@ class SessionReader {
                       double pose_noise_std = 0.0, double cross_pair_max_px = 0.0,
                       int cross_pair_max_n = 10, double edited_kp_noise_std = 0.0,
                       std::vector<std::string> const& confidence_threshold_marker_names = {},
-                      double confidence_threshold_override = 0.0);
+                      double confidence_threshold_override = 0.0,
+                      double window_start_s = -std::numeric_limits<double>::infinity(),
+                      double window_end_s = std::numeric_limits<double>::infinity());
 
     /// @brief Load anonymous reflective-dot candidates for a sequence.
     ///

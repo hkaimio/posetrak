@@ -141,6 +141,7 @@ class ObservationSet {
     /// @brief Add observation sequence for a camera
     /// @param sequence Observation sequence
     void add_sequence(ObservationSequence const& sequence);
+    void add_sequence(ObservationSequence&& sequence);
 
     /// @brief Get sequence by camera name
     /// @param camera_name Camera name

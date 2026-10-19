@@ -78,6 +78,11 @@ class ResultWriter {
     void write_smoothed_frame(int step, double timestamp, Eigen::VectorXd const& state,
                               Eigen::MatrixXd const& covariance);
 
+    /// @brief As above, from the covariance diagonal alone (an empty vector writes a
+    /// zero-length blob).
+    void write_smoothed_frame(int step, double timestamp, Eigen::VectorXd const& state,
+                              Eigen::VectorXd const& cov_diag);
+
     /// @brief Write per-observation results for one forward-pass frame.
     ///
     /// Encodes observations as a float32 blob shaped [n_cameras, n_markers, 8]:

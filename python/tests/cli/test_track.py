@@ -929,6 +929,31 @@ class TestRunPersonsWithObjects:
         assert [s.seed_position for s in mock_run.call_args.args[1]] == [None, (1.0, 2.0, 3.0), None]
 
 
+def test_a_run_config_made_from_a_hierarchical_base_is_hierarchical(tmp_path):
+    """The stage rows select hierarchical mode and active_joint_groups restricts the
+    parent stage; a run config made from the base must carry both."""
+    from posetrak.cli.track import _build_run_config
+    from posetrak.db.db import create_session
+    from posetrak.db.manage_config import HIERARCHICAL_CONFIG_ID, seed_hierarchical_tracker_config
+
+    conn = create_session(tmp_path / "s.db")
+    seed_hierarchical_tracker_config(conn)
+    new_id = _build_run_config(
+        conn, base_config_id=HIERARCHICAL_CONFIG_ID, process_noise_std=None, process_noise_vel_std=None,
+        velocity_half_life_s=None, measurement_noise_std=None, pose_noise_std=None,
+        outlier_threshold=None, tracker_fps=None, use_relative_obs=False,
+        relative_min_conf=None, cross_pair_radius=None, cross_pair_max_n=None,
+        velocity_cam_labels=None, sequence_cameras=[],
+    )
+    stages = conn.execute(
+        "SELECT group_name FROM tracker_config_stages WHERE tracker_config_id = ? ORDER BY group_name",
+        (new_id,),
+    ).fetchall()
+    assert [r["group_name"] for r in stages] == ["HandL", "HandR"]
+    row = conn.execute("SELECT active_joint_groups FROM tracker_configs WHERE id = ?", (new_id,)).fetchone()
+    assert json.loads(row["active_joint_groups"]) == ["main"]
+
+
 def test_a_run_config_made_from_a_base_keeps_every_other_setting(tmp_path):
     """Settings the CLI does not override (dot assignment, segmentation mask, ...)
     must be carried over from the base config, not reset to defaults."""

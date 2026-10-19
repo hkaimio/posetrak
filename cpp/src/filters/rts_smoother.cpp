@@ -164,9 +164,13 @@ std::vector<SmoothedFrame> RTSSmoother::smooth(std::vector<FrameSmootherData> co
     std::vector<SmoothedFrame> result;
     result.reserve(N);
     for (int k = 0; k < N; ++k) {
-        result.push_back(
-            {data[k].timestamp, data[k].posterior_state, data[k].posterior_cov, data[k].tracked});
+        result.push_back({data[k].timestamp, data[k].posterior_state,
+                          data[k].posterior_cov.diagonal(), data[k].tracked});
     }
+
+    // Full smoothed covariance of frame k+1, carried through the sweep (the last frame's
+    // smoothed covariance is its filtered posterior).
+    Eigen::MatrixXd next_cov = data[N - 1].posterior_cov;
 
     // Backward sweep: k = N-2 down to 0.
     // For step k, the RTS gain uses cross-cov and prior from frame k+1
@@ -189,8 +193,9 @@ std::vector<SmoothedFrame> RTSSmoother::smooth(std::vector<FrameSmootherData> co
         result[k].state = state_retract(data[k].posterior_state, G * delta);
 
         // Smoothed covariance: P_{k|N} = P_{k|k} + G*(P_{k+1|N} - P_{k+1|k})*G^T
-        Eigen::MatrixXd const cov_diff = sm_next.covariance - fwd_next.prior_cov;
-        result[k].covariance = data[k].posterior_cov + G * cov_diff * G.transpose();
+        Eigen::MatrixXd const cov_diff = next_cov - fwd_next.prior_cov;
+        next_cov = data[k].posterior_cov + G * cov_diff * G.transpose();
+        result[k].covariance_diag = next_cov.diagonal();
     }
 
     return result;

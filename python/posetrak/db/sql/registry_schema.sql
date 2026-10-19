@@ -241,7 +241,14 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     -- the current frame is excluded outright, with no tracklet history needed
     -- (a flickering static light gets a new tracklet id every few frames);
     -- skipped for a camera whose mask lacks the label entirely.
-    dot_seg_mask_hard_distance_px     REAL     -- Native px; NULL/0 = disabled
+    dot_seg_mask_hard_distance_px     REAL,    -- Native px; NULL/0 = disabled
+    -- Added in schema migration v67 (session)/v17 (registry): the joint groups the tracker's
+    -- main (parent) stage tracks. A hierarchical configuration (one with tracker_config_stages
+    -- rows) restricted to its parent group lets the child stages carry the hands; without the
+    -- restriction the parent stage tracks the whole skeleton and the child stages run in
+    -- addition. An explicit --joint-groups on the tracker command line overrides this column.
+    -- See docs/roadmap/features/tracker-performance/tracker-performance-design.md.
+    active_joint_groups               TEXT     -- JSON array of skeleton group names, e.g. ["main"]; NULL/[] = the whole skeleton
 );
 
 -- Added in schema migration v37: hierarchical body/hand solver -- per-stage

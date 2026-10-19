@@ -825,6 +825,7 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
                 fmt::print("Running RTS backward smoother...\n");
             }
             auto smoothed = tracker.smooth();
+            tracker.release_smoother_cache();
 
             // Label each smoothed frame with the step its timestamp belongs to (see
             // finalize_person_context()): the warm-up frame has no step, and steps

@@ -1228,6 +1228,10 @@ void Tracker::reset() {
 
 // ─── RTS smoothing ────────────────────────────────────────────────────────────
 
+void Tracker::release_smoother_cache() {
+    std::vector<FrameSmootherData>().swap(smoother_cache_);
+}
+
 void Tracker::enable_smoothing(bool enable) {
     smoothing_enabled_ = enable;
     if (!enable) {

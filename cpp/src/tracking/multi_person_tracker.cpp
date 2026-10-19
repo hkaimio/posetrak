@@ -14,6 +14,7 @@
 #include "posetrak/tracking/hierarchical_solver.hpp"
 #include <algorithm>
 #include <cmath>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <numeric>
@@ -1384,6 +1385,30 @@ MultiPersonTracker::build_anchor_observations(int idx, int step,
     return result;
 }
 
+void MultiPersonTracker::step_persons_in_parallel(int step) {
+    std::vector<std::future<void>> running;
+    for (auto& person : persons_) {
+        PersonContext& ctx = *person;
+        if (step >= ctx.num_steps)
+            continue;
+        running.push_back(std::async(std::launch::async, [this, &ctx, step] {
+            step_person_context(ctx, step, verbose_, opts_.quiet);
+        }));
+    }
+    // Wait for every subject before rethrowing, so no thread outlives an error.
+    std::exception_ptr first_error;
+    for (auto& f : running) {
+        try {
+            f.get();
+        } catch (...) {
+            if (!first_error)
+                first_error = std::current_exception();
+        }
+    }
+    if (first_error)
+        std::rethrow_exception(first_error);
+}
+
 void MultiPersonTracker::run() {
     for (auto& ctx : persons_) {
         step_person_context_frame0(*ctx);
@@ -1400,6 +1425,7 @@ void MultiPersonTracker::run() {
 
     // "for frame: for person", per Stage 1's shape -- Stage 2 fills in the
     // per-frame contact-gate refresh and per-person anchor injection.
+    int parallel_steps = 0;
     for (int step = 1; step < max_steps; ++step) {
         // Rotate the processing order every frame so the "who goes first only
         // sees stale anchors" asymmetry doesn't consistently favor one person.
@@ -1465,6 +1491,17 @@ void MultiPersonTracker::run() {
                 subjects, combined_candidates, config_ctx.tracker_config, step, dot_timestamp);
         }
 
+        // Subjects are independent of each other in a frame with no contact pair (no
+        // cross-person anchors) and no shared dot assignment: each steps on its own thread. The
+        // contact gate is refreshed after the step, as in the sequential path below.
+        if (!opts_.serial_persons && persons_.size() > 1 && candidates_by_idx.empty() &&
+            active_contact_pairs_.empty()) {
+            step_persons_in_parallel(step);
+            ++parallel_steps;
+            update_contact_gate();
+            continue;
+        }
+
         std::vector<char> processed_this_frame(persons_.size(), 0);
         for (int idx : order) {
             auto& ctx = *persons_[static_cast<size_t>(idx)];
@@ -1486,6 +1523,11 @@ void MultiPersonTracker::run() {
         }
 
         update_contact_gate();
+    }
+
+    if (!opts_.quiet && persons_.size() > 1) {
+        fmt::print("Stepped {} of {} frames with the subjects on separate threads\n",
+                   parallel_steps, std::max(max_steps - 1, 0));
     }
 
     for (auto& ctx : persons_) {

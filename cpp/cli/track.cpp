@@ -1170,13 +1170,11 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
 // run_track_from_db() separately (each person's CSVs land in
 // <output_dir>/person_<index>/).
 // ---------------------------------------------------------------------------
-static int run_multi_person_track_from_db(std::string const& db_path,
-                                          std::vector<PersonSpec> const& specs,
-                                          std::string const& output_dir, bool verbose, bool quiet,
-                                          bool smooth_output, bool debug_output, bool debug_init,
-                                          double min_confidence,
-                                          std::vector<std::string> const& active_joint_groups,
-                                          double override_start_time, double override_end_time) {
+static int run_multi_person_track_from_db(
+    std::string const& db_path, std::vector<PersonSpec> const& specs, std::string const& output_dir,
+    bool verbose, bool quiet, bool smooth_output, bool debug_output, bool debug_init,
+    double min_confidence, std::vector<std::string> const& active_joint_groups,
+    double override_start_time, double override_end_time, bool serial_persons) {
     std::vector<std::string> run_ids;  // runs to mark failed when tracking throws
     try {
         BuildPersonContextOptions opts;
@@ -1189,6 +1187,7 @@ static int run_multi_person_track_from_db(std::string const& db_path,
         opts.debug_init = debug_init;
         opts.smooth_output = smooth_output;
         opts.quiet = quiet;
+        opts.serial_persons = serial_persons;
 
         std::vector<PersonSpec> resolved_specs = specs;
         for (size_t i = 0; i < resolved_specs.size(); ++i) {
@@ -1252,6 +1251,7 @@ int main(int argc, char* argv[]) {
     double db_min_confidence = 0.1;
     int db_person_id = 0;
     std::vector<std::string> db_active_joint_groups;
+    bool db_serial_persons = false;
     double db_start_time = std::numeric_limits<double>::quiet_NaN();
     double db_end_time = std::numeric_limits<double>::quiet_NaN();
     std::vector<double> db_seed_position;  // see PersonSpec::seed_position
@@ -1299,6 +1299,10 @@ int main(int argc, char* argv[]) {
                           "Person index in pose observations (default: 0)");
     track_cmd->add_option("--joint-groups", db_active_joint_groups,
                           "Active joint groups for DB mode (empty = all)");
+    track_cmd->add_flag("--serial-persons", db_serial_persons,
+                        "Multi-person DB mode: step the subjects one after another instead of on "
+                        "one thread each in frames where they are independent (same results; for "
+                        "comparison and debugging)");
     track_cmd->add_option("--start-time", db_start_time,
                           "Override sequence start time in seconds (default: auto-detect "
                           "first frame where min_cameras_for_init cameras are active)");
@@ -1413,9 +1417,10 @@ int main(int argc, char* argv[]) {
                 specs[static_cast<size_t>(db_subject_seeds[i])].seed_position = Eigen::Vector3d(
                     db_subject_seeds[i + 1], db_subject_seeds[i + 2], db_subject_seeds[i + 3]);
             }
-            return run_multi_person_track_from_db(
-                db_path, specs, db_output_dir, verbose, quiet, smooth_output, debug_output,
-                debug_init, db_min_confidence, db_active_joint_groups, db_start_time, db_end_time);
+            return run_multi_person_track_from_db(db_path, specs, db_output_dir, verbose, quiet,
+                                                  smooth_output, debug_output, debug_init,
+                                                  db_min_confidence, db_active_joint_groups,
+                                                  db_start_time, db_end_time, db_serial_persons);
         } else if (!db_path.empty()) {
             // DB mode: validate required DB args
             if (db_sequence_id.empty() || db_skeleton_id.empty() || db_config_id.empty()) {

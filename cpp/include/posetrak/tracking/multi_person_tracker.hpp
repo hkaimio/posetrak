@@ -127,6 +127,10 @@ struct BuildPersonContextOptions {
     bool debug_init = false;
     bool smooth_output = false;
     bool quiet = true;
+    /// Step the subjects one after another even when no step-coupling exists. By default
+    /// MultiPersonTracker::run() steps them on one thread each in the frames where they are
+    /// independent (no contact pair, no shared dot assignment); results are identical either way.
+    bool serial_persons = false;
 };
 
 /// @brief Owns everything needed to track one person through a sequence and record
@@ -433,6 +437,10 @@ class MultiPersonTracker {
     /// @brief Re-evaluate the active contact set from every (still-running)
     /// person's current FK marker positions -- gate levels 1-2.
     void update_contact_gate();
+
+    /// @brief Step every still-running person for *step* on its own thread. Only valid for
+    /// a step with no contact pair and no shared dot assignment, where persons share no state.
+    void step_persons_in_parallel(int step);
 
     /// @brief Build person *idx*'s cross-person anchor observations for *step*
     /// from the currently-active contact set -- gate level 3 + construction.

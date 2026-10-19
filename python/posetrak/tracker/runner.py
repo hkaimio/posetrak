@@ -218,6 +218,7 @@ def _build_multi_person_args(
     end_time: float | None,
     smooth: bool,
     joint_groups: list[str] | None = None,
+    serial_persons: bool = False,
 ) -> list[str]:
     """Build the CLI argument list for a ``--person``-mode multi-person run.
 
@@ -242,6 +243,8 @@ def _build_multi_person_args(
         args += ["--end-time", str(end_time)]
     if joint_groups:
         args += ["--joint-groups", *joint_groups]
+    if serial_persons:
+        args.append("--serial-persons")
     if smooth:
         args.append("--smooth")
     return args
@@ -257,6 +260,7 @@ def run_multi_person_tracker(
     end_time: float | None = None,
     smooth: bool = True,
     joint_groups: list[str] | None = None,
+    serial_persons: bool = False,
     on_progress: Callable[[str], None] | None = None,
 ) -> MultiPersonResult:
     """Run the posetrak-tracker binary in ``--person`` multi-person mode.
@@ -291,6 +295,9 @@ def run_multi_person_tracker(
         Restrict the main (parent) stage to these joint groups of the skeleton
         (``--joint-groups``), for every person; a hierarchical run's child stages
         keep their own groups. None leaves the groups to the tracker configuration.
+    serial_persons:
+        Step the persons one after another instead of on one thread each in the
+        frames where they are independent (``--serial-persons``); same results.
     on_progress:
         Callback invoked for each non-empty output line.
 
@@ -304,6 +311,7 @@ def run_multi_person_tracker(
         binary, session_path, persons, output_dir,
         start_time=start_time, end_time=end_time, smooth=smooth,
         joint_groups=joint_groups,
+        serial_persons=serial_persons,
     )
 
     run_ids: list[str | None] = [None] * len(persons)

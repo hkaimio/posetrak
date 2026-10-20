@@ -78,7 +78,7 @@ def test_second_editor_is_refused_and_discard_frees_the_run(conn: sqlite3.Connec
     rev = sr.open_revision(conn, RUN)
     with pytest.raises(sr.OpenRevisionError) as err:
         sr.open_revision(conn, RUN)
-    assert err.value.revision == rev
+    assert err.value.open_revision.revision == rev
     sr.write_mask(conn, RUN, VID, 5, rev, b"x")
     sr.discard_revision(conn, RUN, rev)
     assert conn.execute("SELECT COUNT(*) FROM seg_masks").fetchone()[0] == 0
@@ -121,3 +121,64 @@ def test_migration_from_67_keeps_every_blob(tmp_path: Path) -> None:
     assert m.execute("SELECT COUNT(*) FROM seg_masks_latest").fetchone()[0] == 6
     m.execute("PRAGMA foreign_keys = OFF")
     m.execute("UPDATE seg_masks SET mask_blob = NULL WHERE frame_idx = 0")  # nullable now
+
+
+def _save(conn: sqlite3.Connection, changes: dict[int, bytes | None]) -> int:
+    rev = sr.open_revision(conn, RUN)
+    for frame, blob in changes.items():
+        sr.write_mask(conn, RUN, VID, frame, rev, blob)
+    sr.close_revision(conn, RUN, rev)
+    return rev
+
+
+def _reads(conn: sqlite3.Connection, revisions: list[int]) -> dict[int, dict[int, bytes]]:
+    return {r: {f: b for _, f, b in sr.masks_at(conn, RUN, r)} for r in revisions}
+
+
+def test_prune_keeps_referenced_and_newest_revisions_and_every_kept_read(conn: sqlite3.Connection) -> None:
+    for f in (1, 2, 3):
+        conn.execute("INSERT INTO seg_masks VALUES (?, ?, ?, 0, ?)", (RUN, VID, f, b"a%d" % f))
+    conn.commit()
+    _save(conn, {1: b"b1"})                 # revision 1
+    _save(conn, {1: b"c1", 2: None})        # revision 2: frame 2 deleted
+    _save(conn, {3: b"d3"})                 # revision 3
+    _save(conn, {4: b"e4"})                 # revision 4, the newest
+    conn.execute(
+        "INSERT INTO detection_runs (id, shot_id, sync_config_id, time_start_s, time_end_s, detector_model,"
+        " pose_model, status, created_at, seg_quality_run_id, seg_revision)"
+        " VALUES ('d', 'cap', 'sync', 0, 1, 'segmentation', 'm', 'running', 't', ?, 2)", (RUN,))
+    conn.commit()
+    kept = _reads(conn, [2, 4])
+
+    dry = sr.prune(conn, RUN, dry_run=True)
+    assert dry.revisions_removed == [0, 1, 3]
+    assert conn.execute("SELECT COUNT(*) FROM seg_mask_revisions").fetchone()[0] == 5
+
+    result = sr.prune(conn, RUN)
+    assert result.revisions_removed == [0, 1, 3]
+    assert [r[0] for r in conn.execute("SELECT revision FROM seg_mask_revisions ORDER BY 1")] == [2, 4]
+    assert _reads(conn, [2, 4]) == kept                  # kept revisions read exactly as before
+    assert sr.newest_closed_revision(conn, RUN) == 4
+
+
+def test_prune_never_touches_an_open_revision(conn: sqlite3.Connection) -> None:
+    _save(conn, {1: b"x"})
+    open_rev = sr.open_revision(conn, RUN)
+    sr.write_mask(conn, RUN, VID, 9, open_rev, b"y")
+    conn.commit()
+    sr.prune(conn, RUN)
+    assert sr.get_open_revision(conn, RUN).revision == open_rev
+    assert conn.execute("SELECT COUNT(*) FROM seg_masks WHERE revision = ?", (open_rev,)).fetchone()[0] == 1
+
+
+def test_delete_run_forgets_the_run_in_results_that_read_it(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "INSERT INTO detection_runs (id, shot_id, sync_config_id, time_start_s, time_end_s, detector_model,"
+        " pose_model, status, created_at, seg_quality_run_id, seg_revision)"
+        " VALUES ('d', 'cap', 'sync', 0, 1, 'segmentation', 'm', 'complete', 't', ?, 0)", (RUN,))
+    _save(conn, {1: b"x"})
+    sr.delete_run(conn, RUN)
+    conn.execute("DELETE FROM seg_quality_runs WHERE id = ?", (RUN,))
+    conn.commit()
+    assert conn.execute("SELECT seg_quality_run_id, seg_revision FROM detection_runs").fetchone()[:] == (None, None)
+    assert conn.execute("SELECT COUNT(*) FROM seg_mask_revisions").fetchone()[0] == 0

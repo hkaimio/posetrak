@@ -233,6 +233,13 @@ def refresh_run(
             "INSERT INTO person_tracks (id, detection_run_id, shot_video_id, track_id, first_frame, last_frame)"
             " SELECT lower(hex(randomblob(16))), ?, shot_video_id, track_id, first_frame, last_frame"
             " FROM person_tracks WHERE detection_run_id = ?", (new_id, run_id))
+        # A mask run's track ids are the mask labels, so the old run's track-to-person assignments
+        # hold for the new one and it can be finalised the same way.
+        conn.execute(
+            "INSERT INTO detection_track_assignments (detection_run_id, shot_video_id, track_id, person_name,"
+            " capture_person_id, subject_id, first_frame, last_frame) SELECT ?, shot_video_id, track_id, person_name,"
+            " capture_person_id, subject_id, first_frame, last_frame FROM detection_track_assignments"
+            " WHERE detection_run_id = ?", (new_id, run_id))
         conn.commit()
 
         jobs = []

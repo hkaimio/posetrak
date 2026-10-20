@@ -118,6 +118,15 @@ def test_refresh_copies_unchanged_frames_and_reruns_the_stale_ones(session, seg_
     assert session.execute("SELECT COUNT(*) FROM detection_keypoints WHERE detection_run_id = ?", (new_id,)).fetchone()[0] == 5
     spans = session.execute("SELECT first_frame, last_frame FROM person_tracks WHERE detection_run_id = ?", (new_id,)).fetchall()
     assert [tuple(s) for s in spans] == [(0, 4)]
+    session.execute(
+        "INSERT INTO detection_track_assignments (detection_run_id, shot_video_id, track_id, person_name,"
+        " first_frame, last_frame) SELECT ?, shot_video_id, track_id, 'A', first_frame, last_frame"
+        " FROM person_tracks WHERE detection_run_id = ?", (run_id, run_id))
+    again = refresh_run(session, run_id, stale, estimator=Estimator())
+    assert [tuple(r) for r in session.execute(
+        "SELECT track_id, person_name FROM detection_track_assignments WHERE detection_run_id = ?", (again,))] == [
+        (r["track_id"], "A") for r in session.execute(
+            "SELECT track_id FROM person_tracks WHERE detection_run_id = ?", (run_id,))]
     # The old run is untouched and is now stale; the new one is current.
     assert session.execute("SELECT COUNT(*) FROM person_detections WHERE detection_run_id = ?", (run_id,)).fetchone()[0] == 5
     assert stale_frames(session, new_id) == []

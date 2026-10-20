@@ -269,6 +269,10 @@ Stage 0 is measurement only and comes first because several later scopes depend 
   saves another.
 - **Risks:** the rebuild of `seg_masks` on large sessions (time, disk); missing one of the direct
   readers (they are enumerated: about twenty queries in eight files).
+- **Outcome:** done ([status](../segmentation-versioning/status.md)). Reproduction and the two-process
+  test pass on a real ukemi trial; the migration takes seconds and grows the file by the size of its masks
+  until a `VACUUM`. Open: a detection run assembled from several pose jobs of the segmentation window
+  records the first job's revision; the crash-recovery offer works for editors on the same host only.
 
 ### Stage 9 — Keypoint candidates
 

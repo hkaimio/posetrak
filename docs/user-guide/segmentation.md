@@ -177,7 +177,9 @@ against the size of the box: a larger box tolerates a larger shift in video
 pixels), or a person appeared in or disappeared from the frame. Add
 `--refresh` to make a **new** detection run: the frames that did not change
 are copied from the old run, the others are run again on the current masks,
-and the new run records its revision. The old run is left as it is.
+and the new run records its revision. The person assignments of the old run
+carry over, so the new run can be finalised without stitching it again. The
+old run is left as it is.
 
 ### Disk space: removing revisions
 

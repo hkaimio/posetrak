@@ -334,7 +334,7 @@ def _fake_box_result(ok: bool):
 
     state = CamCalibState(video_id="cam1", label="cam1", K=np.eye(3), K_orig=np.eye(3),
                           dist=np.zeros((1, 4)), fisheye=False, R=np.eye(3), t=np.zeros((3, 1)))
-    row = CameraRow("cam1", True, 3, 40, 1.0 if ok else 80.0, 1.0, 2.0, ok)
+    row = CameraRow("cam1", True, 3, 40, 1.0 if ok else 80.0, 1.5 if ok else 90.0, 1.0, 2.0, ok)
     return BoxVideoResult(
         calibration=CalibResult(cameras={"cam1": state}, points_3d=[], reprojection_errors={},
                                 unsolved=[], pair_matches={}),

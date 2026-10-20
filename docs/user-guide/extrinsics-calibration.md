@@ -308,9 +308,10 @@ all cameras at once, as a stationary board would.
 
 **The result is judged per camera.** A table lists, for every camera, the
 windows it sees the box in, the number of observed box corners and the median,
-mean and maximum reprojection error. If a camera is unsolved, never sees the
-box, or has a median error above the threshold (5 px by default), the
-calibration **fails: nothing is saved**. Typical causes: a camera that sees
+90th-percentile, mean and maximum reprojection error. If a camera is unsolved,
+never sees the box, has a median error above the threshold (5 px by default), or
+a 90th-percentile error above four times the threshold, the calibration
+**fails: nothing is saved**. Typical causes: a camera that sees
 the box in no window (move the box in front of it), a wrong camera label (see
 *Reassign cameras* in [Synchronizing videos](synchronizing-videos.md)), or a
 window where the box moved (exclude it and run again).

@@ -10,6 +10,7 @@ scene; the solver, window ranking, alignment and judging are the real code.
 
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 
 import cv2
@@ -103,14 +104,19 @@ def scenario(monkeypatch):
     times = [10.0, 11.0, 12.0, 13.0]
     cams = [box_video._Cam(n, n, "x.mp4", 100.0, "i") for n in _CAMERAS]
 
-    def run(*, noise_px=0.3, bad=None, final_cams=None, params=None, poses=None):
+    def run(*, noise_px=0.3, bad=None, final_cams=None, params=None, poses=None, shifted=None):
         rng = np.random.default_rng(1)
+        cv2.setRNGSeed(1)  # the solver's RANSAC steps draw from OpenCV's generator
         poses = poses or _BOX_POSES
         det_by_time = {}
         for ts, (R, t, seen) in zip(times, poses):
             if ts == times[-1] and final_cams is not None:
                 seen = final_cams
             det_by_time[ts] = _detections(config, R, t, seen, rng, noise_px, bad)
+        if shifted is not None:  # (window time, camera, px): one marker in one camera's view is off
+            ts, cam, px = shifted
+            d = det_by_time[ts][cam][0]
+            d.corners[:] = [dataclasses.replace(c, px=c.px + px) for c in d.corners]
         monkeypatch.setattr(box_video, "load_capture_cameras", lambda conn, cap: (cams, _FakeSync()))
         monkeypatch.setattr(box_video, "find_stationary_windows", lambda *a, **k: [int(t * 100) for t in times])
         monkeypatch.setattr(box_video, "_detect_at", lambda ts, c, s, d, frames=None: (
@@ -151,6 +157,16 @@ def test_a_camera_with_large_errors_fails_the_calibration(scenario):
     # the corrupted observations also pull on the shared solution, so others may fail too
     assert "camC" in [r.label for r in res.rows if not r.ok]
     assert "FAILED" in format_report(res)
+
+
+def test_a_camera_with_a_good_median_but_many_gross_errors_fails(scenario):
+    # one marker of camC's view of one window is 100 px off (4 of camC's 36 observations): its
+    # median stays low, the 90th percentile shows the bad marker
+    res = scenario(shifted=(11.0, "camC", 100.0))
+    assert not res.ok, format_report(res)
+    camc = next(r for r in res.rows if r.label == "camC")
+    assert camc.median_px <= 5.0 and camc.p90_px > 20.0, format_report(res)
+    assert "FAIL (p90" in format_report(res)
 
 
 def test_a_camera_that_never_sees_the_box_fails(scenario):

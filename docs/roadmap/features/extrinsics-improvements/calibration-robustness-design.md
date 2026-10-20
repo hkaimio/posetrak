@@ -32,11 +32,15 @@ body definition, the videos are the capture's, the synchronisation is its first 
   geometry) so that the world frame is the box at its final rest position. When
   that window has too few corners seen by two cameras, the world frame stays the anchor window's box and
   the report says so.
-- **Verdict.** A per-camera table (windows seen, observed box corners, median, mean and maximum
-  reprojection error) is always printed. The calibration fails, with a non-zero exit and nothing written,
-  when a camera is unsolved, has no box observation at all (its error cannot be judged), or has a median
-  error above `--max-median-error` (default 5 px). The dialog shows the same table and enables saving
-  only a passing result.
+- **Verdict.** A per-camera table (windows seen, observed box corners, median, 90th-percentile, mean
+  and maximum reprojection error) is always printed. The calibration fails, with a non-zero exit and
+  nothing written, when a camera is unsolved, has no box observation at all (its error cannot be
+  judged), has a median error above `--max-median-error` (default 5 px), or a 90th-percentile error
+  above four times that: the median alone passes a camera whose view of one window or marker is far
+  off, as long as most of its observations fit. The errors are computed before the alignment to the
+  final rest position, which moves the cameras but not the anchor's fixed points (a rigid move of the
+  whole scene leaves reprojection errors unchanged). The dialog shows the same table, enables saving
+  only a passing result, and stops a run when it is closed.
 - **Output.** Only with `--write` a new `extrinsic_calibrations` row (method `moving-box-anchor`) is
   stored and linked to the capture; the default is a dry run. `--residuals` writes every box-corner
   observation's error.

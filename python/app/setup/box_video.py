@@ -62,6 +62,11 @@ from posetrak.detection.frame_source import iter_frames
 # A camera "sees" a window when at least one whole marker (4 corners) is detected.
 _MIN_CORNERS_PER_CAMERA = 4
 
+# A camera also fails when its 90th-percentile error exceeds this multiple of the median limit:
+# a broken solve can keep most observations close (median of 1-3 px) while a quarter or more of
+# them are hundreds of pixels off.
+_P90_LIMIT_FACTOR = 4.0
+
 
 class BoxVideoError(RuntimeError):
     """The calibration could not be attempted (missing sync, no windows, ...)."""
@@ -111,6 +116,7 @@ class CameraRow:
     n_windows: int       # kept windows in which the camera sees the box
     n_points: int        # box-corner observations with a residual
     median_px: float | None
+    p90_px: float | None
     mean_px: float | None
     max_px: float | None
     ok: bool
@@ -158,6 +164,7 @@ def find_stationary_windows(
     sample_stride: int = 6,
     max_centroid_move_px: float = 6.0,
     min_run_samples: int = 3,
+    progress: Callable[[str], None] = lambda _msg: None,
 ) -> list[int]:
     """Frames in the middle of each run where the box's detected corners barely move.
 
@@ -172,6 +179,9 @@ def find_stationary_windows(
     for frame_idx, img in iter_frames(video_path, start_frame, end_frame):
         if frame_idx not in wanted:
             continue
+        if (frame_idx - start_frame) % (sample_stride * 50) == 0:
+            progress(f"Scanning for stationary windows: "
+                     f"{100 * (frame_idx - start_frame) // max(end_frame - start_frame, 1)}%")
         dets = rig_detector.detect(img, video_id="__scan__", frame_idx=frame_idx)
         if not dets:
             continue
@@ -379,7 +389,7 @@ def calibrate_from_box_video(
     progress(f"Scanning {ref.label} for stationary windows…")
     frames_found = find_stationary_windows(
         ref.file_path, detector, start, end,
-        params.sample_stride, params.max_centroid_move_px, params.min_run_samples,
+        params.sample_stride, params.max_centroid_move_px, params.min_run_samples, progress,
     )
     if not frames_found:
         raise BoxVideoError(
@@ -453,6 +463,11 @@ def calibrate_from_box_video(
         states, control_points=anchor_cps, marker_groups=list(groups.values()), cp_only=False,
     )
 
+    # Residuals before the alignment below: it moves the cameras but not the anchor's fixed
+    # points, and a rigid move of the whole scene leaves every reprojection error unchanged.
+    all_cps = list(anchor_cps) + [cp for g in groups.values() for cp in g.as_control_points()]
+    residuals = control_point_residuals(states, all_cps)
+
     aligned, align_rms = False, None
     if result.unsolved:
         messages.append(f"Unsolved camera(s): {', '.join(result.unsolved)}")
@@ -466,19 +481,19 @@ def calibrate_from_box_video(
             )
 
     # --- judge ----------------------------------------------------------------------------
-    all_cps = list(anchor_cps) + [cp for g in groups.values() for cp in g.as_control_points()]
-    residuals = [(name, vid, err) for name, vid, err in control_point_residuals(states, all_cps)]
     rows = []
     for cam in cams:
         errs = np.array([e for _, vid, e in residuals if vid == cam.label])
         solved = states[[s.label for s in states].index(cam.label)].R is not None
         n_win = sum(w.corners_by_camera.get(cam.label, 0) >= _MIN_CORNERS_PER_CAMERA for w in windows)
         if len(errs):
-            med = float(np.median(errs))
-            rows.append(CameraRow(cam.label, solved, n_win, len(errs), med, float(errs.mean()),
-                                  float(errs.max()), solved and med <= params.max_median_error_px))
+            med, p90 = float(np.median(errs)), float(np.percentile(errs, 90))
+            ok = (solved and med <= params.max_median_error_px
+                  and p90 <= _P90_LIMIT_FACTOR * params.max_median_error_px)
+            rows.append(CameraRow(cam.label, solved, n_win, len(errs), med, p90, float(errs.mean()),
+                                  float(errs.max()), ok))
         else:
-            rows.append(CameraRow(cam.label, solved, n_win, 0, None, None, None, False))
+            rows.append(CameraRow(cam.label, solved, n_win, 0, None, None, None, None, False))
     return BoxVideoResult(
         calibration=result, rows=rows, windows=windows, dropped=dropped,
         anchor_ts=anchor.timestamp_s, final_ts=final_ts, aligned_to_final=aligned,
@@ -512,15 +527,26 @@ def format_report(res: BoxVideoResult) -> str:
     if res.aligned_to_final:
         lines.append(f"World frame aligned to the final rest position (box fit {res.alignment_rms_m * 1000:.1f} mm RMS)")
     lines += [f"NOTE: {m}" for m in res.messages]
-    lines += ["", f"{'camera':22s} {'windows':>7s} {'points':>7s} {'median px':>10s} {'mean px':>9s} {'max px':>9s}  status"]
+    p90_limit = _P90_LIMIT_FACTOR * res.max_median_error_px
+    lines += ["", f"{'camera':22s} {'windows':>7s} {'points':>7s} {'median px':>10s} {'p90 px':>8s} "
+                  f"{'mean px':>9s} {'max px':>9s}  status"]
     for r in res.rows:
         f = lambda v: "-" if v is None else f"{v:.2f}"  # noqa: E731
-        status = "ok" if r.ok else ("UNSOLVED" if not r.solved else "NO DATA" if r.median_px is None
-                                    else f"FAIL (> {res.max_median_error_px:g})")
+        if r.ok:
+            status = "ok"
+        elif not r.solved:
+            status = "UNSOLVED"
+        elif r.median_px is None:
+            status = "NO DATA"
+        elif r.median_px > res.max_median_error_px:
+            status = f"FAIL (median > {res.max_median_error_px:g})"
+        else:
+            status = f"FAIL (p90 > {p90_limit:g})"
         lines.append(f"{r.label:22s} {r.n_windows:7d} {r.n_points:7d} {f(r.median_px):>10s} "
-                     f"{f(r.mean_px):>9s} {f(r.max_px):>9s}  {status}")
+                     f"{f(r.p90_px):>8s} {f(r.mean_px):>9s} {f(r.max_px):>9s}  {status}")
     lines.append("")
     lines.append("Calibration OK" if res.ok else
                  f"Calibration FAILED: a camera is unsolved, has no box observations, or its median "
-                 f"error exceeds {res.max_median_error_px:g} px; nothing is written")
+                 f"error exceeds {res.max_median_error_px:g} px or its 90th-percentile error "
+                 f"{p90_limit:g} px; nothing is written")
     return "\n".join(lines)

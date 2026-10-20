@@ -365,7 +365,8 @@ def extrinsics_anchor_rig(
 @click.option("--min-window-corners", type=int, default=8, show_default=True,
               help="Windows with fewer detected box corners (all cameras together) are dropped")
 @click.option("--max-median-error", type=float, default=5.0, show_default=True, metavar="PX",
-              help="The calibration fails when any camera's median reprojection error exceeds this")
+              help="The calibration fails when any camera's median reprojection error exceeds this, "
+                   "or its 90th-percentile error four times this")
 @click.option("--residuals", "residuals_csv", type=click.Path(dir_okay=False), default=None,
               help="Write every box-corner observation's reprojection error to this CSV file")
 @click.option("--write", is_flag=True,
@@ -398,7 +399,8 @@ def extrinsics_box_video(
     cameras fixes the world frame, which is then aligned to the box's final
     rest position. A per-camera error table is always printed. Exit status is
     non-zero, and nothing is written, when any camera is unsolved, has no box
-    observations, or has a median reprojection error above --max-median-error.
+    observations, or has a median reprojection error above --max-median-error or a
+    90th-percentile error above four times it.
     """
     conn = _open_session_required(obj)
     try:

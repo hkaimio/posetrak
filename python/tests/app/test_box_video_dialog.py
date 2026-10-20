@@ -21,7 +21,7 @@ def _result(ok: bool) -> BoxVideoResult:
     return BoxVideoResult(
         calibration=CalibResult(cameras={"cam1": state}, points_3d=[], reprojection_errors={},
                                 unsolved=[], pair_matches={}),
-        rows=[CameraRow("cam1", True, 3, 40, 1.0 if ok else 80.0, 1.0, 2.0, ok)], windows=[], dropped=[],
+        rows=[CameraRow("cam1", True, 3, 40, 1.0 if ok else 80.0, 1.5 if ok else 90.0, 1.0, 2.0, ok)], windows=[], dropped=[],
         anchor_ts=1.0, final_ts=1.0, aligned_to_final=False, alignment_rms_m=None, residuals=[],
         max_median_error_px=5.0, messages=[])
 

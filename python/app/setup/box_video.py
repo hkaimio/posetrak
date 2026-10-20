@@ -35,6 +35,7 @@ import dataclasses
 import os
 import sqlite3
 import struct
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable
@@ -160,13 +161,14 @@ class _Cam:
 
 def find_stationary_windows(
     video_path: str,
-    rig_detector: MarkerRigDetector,
+    make_detector: Callable[[], MarkerRigDetector],
     start_frame: int,
     end_frame: int,
     sample_stride: int = 6,
     max_centroid_move_px: float = 6.0,
     min_run_samples: int = 3,
     progress: Callable[[str], None] = lambda _msg: None,
+    workers: int | None = None,
 ) -> list[int]:
     """Frames in the middle of each run where the box's detected corners barely move.
 
@@ -175,20 +177,35 @@ def find_stationary_windows(
     sampled frame with no detection breaks a run (the box may have been
     occluded or out of view while it moved), even if the centroid lands in a
     similar place on either side.
+
+    The range is split into about *workers* chunks (default: one per CPU core), each with
+    its own decoder that seeks to the chunk's first sample, so decoding runs in parallel
+    (FFmpeg's own decoder threads stay off, see ``frame_source``). Chunks start on the
+    sample grid, so the samples are those of one sequential pass.
     """
-    samples: list[tuple[int, np.ndarray]] = []
-    wanted = set(range(start_frame, end_frame, sample_stride))
-    for frame_idx, img in iter_frames(video_path, start_frame, end_frame):
-        if frame_idx not in wanted:
-            continue
-        if (frame_idx - start_frame) % (sample_stride * 50) == 0:
-            progress(f"Scanning for stationary windows: "
-                     f"{100 * (frame_idx - start_frame) // max(end_frame - start_frame, 1)}%")
-        dets = rig_detector.detect(img, video_id="__scan__", frame_idx=frame_idx)
-        if not dets:
-            continue
-        pts = np.array([[c.px, c.py] for d in dets for c in d.corners], dtype=np.float64)
-        samples.append((frame_idx, pts.mean(axis=0)))
+    n_samples = len(range(start_frame, end_frame, sample_stride))
+    n_chunks = max(1, min(workers or os.cpu_count() or 1, n_samples))
+    bounds = [start_frame + (i * n_samples // n_chunks) * sample_stride for i in range(n_chunks)]
+    bounds.append(end_frame)
+    done = 0
+    lock = threading.Lock()
+
+    def scan_chunk(i: int) -> list[tuple[int, np.ndarray]]:
+        nonlocal done
+        detector = make_detector()
+        found: list[tuple[int, np.ndarray]] = []
+        for frame_idx, img in iter_frames(video_path, bounds[i], bounds[i + 1], step=sample_stride):
+            dets = detector.detect(img, video_id="__scan__", frame_idx=frame_idx)
+            if dets:
+                pts = np.array([[c.px, c.py] for d in dets for c in d.corners], dtype=np.float64)
+                found.append((frame_idx, pts.mean(axis=0)))
+        with lock:
+            done += 1
+            progress(f"Scanning for stationary windows: {100 * done // n_chunks}%")
+        return found
+
+    with ThreadPoolExecutor(max_workers=n_chunks) as pool:
+        samples = [s for chunk in pool.map(scan_chunk, range(n_chunks)) for s in chunk]
 
     runs: list[int] = []
     run_start = None
@@ -413,7 +430,6 @@ def calibrate_from_box_video(
             min_marker_perimeter_rate=params.min_marker_perimeter_rate,
         )
 
-    detector = make_detector()
     cams, sync = load_capture_cameras(conn, capture_id)
     ref = next((c for c in cams if c.label == params.reference_camera), None)
     if ref is None:
@@ -430,7 +446,7 @@ def calibrate_from_box_video(
         raise BoxVideoError("Cannot map the time range into the reference camera's frames")
     progress(f"Scanning {ref.label} for stationary windows…")
     frames_found = find_stationary_windows(
-        ref.file_path, detector, start, end,
+        ref.file_path, make_detector, start, end,
         params.sample_stride, params.max_centroid_move_px, params.min_run_samples, progress,
     )
     if not frames_found:

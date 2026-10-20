@@ -398,12 +398,16 @@ def cmd_run(
                 )
         # Pinned here, at the start of the run, so a save made in the segmentation panel meanwhile
         # does not change what the run reads; the tracker records it with the run.
-        if seg_revision is None:
-            from posetrak.db.seg_revisions import newest_closed_revision
+        from posetrak.db.seg_revisions import newest_closed_revision
 
-            seg_revision = newest_closed_revision(conn, seg_run_id)
-            if seg_revision is None:
-                fail(f"Segmentation {seg_run_id} has no saved mask revision.")
+        newest = newest_closed_revision(conn, seg_run_id)
+        if newest is None:
+            fail(f"Segmentation {seg_run_id} has no saved mask revision.")
+        if seg_revision is None:
+            seg_revision = newest
+        elif not 0 <= seg_revision <= newest:
+            # An open revision is above every saved one; reading it would see an unsaved edit.
+            fail(f"--seg-revision {seg_revision}: the saved revisions of {seg_run_id} go up to {newest}.")
         click.echo(f"Segmentation: {seg_run_id} (label {seg_label}, revision {seg_revision})", err=True)
     elif seg_label is not None or seg_revision is not None:
         fail("--seg-label and --seg-revision need --seg-run.")

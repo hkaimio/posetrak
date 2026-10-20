@@ -1,6 +1,6 @@
 ```toml
 name = "Segmentation Mask Versioning"
-status = "planned"
+status = "proposal"
 progress_pct = 0
 description = """
 Append-only mask revisions per segmentation run, the revision recorded with every detection and \

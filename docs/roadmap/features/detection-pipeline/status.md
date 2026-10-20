@@ -1,6 +1,6 @@
 ```toml
 name = "Detection Pipeline"
-status = "in-progress"
+status = "in_progress"
 progress_pct = 75
 description = """
 One detect-run frame loop with a pluggable box source (YOLOX, segmentation masks, an existing \

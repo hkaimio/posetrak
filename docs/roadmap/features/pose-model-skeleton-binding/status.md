@@ -1,6 +1,6 @@
 ```toml
 name = "Pose Model and Skeleton Binding"
-status = "in-progress"
+status = "in_progress"
 progress_pct = 95
 description = """
 Pose models as keypoint vocabularies, a keypoint manifest per observation source for every new \

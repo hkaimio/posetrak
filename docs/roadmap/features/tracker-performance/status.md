@@ -1,6 +1,6 @@
 ```toml
 name = "Tracker Performance"
-status = "in-progress"
+status = "in_progress"
 progress_pct = 90
 description = """
 Run time and memory of long tracking runs for 77-keypoint skeletons: hierarchical configuration \

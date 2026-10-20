@@ -19,6 +19,7 @@ Improvements to multi-camera extrinsic calibration: scrubbing calibration frames
 
 Documents:
 - [status.md](features/extrinsics-improvements/status.md)
+- [calibration-robustness-design.md](features/extrinsics-improvements/calibration-robustness-design.md)
 - [extrinsics-improvements-design.md](features/extrinsics-improvements/extrinsics-improvements-design.md)
 - [extrinsics-ux-redesign.md](features/extrinsics-improvements/extrinsics-ux-redesign.md)
 
@@ -49,7 +50,39 @@ Documents:
 - [cli-design.md](features/cmdline/cli-design.md)
 - [cmdline-brief.md](features/cmdline/cmdline-brief.md)
 
+### data-model
+
+#### Session DB Concurrency and Run Status
+
+**Status:** 🚧 In progress (90%) · **Categories:** `data-model`, `tracker-core`, `ui` · **Last updated:** 2026-10-17
+
+Busy timeouts and short transactions for every session database writer, a status for tracking runs, detection of interrupted runs, and a UI that does not open unfinished runs as results.
+
+Documents:
+- [status.md](features/session-db-concurrency/status.md)
+- [session-db-concurrency-design.md](features/session-db-concurrency/session-db-concurrency-design.md)
+
+#### Segmentation Mask Versioning
+
+**Status:** 📝 Proposal · **Categories:** `data-model`, `segmentation` · **Last updated:** 2026-10-17
+
+Append-only mask revisions per segmentation run, the revision recorded with every detection and tracking run that used masks, a latest-revision view for current readers, staleness check and incremental refresh of mask-sourced detection runs.
+
+Documents:
+- [status.md](features/segmentation-versioning/status.md)
+- [segmentation-versioning-design.md](features/segmentation-versioning/segmentation-versioning-design.md)
+
 ### detection-pipeline
+
+#### Detection Pipeline
+
+**Status:** 🚧 In progress (75%) · **Categories:** `detection-pipeline` · **Last updated:** 2026-10-18
+
+One detect-run frame loop with a pluggable box source (YOLOX, segmentation masks, an existing run), SOMA-77 as a native batched pose model, a decode/infer/write pipeline that keeps the GPU busy, optional variable frame rate, and licence-compliant download of the GEM-X weights.
+
+Documents:
+- [status.md](features/detection-pipeline/status.md)
+- [detection-pipeline-design.md](features/detection-pipeline/detection-pipeline-design.md)
 
 #### Hand Detection Refinement
 
@@ -61,6 +94,34 @@ Documents:
 - [status.md](features/hand-detection-refinement/status.md)
 - [hand-detect-test-frames.txt](features/hand-detection-refinement/hand-detect-test-frames.txt)
 - [hand-detection-refinement-design.md](features/hand-detection-refinement/hand-detection-refinement-design.md)
+- [hand-refinement-without-segmentation-design.md](features/hand-detection-refinement/hand-refinement-without-segmentation-design.md)
+
+#### Pose Model and Skeleton Binding
+
+**Status:** 🚧 In progress (95%) · **Categories:** `detection-pipeline`, `tracker-core`, `data-model` · **Last updated:** 2026-10-18
+
+Pose models as keypoint vocabularies, a keypoint manifest per observation source for every new sequence, model-qualified landmark names, SOMA-77 markers and offsets as catalog data in the default skeletons, one anatomical joint-limit table with a hinge test, and default skeletons composed from hierarchy, limit, marker-set and dimension layers.
+
+Documents:
+- [status.md](features/pose-model-skeleton-binding/status.md)
+- [pose-model-skeleton-binding-design.md](features/pose-model-skeleton-binding/pose-model-skeleton-binding-design.md)
+
+#### SOMA/GEM-X Productization
+
+**Status:** 🚧 In progress (60%) · **Categories:** `detection-pipeline`, `tracker-core`, `data-model` · **Last updated:** 2026-10-20
+
+SOMA-77 (GEM-X) as the recommended pose model in the main code line, in three releases: SOMA recommended with the detection pipeline, person assignment, skeleton binding, tracker cost and calibration items; keypoint candidates and mask versioning; tracklet editing.
+
+Documents:
+- [status.md](features/pose-model-spike/status.md)
+- [soma-gemx-architecture-and-schema.md](features/pose-model-spike/soma-gemx-architecture-and-schema.md)
+- [soma-gemx-productization-brief.md](features/pose-model-spike/soma-gemx-productization-brief.md)
+- [soma-gemx-productization-plan.md](features/pose-model-spike/soma-gemx-productization-plan.md)
+- [soma-gemx-productization-review-notes.md](features/pose-model-spike/soma-gemx-productization-review-notes.md)
+- [soma77-independent-assessment-opus55.md](features/pose-model-spike/soma77-independent-assessment-opus55.md)
+- [soma77-independent-assessment.md](features/pose-model-spike/soma77-independent-assessment.md)
+- [soma77-pose-spike-plan.md](features/pose-model-spike/soma77-pose-spike-plan.md)
+- [soma77-spike-report.md](features/pose-model-spike/soma77-spike-report.md)
 
 #### Segmentation Reuse (Time-Range-Scoped Bbox Source)
 
@@ -72,6 +133,16 @@ Documents:
 - [status.md](features/segmentation-reuse/status.md)
 - [segmentation-reuse-design.md](features/segmentation-reuse/segmentation-reuse-design.md)
 
+#### Keypoint Candidates
+
+**Status:** 📝 Proposal · **Categories:** `detection-pipeline`, `tracker-core`, `data-model` · **Last updated:** 2026-10-17
+
+Several heatmap maxima per keypoint stored per detection run, linked into tracklets at detection time, and assigned to skeleton markers by the tracker's shared dot-assignment phase with a keypoint-class restriction; strict mask adherence and multi-view agreement as tracking options.
+
+Documents:
+- [status.md](features/keypoint-candidates/status.md)
+- [keypoint-candidates-design.md](features/keypoint-candidates/keypoint-candidates-design.md)
+
 #### Pose Detection Improvements (Aikido Capture)
 
 **Status:** 📝 Proposal · **Categories:** `detection-pipeline` · **Last updated:** 2026-08-06
@@ -82,6 +153,28 @@ Documents:
 - [status.md](features/pose-detect-improvements/status.md)
 - [marker-detection-analysis.md](features/pose-detect-improvements/marker-detection-analysis.md)
 - [pose-detect-improvements-analysis.md](features/pose-detect-improvements/pose-detect-improvements-analysis.md)
+
+#### Track to Person Assignment
+
+**Status:** ✅ Complete · **Categories:** `detection-pipeline` · **Last updated:** 2026-10-18
+
+Automatic assignment of YOLOX track fragments to persons by cross-camera triangulation and 3D linking, writing the existing assignment rows; covers every frame with a box and reports where segmentation or a manual check is needed.
+
+Documents:
+- [status.md](features/track-person-assignment/status.md)
+- [track-person-assignment-design.md](features/track-person-assignment/track-person-assignment-design.md)
+
+### mcp
+
+#### MCP Server AI-Assistant Onboarding
+
+**Status:** 📝 Proposal · **Categories:** `mcp`, `ux`, `release` · **Last updated:** 2026-08-23
+
+Makes connecting an AI assistant to a Posetrak session (for tracking-run diagnosis) a small number of clicks from posetrak-ui instead of hand-editing .mcp.json with an absolute db path, and lets the server follow whichever session is currently open instead of needing a restart every time that changes.
+
+Documents:
+- [status.md](features/mcp-onboarding/status.md)
+- [mcp-onboarding-design.md](features/mcp-onboarding/mcp-onboarding-design.md)
 
 ### release
 
@@ -121,12 +214,13 @@ Documents:
 
 #### Marker-Based Motion Capture
 
-**Status:** 🚧 In progress · **Categories:** `tracker-core`, `detection-pipeline` · **Last updated:** 2026-09-19
+**Status:** 🚧 In progress · **Categories:** `tracker-core`, `detection-pipeline` · **Last updated:** 2026-09-21
 
 Tracking of rigid props and person-worn reflective dots or ArUco markers alongside the markerless pipeline: marker detection, tracklet linking, shared dot assignment inside the UKF, and rigid-body and articulated tracking. The foundation is built and validated on four real cases; the remaining work is turning the script-driven workflows into CLI and GUI features, per the productization plan.
 
 Documents:
 - [status.md](features/marker-based-mocap/status.md)
+- [capture-protocol.md](features/marker-based-mocap/capture-protocol.md)
 - [dot-assignment-architecture-design.md](features/marker-based-mocap/dot-assignment-architecture-design.md)
 - [gpt-sol-review-20260831.md](features/marker-based-mocap/gpt-sol-review-20260831.md)
 - [marker-catalog-and-assignment-redesign.md](features/marker-based-mocap/marker-catalog-and-assignment-redesign.md)
@@ -134,6 +228,7 @@ Documents:
 - [marker-mocap-brief.md](features/marker-based-mocap/marker-mocap-brief.md)
 - [marker-mocap-design.md](features/marker-based-mocap/marker-mocap-design.md)
 - [marker-mocap-productization-plan.md](features/marker-based-mocap/marker-mocap-productization-plan.md)
+- [marker-reference-placement.md](features/marker-based-mocap/marker-reference-placement.md)
 - [person-marker-assignment-current-state.md](features/marker-based-mocap/person-marker-assignment-current-state.md)
 - [person-marker-assignment-design.md](features/marker-based-mocap/person-marker-assignment-design.md)
 - [person-marker-mocap-productization-plan.md](features/marker-based-mocap/person-marker-mocap-productization-plan.md)
@@ -141,8 +236,12 @@ Documents:
 - [productization-context-summary.md](features/marker-based-mocap/productization-context-summary.md)
 - [reflective-dot-detection-design.md](features/marker-based-mocap/reflective-dot-detection-design.md)
 - [rigid-marker-body-calibration-design.md](features/marker-based-mocap/rigid-marker-body-calibration-design.md)
+- [segmentation-mask-dot-assignment-design.md](features/marker-based-mocap/segmentation-mask-dot-assignment-design.md)
 - [skeleton-scaling-and-marker-calibration-design.md](features/marker-based-mocap/skeleton-scaling-and-marker-calibration-design.md)
 - [streak-velocity-design.md](features/marker-based-mocap/streak-velocity-design.md)
+- [tracklet-assignment.md](features/marker-based-mocap/tracklet-assignment.md)
+- [validation-baseline.md](features/marker-based-mocap/validation-baseline.md)
+- [ws2-assignment-robustness-plan.md](features/marker-based-mocap/ws2-assignment-robustness-plan.md)
 
 #### Measurement Error Model Improvements
 
@@ -158,6 +257,16 @@ Documents:
 - [implementation-plan.md](features/error-improvements/implementation-plan.md)
 - [phase5-cross-person-diagnostics-plan.md](features/error-improvements/phase5-cross-person-diagnostics-plan.md)
 - [phase5-cross-person-plan.md](features/error-improvements/phase5-cross-person-plan.md)
+
+#### Tracker Performance
+
+**Status:** 🚧 In progress (90%) · **Categories:** `tracker-core` · **Last updated:** 2026-10-19
+
+Run time and memory of long tracking runs for 77-keypoint skeletons: hierarchical configuration as the default, smoother memory without changing results, tracker rate, per-person threads.
+
+Documents:
+- [status.md](features/tracker-performance/status.md)
+- [tracker-performance-design.md](features/tracker-performance/tracker-performance-design.md)
 
 #### Pose Regularization for Kinematically Redundant Chains
 
@@ -203,6 +312,7 @@ Documents:
 - [keypoint-editing-design.md](features/keypoint-editing/keypoint-editing-design.md)
 - [keypoint-editing-improvements-brief.md](features/keypoint-editing/keypoint-editing-improvements-brief.md)
 - [keypoint-editing-user-guide.md](features/keypoint-editing/keypoint-editing-user-guide.md)
+- [tracklet-editing-design.md](features/keypoint-editing/tracklet-editing-design.md)
 
 #### Trial Concept Refactoring
 

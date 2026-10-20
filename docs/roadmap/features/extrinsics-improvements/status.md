@@ -57,6 +57,10 @@ work).
   single-threaded) and one pass per camera over its windows, the 41 s range takes about 73 s and the
   27 s range about 47 s, with identical windows, verdicts and extrinsics; the bundle adjustment is now a
   third of the time. Per-phase tables in `calibration-robustness-design.md` §1.
+- The failing 63-104 s range fails only with insta_ace2_pro as the reference camera (58 windows,
+  medians 9-20 px). With gopro13_02 as the reference the same range gives 36 windows and passes
+  (medians 0.6-2.0 px): the reference camera decides which moments count as the box at rest. Not
+  yet investigated which of the insta-only windows spoil the solve.
 - The relabeling test on a copy of the second clip's capture: exchanging the cameras of gopro13_01 and
   gopro13_02 through `capture reassign-camera` leaves every video's file path, sync points and sync lookups
   unchanged. In that session `sync_points.camera_instance_id` holds the video id for every row written by

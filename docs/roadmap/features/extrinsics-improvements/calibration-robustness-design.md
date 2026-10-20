@@ -92,7 +92,8 @@ Each change on its own (total / the phase it changes):
 - The scan split into one chunk per core, each decoder seeking to its chunk start: scan 195 to 18 s
   (58 windows), 107 to 15 s (6 cameras), 66 to 8 s (15 s range).
 
-Decoding stays single-threaded per decoder; the parallelism is several decoders. Windows, per-window
+Decoding stays single-threaded per decoder; the parallelism is several decoders, one per core, which
+puts the peak memory at about 3.8 GB on this 24-thread machine (15 s range, four cameras). Windows, per-window
 corner counts, verdicts and extrinsics are identical to the sequential code on all five cases (window
 times equal to the sample, extrinsics difference 0.0000 mm and 0.00000 degrees: detections are the same
 frames, so the solver input is the same).

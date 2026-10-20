@@ -158,7 +158,7 @@ Measured on copies made with the SQLite backup API; no real session or registry 
   than the tolerance, or whose person vanished or appeared, are listed; a refresh copies the others.
 - **Migration.** Marker-props session, schema 62 to 68: 13.59 GB, one segmentation of 120,684 masks
   (1.03 GB of blobs); 7.4 s; file 13.588 GB before, 14.715 GB after (the freed pages of the old table stay
-  in the file until `VACUUM`); the mask hash of the run unchanged. Kare/ukemi session at schema 66, 3.97 GB,
+  in the file until `VACUUM`); the mask hash of the run unchanged. A second real session at schema 66, 3.97 GB,
   two segmentations (40,192 and 44,436 masks, 617 MB): 3.1 s; 3,974.8 MB to 4,656.9 MB; row count and
   SHA-256 of every run's masks unchanged; 47 other tables unchanged in row count and content hash, and
   `tracker_configs` changed only by the column that the 66-to-67 step adds.

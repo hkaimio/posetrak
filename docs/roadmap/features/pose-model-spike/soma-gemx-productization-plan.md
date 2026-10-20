@@ -35,8 +35,8 @@ improvements are separate features; hand refinement is investigated, not dropped
    not decoding, dominates.
 4. **Smoother memory does not need windowed smoothing.** About 14 of the 20 GB of an 85 s run are
    the smoother's dense error-state matrices kept per step (error state 202 with the anatomical limits);
-   the other 5.6 GB are the observations of the whole sequence, loaded whatever range is tracked
-   (stage 0 measurement). A hierarchical configuration whose parent stage is restricted to `main`
+   the observations of the whole sequence are loaded whatever range is tracked, about 1 GB measured
+   (stage 0 and stage 6 measurements). A hierarchical configuration whose parent stage is restricted to `main`
    (at most 138-dimensional), a diagonal-only smoothed covariance, per-stage release or a disk spill of
    the forward cache, and loading only the tracked window are all exact; windowed smoothing changes the
    estimator and stays with iterative tracking.
@@ -63,7 +63,7 @@ improvements are separate features; hand refinement is investigated, not dropped
 | # | Question | Answer, in short | Design |
 |---|---|---|---|
 | 1 | Performance | Unknown where the time goes; code points to decode and CPU work in the loop. Profile per stage, then one frame loop with a pluggable box source, decode threads per camera, batched inference across frames and cameras, a writer thread, hand pass in the same loop; variable rate only if the model dominates. | [detection pipeline](../detection-pipeline/detection-pipeline-design.md) |
-| 2 | Tracker cost | Cost model: sigma points `2e+1`, LDLT of a measurement of up to `2MC`; memory `4e^2` doubles per step plus the whole sequence's observations. Measured: the Kalman gain dominates and grows faster than quadratically with observations per step. Fewer markers in the parent stage (restricted to `main`, no body-crop fingers), diagonal-only smoothed covariance, per-stage release, window-only observation load, per-person threads; a lower rate is slower as implemented; snapshots later. | [tracker performance](../tracker-performance/tracker-performance-design.md) |
+| 2 | Tracker cost | Cost model: sigma points `2e+1`, LDLT of a measurement of up to `2MC`; memory `4e^2` doubles per step plus the whole sequence's observations. Measured: the Kalman gain dominates and grows faster than quadratically with observations per step. Fewer markers in the parent stage (restricted to `main`, no body-crop fingers), diagonal-only smoothed covariance, per-stage release, window-only observation load (per-person threads were tried and are slower); a lower rate is slower as implemented; snapshots later. | [tracker performance](../tracker-performance/tracker-performance-design.md) |
 | 3 | Skeleton and model coupling | Pose model = keypoint vocabulary; manifest per observation source for every new sequence; model-qualified landmarks; skeletons composed from hierarchy, joint-limit, marker-set and dimension layers, default skeletons with COCO and SOMA marker sets; existing skeletons and runs untouched, upgrade by a new skeleton version. | [skeleton binding](../pose-model-skeleton-binding/pose-model-skeleton-binding-design.md) |
 | 4 | Candidate storage and assignment | `kp_candidates` rows with a self-describing blob and tracklet ids linked online at detection; copied into sequences like dots; tracker uses the shared dot assignment with a keypoint-class modifier and duplicate merging across crops; no tracklet table. | [keypoint candidates](../keypoint-candidates/keypoint-candidates-design.md) |
 | 5 | Person assignment without segmentation | Cross-camera triangulation of fragment trunk keypoints, 3D linking, fragment labelling with splits, written to the existing assignment table; segmentation for contact windows, seeded by it. | [track to person assignment](../track-person-assignment/track-person-assignment-design.md) |
@@ -115,14 +115,8 @@ Stage 0 is measurement only and comes first because several later scopes depend 
 - **Acceptance:** each measurement produces its table in the design document it belongs to.
 - **Risks:** M2 runs are tens of minutes each; they are run in a standalone shell, not in an agent's
   background task (open issue on background runs being killed).
-- **Outcome:** M1, M3 and M5 done, M2 done for single-stage and an unrestricted hierarchical form;
-  results in the design documents. Still open:
-  - **M2b.** M2 with the parent stage restricted to `main` (`--joint-groups main`): part b done (793 s and
-    8.7 GB against 2,385 s and 25.7 GB single-stage; the restricted form moves the failure events by 4-164 cm
-    against the unrestricted one, so it needs the ground-truth comparison before it is the default); part a
-    done (584 s and 7.8 GB for 10,214 steps, below the 8 GB limit). It decides the default configuration and the scope of stage 6.
-  - **M4.** The question to NVIDIA is drafted in detection pipeline §4 and has not been sent.
-
+- **Outcome:** M1, M2 (with M2b, the parent stage restricted to `main`), M3 and M5 done; results in the
+  design documents. M4: the question to NVIDIA is drafted in detection pipeline §4 and has not been sent.
   What the results change is folded into stages 3, 6 and 9 below.
 
 ### Stage 1 — Session database robustness
@@ -133,11 +127,12 @@ Stage 0 is measurement only and comes first because several later scopes depend 
 - **Depends on:** nothing.
 - **Acceptance:** the two-process lock test and the killed-tracker test of the design pass.
 - **Risks:** low; the UI changes touch the session tree only.
+- **Outcome:** done; both tests of the design pass.
 
 ### Stage 2 — Pose model and skeleton binding
 
 - **Design:** [pose-model skeleton binding](../pose-model-skeleton-binding/pose-model-skeleton-binding-design.md).
-- **Scope:** pose model registry; manifest per observation source (schema 66) and the reader change;
+- **Scope:** pose model registry; manifest per observation source (schema 65) and the reader change;
   model-qualified landmarks; skeleton layer files (hierarchy, joint limits, marker sets, dimensions)
   and `posetrak skeleton compose`; SOMA marker set with the body markers and the first index and
   little finger joints; default skeletons composed with both marker sets and the joint-limit table;
@@ -148,6 +143,11 @@ Stage 0 is measurement only and comes first because several later scopes depend 
   of the spike's calibrated-offset figures.
 - **Risks:** regenerating the defaults changes their ids (intended, existing rows stay); the
   wrist-deviation saturation may need marker or frame changes beyond limits.
+- **Outcome:** done; the reference capture's held-out errors are 2.2 / 3.9 / 2.7 cm (legs / arms / head),
+  within 0.2 cm of the spike. Not done: a UI action that adds SOMA markers to an existing skeleton
+  (`skeleton compose --base` does it). The skeletons of existing persons have no SOMA markers, so a SOMA
+  sequence tracked with one stops at the start, naming the missing pose model. The trial in which the
+  earlier joint-limit table saturated a wrist axis was not re-run.
 
 ### Stage 3 — Detection pipeline
 
@@ -174,6 +174,10 @@ Stage 0 is measurement only and comes first because several later scopes depend 
   keypoints).
 - **Risks:** decode parallelism on Windows (the threaded-decode hang); GPU memory with ViT-H batches
   and several decode threads.
+- **Outcome:** done; 2.9 times the prototype's throughput, keypoints identical to the prototype's on the
+  same boxes. The GPU is 79-82% busy, short of 85%: the model bounds the loop, with crop preparation and
+  YOLOX (batch size 1 in its ONNX graph) on the inference thread. The 30-minute decode soak of the thread
+  and process producers has not been run.
 
 ### Stage 4 — Track to person assignment
 
@@ -183,6 +187,10 @@ Stage 0 is measurement only and comes first because several later scopes depend 
 - **Acceptance:** the design's agreement and gap criteria on the labelled trial.
 - **Risks:** calibration quality of the capture limits association; the report must make that
   visible rather than hide it.
+- **Outcome:** done. Single-person footage and separated persons need no manual step. With bystanders
+  the number of persons must be given (`--persons`). The labelled contact trial reaches 88.7% against
+  98%: identity through a contact where persons are tangled is not attempted, and such stretches are
+  listed in the report for the stitcher or segmentation.
 
 ### Stage 5 — Hand refinement for SOMA runs
 
@@ -192,6 +200,9 @@ Stage 0 is measurement only and comes first because several later scopes depend 
 - **Depends on:** stages 2 and 3.
 - **Acceptance:** the design's §4; the SOMA default set from the measurement.
 - **Risks:** no gain, in which case it ships off for SOMA runs.
+- **Outcome:** done; on by default for SOMA runs, from the labelled trial (fingers, forearm twist and hand
+  orientation improved). The default is provisional until a capture made to measure hand tracking
+  confirms it (owner decision 7).
 
 ### Stage 6 — Tracker cost
 
@@ -204,12 +215,12 @@ Stage 0 is measurement only and comes first because several later scopes depend 
     unrestricted parent.
   - Diagonal-only smoothed covariance and per-stage release of the forward cache.
   - Observations loaded for the tracked window only.
-  - Per-person threads outside contact.
+  - Per-person threads outside contact (tried, not kept, see the outcome).
   - Disk spill only if the above leave a 10 000-step run above the limit.
   - The lower tracker rate is dropped: it pools observations and is slower.
 - **Depends on:** M2b; stage 2 for the parent marker set without body-crop fingers. The gain cost
-  grows faster than quadratically with observations per step, so 33 parent markers instead of 77 is
-  the largest single saving.
+  grows faster than quadratically with observations per step, so a parent stage without the body-crop
+  fingers and the hand markers is the largest single saving.
 - **Acceptance:** the design's §4: below 8 GB at 10 000 steps, real-time factor reported, no lost
   failure event, and the default chosen on the harness where configurations differ (single-stage and
   hierarchical differ by 9-24 cm on arm and hand events).
@@ -218,6 +229,16 @@ Stage 0 is measurement only and comes first because several later scopes depend 
     release without affecting the rest.
   - Three persons take about 90 times real time today; the first release may not reach a
     comfortable speed, and that should be visible in the reported real-time factor.
+- **Outcome:** done, apart from per-person threads ([tracker performance §5](../tracker-performance/tracker-performance-design.md)):
+  - The bundled hierarchical configuration (parent `main`, hand stages) is the default for 77-keypoint
+    skeletons: 4.3 GB and 6.3 times real time on part a, 6.0 GB and 18.7 times real time on the
+    three-person part b; disk spill not needed. Every variant flags the same 5 of the 6 failure events.
+  - Accuracy is slightly below single-stage (subject 1 mean 18.5 against 16.4 cm); the hierarchical form
+    was chosen for cost, the memory limit, and because refined hands would join a single-stage filter.
+  - Per-person threads were slower (572 against 529 s on part b): 23% of the frames qualify and the
+    threads compete with the filter's OpenMP loops. Not kept.
+  - The hand stages' cost is not measured: no baseline sequence has refined hands.
+  - A parent stage on the whole skeleton is still possible; it is only warned about.
 
 ### Stage 7 — Calibration items of the first release
 
@@ -229,6 +250,14 @@ Stage 0 is measurement only and comes first because several later scopes depend 
   and writes nothing; a box that ends at rest in view of some cameras only is solved from an earlier
   window every camera sees; relabeling keeps sync points with their videos.
 - **Risks:** low.
+- **Outcome:** done. `posetrak extrinsics box-video` and "Calibrate from box video" in the calibration
+  dialog are new: the moving-box method was a prototype script before. Per-camera error table with
+  median and 90th-percentile limits, nothing written on failure. On the design's failing capture the
+  63-104 s range fails with insta_ace2_pro as the reference camera and passes with gopro13_02 (36
+  instead of 58 windows); why the reference camera decides is not known. The 100-115 s range passes.
+  Several decoders in parallel bring a 41 s range to about 73 s. Camera reassignment: `capture
+  reassign-camera` and the "Cameras…" button of the capture panel. The capture's first sync
+  configuration is always used.
 
 ### Stage 8 — Mask versioning
 
@@ -291,9 +320,28 @@ Stage 0 is measurement only and comes first because several later scopes depend 
 
 | Release | Stages | Usable state | Schema |
 |---|---|---|---|
-| First: SOMA recommended | 0-7 | SOMA-77 from any box source in one pass, with refined hands where they help, automatic person assignment for YOLOX footage, default skeletons composed from layers with SOMA markers and corrected joint limits, hierarchical tracking within memory, robust concurrent writes, reliable box calibration. RTMPose-133 unchanged and used when the SOMA licences are declined. | 64, 65, 66, 67 |
+| First: SOMA recommended | 0-7 | SOMA-77 from any box source in one pass, with refined hands, automatic person assignment for YOLOX footage, default skeletons composed from layers with SOMA markers and corrected joint limits, hierarchical tracking within memory, robust concurrent writes; new: box-video calibration that fails loudly, and safe camera reassignment. RTMPose-133 unchanged and used when the SOMA licences are declined. | 64, 65, 66, 67 |
 | Second: candidates | 8-11 | Reproducible mask use under concurrent editing; keypoint candidates optional per detection and per tracking run, with strict mask and multi-view agreement options; first tracklet editing; intrinsics check. | 68, 69 |
 | Third: tracklet editing | 12 | Force, split and group operations, review windows. | 70 |
+
+### Known limits of the first release
+
+The stage outcomes above in one list, for testing before the release:
+
+- **Hands.** The hand refinement default rests on one labelled trial, and the cost of the hand stages
+  in the tracker is not measured. A capture made for hand tracking settles both.
+- **Accuracy.** The hierarchical default is slightly less accurate than single-stage on the trial. The
+  failure-event comparison of SOMA-77 against RTMPose-133, to be reported to users (owner decision 6),
+  is not produced yet.
+- **Existing skeletons.** They have no SOMA markers; `skeleton compose --base` upgrades one, with no UI
+  action.
+- **Person assignment.** Contact stretches are listed, not resolved; the person count with bystanders
+  is an option.
+- **Detection.** GPU below the 85% target; the decode soak not run.
+- **Box-video calibration.** The reference camera can decide pass or fail; the sync configuration is
+  not selectable.
+- **Data model.** `sync_points.camera_instance_id` holds a `capture_videos.id` for the rows written by
+  the sync dialog, against what its name says.
 
 The first release adds every column its components write, including the segmentation columns of
 detection and tracking runs (NULL revision until the second release), so later releases only add

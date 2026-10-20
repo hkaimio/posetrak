@@ -36,7 +36,7 @@ def db_path(tmp_path):
     mask = np.zeros((H, W), np.uint8)
     mask[10:50, 20:40] = 1
     blob = cv2.imencode(".png", mask)[1].tobytes()
-    conn.executemany("INSERT INTO seg_masks VALUES ('seg', 'svid', ?, ?)", [(f, blob) for f in range(5)])
+    conn.executemany("INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) VALUES ('seg', 'svid', ?, ?)", [(f, blob) for f in range(5)])
     conn.commit()
     conn.close()
     return path
@@ -71,7 +71,7 @@ def test_worker_writes_the_mask_boxes_poses_and_run_options(db_path, monkeypatch
     frames = [r[0] for r in conn.execute("SELECT video_frame FROM detection_keypoints ORDER BY 1")]
     assert frames == [1, 2, 3] and worker.get_keypoints_written() == 3
     run = conn.execute("SELECT * FROM detection_runs WHERE id='run'").fetchone()
-    assert run["status"] == "complete" and run["seg_quality_run_id"] == "seg" and run["seg_revision"] is None
+    assert run["status"] == "complete" and run["seg_quality_run_id"] == "seg" and run["seg_revision"] == 0
     config = json.loads(run["config_json"])
     assert config["box_source"]["name"] == "segmentation" and config["hand_pass"] is False
     box = conn.execute("SELECT bbox_x, bbox_y, bbox_w, bbox_h, track_id FROM person_detections LIMIT 1").fetchone()

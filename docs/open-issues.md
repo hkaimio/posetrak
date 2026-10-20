@@ -128,11 +128,6 @@ consistent with `compute_state_error` in `ukf.cpp` (`q_ref⁻¹ * q_state`).
 
 ## Active
 
-- **Segmentation masks are mutable but tracking runs do not record which version they used** (2026-10-14)
-  - Every other input of a tracking run (detections, observation sequences, calibrations) is append-only, so a run can be reproduced and compared with another. Segmentation masks are edited in place by the user between runs (a `seg_quality_runs` row keeps its id while its `seg_masks` change), and nothing records which masks a derived result saw: candidate mask labels, mask-derived boxes and the mask overlay in the person view.
-  - Consequences seen: a result computed before an edit can no longer be reproduced from the database, the overlay shows whatever the run holds now, and two runs covering the same frames could hide the edited one (the overlay now picks the newest among equally complete runs, which is a workaround, not versioning).
-  - Direction to consider: a version (or content hash) per segmentation run or per mask frame range, stored with every result derived from masks, with the overlay choosing explicitly. Not designed yet.
-
 - **Frame number consistency between OpenCV seeking and ffmpeg sequential decode** (2026-05-17)
   - The system defines "frame N" as the Nth frame in the video container, counted from 0. Two different code paths assign frame numbers: OpenCV (`CAP_PROP_POS_FRAMES`) for UI/sync-point marking, and the external ffmpeg pipe in `led_sync._brightness_via_ffmpeg` which counts frames sequentially from 0 as bytes arrive.
   - These two counting methods agree as long as every frame in the container has a unique, monotonically increasing pts and stream's average fps is exactly correct and stable. If any frames are dropped, duplicated, or have non-monotonic pts (possible with some camera firmware or re-muxed files) or there is variation in frame rate, the two counters will diverge, causing LED-detected sync events to be attributed to the wrong frame numbers in the sync_points table.
@@ -206,6 +201,9 @@ consistent with `compute_state_error` in `ukf.cpp` (`q_ref⁻¹ * q_state`).
     triangulations). No skeleton YAML changes needed.
 
 ## Fixed
+
+- **FIXED (2026-10-20)**: Segmentation masks were mutable but tracking runs did not record which version they used
+  - Masks are now append-only by revision (`seg_mask_revisions`, `seg_masks.revision`, session schema 68, provisional number). Detection runs from masks and tracking runs with a mask gate read one revision, pinned when the run starts, and record it (`detection_runs.seg_revision`, `tracking_run_persons.seg_revision`); a run can be repeated on the same masks with `track run --seg-revision`. The person view overlay shows the current masks, or the revision of the tracking run being shown. See `docs/roadmap/features/segmentation-versioning/`.
 
 - **FIXED (2026-10-17)**: Tracker run aborted with "database is locked" when another process wrote the session DB
   - The tracker's connections and the Python `_connect` now wait up to 60 s for the other writer's lock; the result writer commits in short batch transactions. A tracking run has a `status` ('running', 'complete', 'failed'); a run whose process stopped is shown as interrupted after 10 minutes without progress and `posetrak runs cleanup` marks it failed. The session tree shows the status and a run that is not complete opens read-only with a warning. See `docs/roadmap/features/session-db-concurrency/`.

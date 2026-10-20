@@ -982,9 +982,22 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                              std::optional<Eigen::Vector3d> const& seed_position = std::nullopt,
                              int trace_assignment_start = -1, int trace_assignment_end = -1,
                              std::string const& seg_run_id = "", int seg_mask_label = 0,
-                             std::string const& tracklet_assignments_path = "") {
+                             std::string const& tracklet_assignments_path = "",
+                             int seg_revision = -1) {
     std::vector<std::string> run_ids;  // runs to mark failed when tracking throws
     try {
+        // The mask gate reads every mask at one revision, fixed here before anything else so a
+        // save made by the segmentation panel while the run goes on cannot change what the rest
+        // of the run reads (segmentation-versioning-design.md §2.3).
+        if (!seg_run_id.empty() && seg_revision < 0) {
+            auto const newest = SessionReader(db_path).newest_closed_seg_revision(seg_run_id);
+            if (!newest.has_value()) {
+                fmt::print(stderr, "Error: segmentation {} has no saved mask revision\n",
+                           seg_run_id);
+                return 1;
+            }
+            seg_revision = *newest;
+        }
         PersonSpec spec;
         spec.sequence_id = sequence_id;
         spec.skeleton_id = skeleton_id;
@@ -1026,6 +1039,11 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
             seg_mask_reader = std::make_unique<SessionReader>(db_path);
             camera_shot_video_ids =
                 seg_mask_reader->load_camera_shot_video_ids(ctx->sync_config_id);
+            ctx->result_writer->record_segmentation(seg_run_id, seg_mask_label, seg_revision);
+            if (!quiet) {
+                fmt::print("Segmentation: {} label {} revision {}\n", seg_run_id, seg_mask_label,
+                           seg_revision);
+            }
         }
 
         // Decisions about whole dot tracklets made outside the tracker (a review of the capture,
@@ -1082,8 +1100,8 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                     trace.end_frame = trace_assignment_end;
 
                     // This step's segmentation masks, one per camera with candidates,
-                    // decoded fresh every step from whatever seg_masks rows exist right
-                    // now (segmentation-mask-dot-assignment-design.md §5: no cached
+                    // decoded fresh every step at the run's pinned revision
+                    // (segmentation-mask-dot-assignment-design.md §5: no cached
                     // derivative to go stale when a segmentation is re-edited). Each
                     // camera's own first candidate's frame_idx stands in for "this
                     // camera's native frame this step" -- candidates within one bucket
@@ -1098,7 +1116,8 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                             if (svid_it == camera_shot_video_ids.end() || svid_it->second.empty())
                                 continue;
                             auto blob = seg_mask_reader->load_seg_mask_blob(
-                                seg_run_id, svid_it->second, cam_candidates.front().frame_idx);
+                                seg_run_id, svid_it->second, cam_candidates.front().frame_idx,
+                                seg_revision);
                             if (!blob.has_value())
                                 continue;
                             DecodedSegMask mask;
@@ -1259,6 +1278,7 @@ int main(int argc, char* argv[]) {
     int db_trace_assignment_end = -1;
     std::string db_seg_run_id;
     int db_seg_mask_label = 0;
+    int db_seg_revision = -1;
     std::string db_tracklet_assignments;
     // Per-subject seeds for --person mode: repeated 4-value groups (person index, x, y, z).
     std::vector<double> db_subject_seeds;
@@ -1327,6 +1347,12 @@ int main(int argc, char* argv[]) {
         "This subject's own label (1..N) within --seg-run-id's masks -- resolve this from the "
         "subject's name against seg_quality_runs.persons_json before invoking the tracker; "
         "C++ does no name resolution of its own.");
+    track_cmd->add_option(
+        "--seg-revision", db_seg_revision,
+        "Mask revision of --seg-run-id to read every mask at (seg_mask_revisions.revision, a "
+        "closed one). Defaults to the newest closed revision at the start of the run. The "
+        "revision used is recorded in tracking_run_persons.seg_revision; pass a recorded one to "
+        "reproduce a run after the masks were edited.");
     track_cmd->add_option(
         "--tracklet-assignments", db_tracklet_assignments,
         "CSV file of decisions about whole dot tracklets (camera_label,tracklet_id,first_frame,"
@@ -1439,7 +1465,7 @@ int main(int argc, char* argv[]) {
                 quiet, smooth_output, debug_output, debug_init, db_min_confidence, db_person_id,
                 db_active_joint_groups, db_start_time, db_end_time, seed_position,
                 db_trace_assignment_start, db_trace_assignment_end, db_seg_run_id,
-                db_seg_mask_label, db_tracklet_assignments);
+                db_seg_mask_label, db_tracklet_assignments, db_seg_revision);
         } else {
             if (track_config.empty()) {
                 fmt::print(stderr, "Error: config file required when not using --session-db\n");

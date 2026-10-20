@@ -586,7 +586,7 @@ def _find_seg_source(
     row = conn.execute(
         """
         SELECT seg_quality_run_id, COUNT(*) n
-        FROM seg_masks
+        FROM seg_masks_latest
         WHERE shot_video_id = ? AND frame_idx BETWEEN ? AND ?
         GROUP BY seg_quality_run_id
         ORDER BY n DESC LIMIT 1
@@ -603,7 +603,7 @@ def _load_seg_mask(
     frame_idx: int,
 ) -> np.ndarray | None:
     row = conn.execute(
-        "SELECT mask_blob FROM seg_masks "
+        "SELECT mask_blob FROM seg_masks_latest "
         "WHERE seg_quality_run_id = ? AND shot_video_id = ? AND frame_idx = ?",
         (seg_quality_run_id, shot_video_id, frame_idx)
     ).fetchone()

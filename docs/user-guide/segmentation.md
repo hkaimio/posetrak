@@ -125,6 +125,80 @@ just the incorrect time range, fix up a seed frame within it (or use
 the paint/erase tools — see below — to correct a mask directly), and
 run segmentation again for that part only.
 
+## Saved revisions: what other work sees
+
+A segmentation is never overwritten. Whenever the window writes masks, it
+saves them as a numbered **revision** that holds only the frames that
+changed. A revision is saved when a segmentation job finishes (or fails),
+when the job queue ends or is stopped, and when you close the window; it is
+the unit that other work sees. While a job is still running, its frames
+belong to an open revision that no one else can see, so another program
+never reads half an edit.
+
+Work that uses the masks takes the newest saved revision when it starts and
+reads only that revision, however many saves are made while it runs, and
+records it:
+
+- **Pose detection from a segmentation** (`Run detection…` with the
+  segmentation as bbox source, or `detect run --segmentation`) records the
+  revision on the detection run.
+- **Tracking with a mask gate** (`track run --seg-run`) records the
+  segmentation, the subject's mask label and the revision on the run. Giving
+  `--seg-revision N` reads revision N instead, so a run can be reproduced
+  after the masks were edited: the same inputs give identical results.
+- **The person view** shows the current masks. When you select a tracking
+  run that used a mask gate, it shows the masks of the revision that run
+  used.
+
+!!! note "One editor at a time"
+    A segmentation can be edited in one window at a time. If you open one
+    that another window (or another computer) has unsaved edits in, it opens
+    **read-only**: the status line names the open revision, and the tracking
+    and pose buttons are disabled. Close the other window to save its edits.
+
+If the program stopped while a revision was open, the next time you open that
+segmentation on the same computer you are asked whether to **Save** the
+unsaved revision (keeping its masks), **Discard** it, or open the
+segmentation read-only.
+
+### After editing: find the detections that are out of date
+
+Person boxes of a detection run made from a segmentation come from the masks
+of one revision. To list the frames whose boxes have changed since, in the
+terminal:
+
+```
+posetrak -s session.db detect stale RUN
+```
+
+A frame is out of date when a person's box edge has moved by more than
+`--tolerance` pixels of the pose model's input image (default 1, measured
+against the size of the box: a larger box tolerates a larger shift in video
+pixels), or a person appeared in or disappeared from the frame. Add
+`--refresh` to make a **new** detection run: the frames that did not change
+are copied from the old run, the others are run again on the current masks,
+and the new run records its revision. The person assignments of the old run
+carry over, so the new run can be finalised without stitching it again. The
+old run is left as it is.
+
+### Disk space: removing revisions
+
+Revisions of an edited segmentation add up, each costing about the size of
+the frames it changed. To remove the ones nothing needs:
+
+```
+posetrak -s session.db seg prune [SEG_RUN] [--dry-run]
+```
+
+It keeps the newest saved revision of each segmentation and every revision
+that a detection run or tracking run recorded (whatever the run's status),
+and never touches an open revision. It runs only when you ask for it.
+
+Upgrading a session database to this version rebuilds its mask table once.
+The database file grows by about the size of its masks, because SQLite keeps
+the freed space inside the file; `VACUUM` (for example with the `sqlite3`
+tool, with no other program using the session) returns it.
+
 ## Not covered here: manual touch-ups
 
 The segmentation window also has **Paint**, **Erase**, and **Zoom**

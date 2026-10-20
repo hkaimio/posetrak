@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from posetrak.db.run_status import INTERRUPTED, display_status
+from posetrak.db.seg_revisions import delete_run as delete_seg_run_masks
 
 _KIND = Qt.ItemDataRole.UserRole
 _ID   = Qt.ItemDataRole.UserRole + 1
@@ -182,7 +183,7 @@ class SessionTreeWidget(QTreeWidget):
         return self._conn.execute(
             "SELECT sq.id, sq.name, sq.time_start_s, sq.time_end_s, sq.created_at, "
             "       sq.quality_source, "
-            "       (SELECT COUNT(*) FROM seg_masks m WHERE m.seg_quality_run_id = sq.id) "
+            "       (SELECT COUNT(*) FROM seg_masks_latest m WHERE m.seg_quality_run_id = sq.id) "
             "           AS n_masks "
             "FROM seg_quality_runs sq WHERE sq.shot_id = ? ORDER BY sq.created_at",
             (capture_id,),
@@ -518,9 +519,7 @@ class SessionTreeWidget(QTreeWidget):
         ):
             return
         with self._conn:
-            self._conn.execute(
-                "DELETE FROM seg_masks WHERE seg_quality_run_id = ?", (seg_run_id,)
-            )
+            delete_seg_run_masks(self._conn, seg_run_id)
             self._conn.execute(
                 "DELETE FROM keypoint_obs_quality WHERE seg_run_id = ?", (seg_run_id,)
             )
@@ -579,9 +578,7 @@ class SessionTreeWidget(QTreeWidget):
                 )
             ]
             for seg_id in seg_ids:
-                conn.execute(
-                    "DELETE FROM seg_masks WHERE seg_quality_run_id = ?", (seg_id,)
-                )
+                delete_seg_run_masks(conn, seg_id)
                 conn.execute(
                     "DELETE FROM keypoint_obs_quality WHERE seg_run_id = ?", (seg_id,)
                 )

@@ -49,8 +49,9 @@ tracking. Main compared with `v0.1.0-proto2`:
 | 5 Hand refinement for SOMA runs | Done; default provisional; [status](../hand-detection-refinement/status.md) |
 | 6 Tracker cost | Done; per-person threads not kept; [status](../tracker-performance/status.md) |
 | 7 Calibration items | Done, with box-video run time cut from about 12 min to 73 s on a 41 s range; [status](../extrinsics-improvements/status.md) |
-| 8 Mask versioning | Next |
-| 9-12 | Not started |
+| 8 Mask versioning | Done (session schema 68); [status](../segmentation-versioning/status.md) |
+| 9 Keypoint candidates | Next |
+| 10-12 | Not started |
 
 ## Known issues
 

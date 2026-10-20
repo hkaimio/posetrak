@@ -44,6 +44,19 @@ from PySide6.QtWidgets import (
 from app.pose.frame_cache import FrameCache
 from app.pose.video_canvas import VideoCanvas, label_to_color
 from posetrak.db.db import generate_id
+from posetrak.db.seg_revisions import (
+    OpenRevisionError,
+    close_revision,
+    discard_revision,
+    get_open_revision,
+    masked_frames,
+    mask_at,
+    newest_closed_revision,
+    open_revision,
+    owner_is_alive,
+    owner_note,
+    write_mask,
+)
 
 
 class RangeBar(QWidget):
@@ -350,6 +363,13 @@ class CutieInitPanel(QWidget):
         self._seg_init_run_id: str | None = seg_init_run_id
         self._db_flush_buffer: list[tuple] = []    # buffered (svid, frame_idx, blob) rows
         self._DB_FLUSH_EVERY = 50           # flush to DB every N frames
+        # Mask revision this panel has open for writing (None until the first write after opening
+        # the run or after the last save), and whether the run is open read-only because another
+        # editor has a revision open.
+        self._open_rev: int | None = None
+        self._read_only: bool = False
+        self._read_only_reason: str = ""
+        self._claim_run()
         self._batch_recv_count: int = 0     # batches received for current job (for logging)
         self._t_job_recv_start: float = 0.0
 
@@ -357,6 +377,8 @@ class CutieInitPanel(QWidget):
         if self._skeleton_overlay is not None:
             self._canvas.set_skeleton_overlay(self._skeleton_overlay)
         self._load_run()
+        if self._read_only:
+            self._set_status(self._read_only_reason)
 
     # ------------------------------------------------------------------
     # Public
@@ -365,7 +387,77 @@ class CutieInitPanel(QWidget):
     def shutdown(self) -> None:
         self._encode_timer.stop()
         self._runner.shutdown()
+        self._flush_masks()
+        self._close_revision()
         self._frame_cache.close()
+
+    # ------------------------------------------------------------------
+    # Mask revisions
+    # ------------------------------------------------------------------
+
+    def _claim_run(self) -> None:
+        """Handle an open revision of the run being continued.
+
+        One editor per run: a revision held by a live editor makes this panel read-only; one left
+        by a crashed editor is offered for saving or discarding first.
+        """
+        if self._seg_init_run_id is None:
+            return
+        held = get_open_revision(self._conn, self._seg_init_run_id)
+        if held is None:
+            return
+        if owner_is_alive(held.note):
+            self._read_only = True
+            self._read_only_reason = (
+                f"Read-only: revision {held.revision} of this segmentation has been open since "
+                f"{held.created_at} ({held.note or 'unknown editor'})."
+            )
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Unsaved segmentation edits")
+        box.setText(
+            f"An earlier session left revision {held.revision} of this segmentation unsaved "
+            f"(opened {held.created_at}). Save it to keep its masks, or discard it."
+        )
+        save = box.addButton("Save", QMessageBox.ButtonRole.AcceptRole)
+        discard = box.addButton("Discard", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Open read-only", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is save:
+            close_revision(self._conn, self._seg_init_run_id, held.revision)
+        elif box.clickedButton() is discard:
+            discard_revision(self._conn, self._seg_init_run_id, held.revision)
+        else:
+            self._read_only = True
+            self._read_only_reason = f"Read-only: revision {held.revision} is unsaved."
+
+    def _open_for_write(self) -> bool:
+        """Open a revision of the run on the first write; False when the run is read-only."""
+        if self._read_only:
+            return False
+        if self._open_rev is None:
+            try:
+                self._open_rev = open_revision(self._conn, self._seg_init_run_id, note=owner_note())
+            except OpenRevisionError as exc:
+                self._read_only = True
+                self._read_only_reason = (
+                    f"Read-only: revision {exc.open_revision.revision} was opened by another editor."
+                )
+                self._set_status(self._read_only_reason)
+                return False
+        return True
+
+    def _close_revision(self) -> None:
+        """Save the open revision, if any."""
+        if self._open_rev is not None and self._seg_init_run_id is not None:
+            close_revision(self._conn, self._seg_init_run_id, self._open_rev)
+            self._open_rev = None
+
+    def _mask_revision(self, run_id: str) -> int | None:
+        """Highest revision of *run_id* this panel reads: its own open one, else the newest saved."""
+        if run_id == self._seg_init_run_id and self._open_rev is not None:
+            return self._open_rev
+        return newest_closed_revision(self._conn, run_id)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -1126,7 +1218,7 @@ class CutieInitPanel(QWidget):
             self._sam_status_label.setText(f"SAM2 error: {e}")
 
         # Enable track / pose buttons if there are persons to track
-        can_track = bool(self._persons)
+        can_track = bool(self._persons) and not self._read_only
         self._track_range_btn.setEnabled(can_track)
         self._track_fwd_btn.setEnabled(can_track)
         self._track_bwd_btn.setEnabled(can_track)
@@ -1382,14 +1474,10 @@ class CutieInitPanel(QWidget):
         if not run_ids:
             self._range_bar.set_covered_frames([])
             return
-        placeholders = ",".join("?" * len(run_ids))
-        rows = self._conn.execute(
-            f"SELECT DISTINCT frame_idx FROM seg_masks "
-            f"WHERE seg_quality_run_id IN ({placeholders}) AND shot_video_id=? "
-            f"ORDER BY frame_idx",
-            [*run_ids, cam["id"]],
-        ).fetchall()
-        local_frames = [r["frame_idx"] for r in rows]
+        local_frames = sorted({
+            f for run_id in run_ids
+            for f in masked_frames(self._conn, run_id, cam["id"], self._mask_revision(run_id))
+        })
         if self._sync_table is None:
             self._range_bar.set_covered_frames(local_frames)
             return
@@ -1674,14 +1762,9 @@ class CutieInitPanel(QWidget):
         """
         run_ids = self._read_run_ids()
         for run_id in run_ids:
-            row = self._conn.execute(
-                "SELECT mask_blob FROM seg_masks "
-                "WHERE seg_quality_run_id = ? AND shot_video_id = ? AND frame_idx = ?",
-                (run_id, shot_video_id, frame_idx),
-            ).fetchone()
-            if row is not None:
-                buf = np.frombuffer(bytes(row["mask_blob"]), dtype=np.uint8)
-                return _decode_mask_png(buf)
+            blob = mask_at(self._conn, run_id, shot_video_id, frame_idx, self._mask_revision(run_id))
+            if blob is not None:
+                return _decode_mask_png(np.frombuffer(blob, dtype=np.uint8))
         return None
 
     def _update_skeleton_overlay(self, cam: dict, frame_idx: int) -> None:
@@ -1897,13 +1980,8 @@ class CutieInitPanel(QWidget):
             if not run_ids:
                 continue
             # Check masks exist for this camera in any relevant run.
-            placeholders = ",".join("?" * len(run_ids))
-            count = self._conn.execute(
-                f"SELECT COUNT(*) FROM seg_masks "
-                f"WHERE seg_quality_run_id IN ({placeholders}) AND shot_video_id=?",
-                [*run_ids, cam["id"]],
-            ).fetchone()[0]
-            if count == 0:
+            if not any(masked_frames(self._conn, run_id, cam["id"], self._mask_revision(run_id))
+                       for run_id in run_ids):
                 continue
 
             # Prefer the interactive run; fall back to original batch run.
@@ -2180,6 +2258,7 @@ class CutieInitPanel(QWidget):
             self._set_status(f"Pose done — {units_written} frames with keypoints.")
         else:
             self._flush_masks()
+            self._close_revision()   # a finished propagation job is one saved revision
             self._conn.commit()  # no-op if _flush_masks already committed everything
             if self._controller:
                 self._controller.clear_all()
@@ -2193,6 +2272,7 @@ class CutieInitPanel(QWidget):
 
     def _on_job_failed(self, job_id: str, error: str) -> None:
         self._flush_masks()
+        self._close_revision()
         self._conn.commit()
         self._refresh_queue_list()
         if error.startswith("CUTIE_SETUP_ERROR:"):
@@ -2208,6 +2288,8 @@ class CutieInitPanel(QWidget):
             self._set_status(f"Job failed: {error}")
 
     def _on_queue_done(self) -> None:
+        self._flush_masks()
+        self._close_revision()   # also covers a cancelled queue
         self._stop_btn.setEnabled(False)
         self._progress_bar.setVisible(False)
         self._progress_bar.setValue(0)
@@ -2345,20 +2427,22 @@ class CutieInitPanel(QWidget):
             log.debug("Panel: _flush_masks skipped  buffer=%d  run_id=%s",
                       len(self._db_flush_buffer), self._seg_init_run_id)
             return
+        if not self._open_for_write():
+            log.warning("Panel: %d masks not written, the segmentation is read-only", len(self._db_flush_buffer))
+            self._db_flush_buffer.clear()
+            return
         n = len(self._db_flush_buffer)
         t0 = time.monotonic()
-        self._conn.executemany(
-            "INSERT OR REPLACE INTO seg_masks "
-            "(seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
-            "VALUES (?, ?, ?, ?)",
-            [
-                (self._seg_init_run_id, svid, fi, blob)
-                for svid, fi, blob in self._db_flush_buffer
-            ],
-        )
+        written = 0
+        for svid, fi, blob in self._db_flush_buffer:
+            # Only changed frames get a row in the revision; a propagation over a range repeats
+            # most masks it finds unchanged.
+            if mask_at(self._conn, self._seg_init_run_id, svid, fi, self._open_rev) != blob:
+                write_mask(self._conn, self._seg_init_run_id, svid, fi, self._open_rev, blob)
+                written += 1
         self._conn.commit()
         self._db_flush_buffer.clear()
-        log.debug("Panel: flushed %d masks to DB  %.1fms", n, (time.monotonic() - t0) * 1000)
+        log.debug("Panel: flushed %d masks (%d changed) to DB  %.1fms", n, written, (time.monotonic() - t0) * 1000)
 
     def _set_status(self, text: str) -> None:
         self._status_label.setText(text)

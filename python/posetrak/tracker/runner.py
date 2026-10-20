@@ -98,6 +98,7 @@ def run_tracker(
     smooth: bool = True,
     seg_run_id: str | None = None,
     seg_mask_label: int | None = None,
+    seg_revision: int | None = None,
     tracklet_assignments_path: Path | None = None,
     trace_assignment_steps: tuple[int, int] | None = None,
     on_progress: Callable[[str], None] | None = None,
@@ -143,6 +144,11 @@ def run_tracker(
         segmentation.
     seg_mask_label:
         This subject's own label (1..N) within *seg_run_id*'s masks.
+    seg_revision:
+        Mask revision every mask of the run is read at (``--seg-revision``). None lets the binary
+        pin the newest closed revision at its start; callers that want to know it resolve it
+        themselves (``posetrak.db.seg_revisions.newest_closed_revision``) and pass it. The binary
+        records it in ``tracking_run_persons.seg_revision``.
     on_progress:
         Callback invoked for each non-empty output line. Called from whichever
         thread calls ``run_tracker()``.
@@ -172,6 +178,8 @@ def run_tracker(
         args.append("--smooth")
     if seg_run_id is not None and seg_mask_label is not None:
         args += ["--seg-run-id", seg_run_id, "--seg-mask-label", str(seg_mask_label)]
+        if seg_revision is not None:
+            args += ["--seg-revision", str(seg_revision)]
     if tracklet_assignments_path is not None:
         args += ["--tracklet-assignments", str(tracklet_assignments_path)]
     if trace_assignment_steps is not None:

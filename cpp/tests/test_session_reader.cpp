@@ -1446,3 +1446,53 @@ TEST_CASE("A skeleton that binds no marker of the manifest names the pose model"
     CHECK_THROWS_WITH(reader.load_observations("seq_unbound", cameras, skeleton, 0.1, 0),
                       Catch::Matchers::ContainsSubstring("soma77"));
 }
+
+// ---------------------------------------------------------------------------
+// Segmentation mask revisions: a job reads every mask at one closed revision.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SessionReader reads segmentation masks at a pinned revision", "[session_reader][seg]") {
+    fs::path path = fs::temp_directory_path() / "posetrak_test_seg_revisions.db";
+    if (fs::exists(path))
+        fs::remove(path);
+    {
+        sqlite3* db = nullptr;
+        REQUIRE(sqlite3_open_v2(path.string().c_str(), &db,
+                                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) == SQLITE_OK);
+        exec_sql(db, R"(
+            CREATE TABLE seg_mask_revisions (
+                seg_quality_run_id TEXT NOT NULL, revision INTEGER NOT NULL,
+                created_at TEXT NOT NULL, closed_at TEXT, note TEXT,
+                PRIMARY KEY (seg_quality_run_id, revision));
+            CREATE TABLE seg_masks (
+                seg_quality_run_id TEXT NOT NULL, shot_video_id TEXT NOT NULL,
+                frame_idx INTEGER NOT NULL, revision INTEGER NOT NULL DEFAULT 0, mask_blob BLOB,
+                PRIMARY KEY (seg_quality_run_id, shot_video_id, frame_idx, revision));
+            INSERT INTO seg_mask_revisions VALUES ('s', 0, 't0', 't0', NULL);
+            INSERT INTO seg_mask_revisions VALUES ('s', 1, 't1', 't1', NULL);
+            INSERT INTO seg_mask_revisions VALUES ('s', 2, 't2', NULL, NULL);
+            INSERT INTO seg_masks VALUES ('s', 'v', 1, 0, x'AA');
+            INSERT INTO seg_masks VALUES ('s', 'v', 2, 0, x'BB');
+            INSERT INTO seg_masks VALUES ('s', 'v', 1, 1, x'CC');
+            INSERT INTO seg_masks VALUES ('s', 'v', 2, 1, NULL);
+            INSERT INTO seg_masks VALUES ('s', 'v', 1, 2, x'DD');
+        )");
+        sqlite3_close(db);
+    }
+    {
+        SessionReader reader(path.string());
+        // The open revision 2 is not the newest closed one.
+        REQUIRE(reader.newest_closed_seg_revision("s") == 1);
+        REQUIRE_FALSE(reader.newest_closed_seg_revision("other").has_value());
+
+        auto blob = [&](int frame, int revision) {
+            return reader.load_seg_mask_blob("s", "v", frame, revision);
+        };
+        CHECK(blob(1, 0) == std::string("\xAA"));
+        CHECK(blob(1, 1) == std::string("\xCC"));
+        CHECK(blob(2, 0) == std::string("\xBB"));
+        CHECK_FALSE(blob(2, 1).has_value());  // NULL blob: no mask from revision 1 on
+        CHECK_FALSE(blob(3, 1).has_value());  // never had a mask
+    }
+    fs::remove(path);
+}

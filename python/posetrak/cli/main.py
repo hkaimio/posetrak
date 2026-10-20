@@ -103,6 +103,7 @@ from posetrak.cli.marker_body import marker_body_group  # noqa: E402
 from posetrak.cli.config import config_group  # noqa: E402
 from posetrak.cli.pose import pose_group  # noqa: E402
 from posetrak.cli.detect import detect_group  # noqa: E402
+from posetrak.cli.seg import seg_group  # noqa: E402
 from posetrak.cli.track import track_group  # noqa: E402
 from posetrak.cli.trial import trial_group, cmd_export, cmd_import  # noqa: E402
 from posetrak.cli.video import video_group  # noqa: E402
@@ -125,6 +126,7 @@ main.add_command(extrinsics_group, "extrinsics")
 main.add_command(sync_group, "sync")
 main.add_command(pose_group, "pose")
 main.add_command(detect_group, "detect")
+main.add_command(seg_group, "seg")
 main.add_command(track_group, "track")
 main.add_command(trial_group, "trial")
 main.add_command(cmd_export, "export")

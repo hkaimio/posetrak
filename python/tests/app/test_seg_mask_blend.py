@@ -41,6 +41,11 @@ def dummy_db(tmp_path):
 
 
 def _insert_mask(conn, mask: np.ndarray, frame_idx: int = 0) -> None:
+    # A run starts with a closed revision 0 (trigger); masks of a run without a row would be invisible.
+    conn.execute(
+        "INSERT OR IGNORE INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at) "
+        "VALUES ('sqr1', 'sh1', 0, 1, '2026-01-01T00:00:00+00:00')"
+    )
     conn.execute(
         "INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
         "VALUES ('sqr1', 'sv1', ?, ?)",
@@ -235,3 +240,31 @@ def test_seg_source_prefers_newest_run_among_equal_mask_counts(dummy_db):
     dummy_db.execute("INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) VALUES ('old', 'sv1', 5, x'00')")
     assert _seg_source_for_video(dummy_db, "sv1") == "old"  # more masks wins over newer
     assert _seg_source_for_video(dummy_db, "nope") is None
+
+
+def test_overlay_shows_current_masks_or_the_revision_a_tracking_run_used(qapp, dummy_db):
+    from posetrak.db import seg_revisions as sr
+
+    old = np.zeros((4, 4), dtype=np.uint8)
+    old[0:2, 0:2] = 1
+    _insert_mask(dummy_db, old)                      # revision 0
+    new = np.zeros((4, 4), dtype=np.uint8)
+    new[2:4, 2:4] = 1
+    rev = sr.open_revision(dummy_db, "sqr1")
+    sr.write_mask(dummy_db, "sqr1", "sv1", 0, rev, _encode_png(new))
+    sr.close_revision(dummy_db, "sqr1", rev)
+    dummy_db.execute(
+        "INSERT INTO tracking_runs (id, observation_sequence_id, tracker_config_id, skeleton_id, extrinsic_calibration_id, sync_config_id, posetrak_version, active_camera_ids, marker_names, ran_at)"
+        " VALUES ('tr', 'seq', 'cfg', 'sk', 'ex', 'sy', 'v', '[]', '[]', 't')")
+    dummy_db.execute(
+        "INSERT INTO tracking_run_persons (run_id, person_id, skeleton_id, seg_quality_run_id, seg_mask_label, seg_revision)"
+        " VALUES ('tr', 0, 'sk', 'sqr1', 1, 0)")
+    dummy_db.commit()
+    w = _make_widget(dummy_db)
+
+    assert np.array_equal(w._decoded_seg_mask("sqr1", "sv1", 0), new)      # no run shown: current masks
+    w._tracking_seg = w._recorded_seg("tr")
+    assert w._tracking_seg == ("sqr1", 0)
+    assert np.array_equal(w._decoded_seg_mask("sqr1", "sv1", 0), old)      # the run's own revision
+    w._tracking_seg = w._recorded_seg(None)
+    assert np.array_equal(w._decoded_seg_mask("sqr1", "sv1", 0), new)

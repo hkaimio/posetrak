@@ -203,9 +203,17 @@ class SessionReader {
     std::unordered_map<int, std::string>
     load_camera_shot_video_ids(std::string const& sync_config_id);
 
-    /// @brief Raw PNG bytes for one seg_masks row, or std::nullopt if no row
-    /// exists for this (seg_run_id, shot_video_id, frame_idx) -- the same
-    /// "don't know, caller decides what to do" contract
+    /// @brief Highest closed revision of a segmentation run's masks, or
+    /// std::nullopt if the run has none. A job resolves this once at its start
+    /// and reads every mask at that revision, so a save made while it runs
+    /// cannot change what it reads (segmentation-versioning-design.md §2.3).
+    /// @param seg_run_id seg_quality_runs primary key
+    std::optional<int> newest_closed_seg_revision(std::string const& seg_run_id);
+
+    /// @brief Raw PNG bytes of one frame's mask at a revision: the row of the
+    /// frame with the largest seg_masks.revision <= *revision*. std::nullopt if
+    /// there is no such row or its blob is NULL (the frame has no mask) -- the
+    /// same "don't know, caller decides what to do" contract
     /// app.pose.pose_worker._load_mask already uses for a missing mask.
     /// Decode with posetrak::decode_seg_mask() (seg_mask.hpp); this method
     /// does no image decoding of its own, matching every other raw-blob
@@ -214,8 +222,11 @@ class SessionReader {
     /// @param shot_video_id capture_videos primary key (see
     ///        load_camera_shot_video_ids())
     /// @param frame_idx Native video frame number (UnlabeledCandidate::frame_idx)
+    /// @param revision Revision to read at; must be a closed one
+    ///        (newest_closed_seg_revision()).
     std::optional<std::string> load_seg_mask_blob(std::string const& seg_run_id,
-                                                  std::string const& shot_video_id, int frame_idx);
+                                                  std::string const& shot_video_id, int frame_idx,
+                                                  int revision);
 
     /// @brief Load pose observations for a sequence
     ///

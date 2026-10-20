@@ -866,3 +866,41 @@ TEST_CASE("ResultWriter waits for another connection's write lock instead of fai
 
     fs::remove(path);
 }
+
+TEST_CASE("ResultWriter::record_segmentation stores the masks the subject was gated with",
+          "[result_writer][segmentation]") {
+    fs::path path = fs::temp_directory_path() / "test_result_writer_record_segmentation.db";
+    make_fixture_db(path, "run1", /*person_id=*/0, /*step=*/0, {1.0}, {0.1});
+    {
+        sqlite3* db = nullptr;
+        REQUIRE(sqlite3_open_v2(path.string().c_str(), &db, SQLITE_OPEN_READWRITE, nullptr) ==
+                SQLITE_OK);
+        exec_sql(db, R"(
+            CREATE TABLE tracking_run_persons (
+                run_id TEXT NOT NULL, person_id INTEGER NOT NULL, skeleton_id TEXT,
+                seg_quality_run_id TEXT, seg_mask_label INTEGER, seg_revision INTEGER,
+                PRIMARY KEY (run_id, person_id));
+            INSERT INTO tracking_run_persons (run_id, person_id) VALUES ('run1', 0);
+        )");
+        sqlite3_close(db);
+    }
+    {
+        ResultWriter writer(path.string(), "run1", /*person_id=*/0);
+        writer.record_segmentation("seg-1", /*mask_label=*/3, /*revision=*/5);
+    }
+    sqlite3* db = nullptr;
+    REQUIRE(sqlite3_open_v2(path.string().c_str(), &db, SQLITE_OPEN_READONLY, nullptr) ==
+            SQLITE_OK);
+    sqlite3_stmt* stmt = nullptr;
+    REQUIRE(sqlite3_prepare_v2(db,
+                               "SELECT seg_quality_run_id, seg_mask_label, seg_revision FROM "
+                               "tracking_run_persons WHERE run_id = 'run1'",
+                               -1, &stmt, nullptr) == SQLITE_OK);
+    REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
+    CHECK(std::string(reinterpret_cast<char const*>(sqlite3_column_text(stmt, 0))) == "seg-1");
+    CHECK(sqlite3_column_int(stmt, 1) == 3);
+    CHECK(sqlite3_column_int(stmt, 2) == 5);
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    fs::remove(path);
+}

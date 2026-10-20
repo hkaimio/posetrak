@@ -12,6 +12,7 @@ import logging
 import sqlite3
 from posetrak.db.db import _connect
 from posetrak.db.run_status import display_status
+from posetrak.db.seg_revisions import mask_at
 import sys
 import threading
 from pathlib import Path
@@ -1308,7 +1309,7 @@ class TrialPanel(QWidget):
         if start_s is not None and end_s is not None:
             covering_segs = self._conn.execute(
                 "SELECT sq.id, sq.name, sq.time_start_s, sq.time_end_s, sq.quality_source, "
-                "       (SELECT COUNT(*) FROM seg_masks m WHERE m.seg_quality_run_id = sq.id) "
+                "       (SELECT COUNT(*) FROM seg_masks_latest m WHERE m.seg_quality_run_id = sq.id) "
                 "           AS n_masks "
                 "FROM seg_quality_runs sq "
                 "WHERE sq.shot_id = ? AND sq.time_start_s <= ? AND sq.time_end_s >= ? "
@@ -1682,7 +1683,7 @@ def _labels_present_in_run(
     import numpy as np
 
     row = conn.execute(
-        "SELECT shot_video_id, COUNT(*) n FROM seg_masks WHERE seg_quality_run_id = ? "
+        "SELECT shot_video_id, COUNT(*) n FROM seg_masks_latest WHERE seg_quality_run_id = ? "
         "GROUP BY shot_video_id ORDER BY n DESC LIMIT 1",
         (seg_run_id,),
     ).fetchone()
@@ -1690,7 +1691,7 @@ def _labels_present_in_run(
         return []
     frames = [
         r["frame_idx"] for r in conn.execute(
-            "SELECT frame_idx FROM seg_masks WHERE seg_quality_run_id = ? AND shot_video_id = ? "
+            "SELECT frame_idx FROM seg_masks_latest WHERE seg_quality_run_id = ? AND shot_video_id = ? "
             "ORDER BY frame_idx",
             (seg_run_id, row["shot_video_id"]),
         )
@@ -1699,7 +1700,7 @@ def _labels_present_in_run(
     labels: set[int] = set()
     for frame_idx in frames[::step]:
         blob = conn.execute(
-            "SELECT mask_blob FROM seg_masks WHERE seg_quality_run_id = ? "
+            "SELECT mask_blob FROM seg_masks_latest WHERE seg_quality_run_id = ? "
             "AND shot_video_id = ? AND frame_idx = ?",
             (seg_run_id, row["shot_video_id"], frame_idx),
         ).fetchone()["mask_blob"]
@@ -1733,9 +1734,9 @@ class SegmentationRunPanel(QWidget):
         row = self._conn.execute(
             "SELECT sq.id, sq.name, sq.time_start_s, sq.time_end_s, sq.created_at, "
             "       sq.quality_source, sq.notes, c.label AS capture_label, "
-            "       (SELECT COUNT(*) FROM seg_masks m WHERE m.seg_quality_run_id = sq.id) "
+            "       (SELECT COUNT(*) FROM seg_masks_latest m WHERE m.seg_quality_run_id = sq.id) "
             "           AS n_masks, "
-            "       (SELECT COUNT(DISTINCT shot_video_id) FROM seg_masks m "
+            "       (SELECT COUNT(DISTINCT shot_video_id) FROM seg_masks_latest m "
             "           WHERE m.seg_quality_run_id = sq.id) AS n_cameras "
             "FROM seg_quality_runs sq "
             "LEFT JOIN captures c ON c.id = sq.shot_id "
@@ -4043,7 +4044,7 @@ def _seg_source_for_video(conn: sqlite3.Connection, shot_video_id: str) -> str |
     """The segmentation run whose masks are shown for a video: the run with the
     most masks for it, the newest one when several have the same number."""
     row = conn.execute(
-        "SELECT m.seg_quality_run_id, COUNT(*) n FROM seg_masks m "
+        "SELECT m.seg_quality_run_id, COUNT(*) n FROM seg_masks_latest m "
         "JOIN seg_quality_runs sq ON sq.id = m.seg_quality_run_id "
         "WHERE m.shot_video_id=? GROUP BY m.seg_quality_run_id "
         "ORDER BY n DESC, sq.created_at DESC LIMIT 1",
@@ -6091,7 +6092,22 @@ class PersonCropGridWidget(QWidget):
 
     def set_tracking_run(self, run_id: str | None) -> None:
         """Load tracking run overlay data; called by PersonPanel when run selection changes."""
+        self._tracking_seg = self._recorded_seg(run_id)
         self._load_tracking_run(run_id)
+
+    def _recorded_seg(self, run_id: str | None) -> "tuple[str, int] | None":
+        """(segmentation run, revision) the tracking run's mask gate read, or None.
+
+        The mask overlay then shows exactly those masks instead of the current ones.
+        """
+        if not run_id:
+            return None
+        row = self._conn.execute(
+            "SELECT seg_quality_run_id, seg_revision FROM tracking_run_persons WHERE run_id = ? "
+            "AND seg_quality_run_id IS NOT NULL AND seg_revision IS NOT NULL LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        return (row[0], row[1]) if row else None
 
     def camera_labels(self) -> list[str]:
         return [c["label"] for c in self._cameras]
@@ -6657,7 +6673,7 @@ class PersonCropGridWidget(QWidget):
         import cv2
         import numpy as np
 
-        sqr_id = self._seg_sources.get(svid)
+        sqr_id = self._tracking_seg[0] if self._tracking_seg else self._seg_sources.get(svid)
         if not sqr_id:
             return crop_bgr
         full_mask = self._decoded_seg_mask(sqr_id, svid, frame_idx)
@@ -6706,6 +6722,9 @@ class PersonCropGridWidget(QWidget):
         self._seg_legend = self._seg_legend_entries(sqr_id, painted)
         return out
 
+    # (segmentation run, revision) the shown tracking run's mask gate read; None shows current masks.
+    _tracking_seg: "tuple[str, int] | None" = None
+
     _SEG_MASK_CACHE_SIZE = 32
     _seg_mask_cache: "collections.OrderedDict | None" = None
 
@@ -6721,20 +6740,24 @@ class PersonCropGridWidget(QWidget):
 
         if self._seg_mask_cache is None:
             self._seg_mask_cache = collections.OrderedDict()
-        key = (seg_run_id, svid, frame_idx)
+        pin = self._tracking_seg
+        revision = pin[1] if pin and pin[0] == seg_run_id else None
+        key = (seg_run_id, svid, frame_idx, revision)
         if key in self._seg_mask_cache:
             self._seg_mask_cache.move_to_end(key)
             return self._seg_mask_cache[key]
-        row = self._conn.execute(
-            "SELECT mask_blob FROM seg_masks "
-            "WHERE seg_quality_run_id=? AND shot_video_id=? AND frame_idx=?",
-            key,
-        ).fetchone()
+        if revision is None:
+            row = self._conn.execute(
+                "SELECT mask_blob FROM seg_masks_latest "
+                "WHERE seg_quality_run_id=? AND shot_video_id=? AND frame_idx=?",
+                key[:3],
+            ).fetchone()
+            blob = bytes(row["mask_blob"]) if row else None
+        else:
+            blob = mask_at(self._conn, seg_run_id, svid, frame_idx, revision)
         mask = None
-        if row:
-            mask = cv2.imdecode(
-                np.frombuffer(bytes(row["mask_blob"]), dtype=np.uint8), cv2.IMREAD_UNCHANGED
-            )
+        if blob is not None:
+            mask = cv2.imdecode(np.frombuffer(blob, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
             if mask is not None and mask.ndim == 3:
                 mask = mask[:, :, 0]
         self._seg_mask_cache[key] = mask

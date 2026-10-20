@@ -29,6 +29,8 @@ DOCUMENTED_TABLES = [
     ("session_schema.sql", "dot_assignment_edits"),
     ("session_schema.sql", "dot_assignment_proposals"),
     ("session_schema.sql", "pose_sequence_keypoints"),
+    ("session_schema.sql", "seg_mask_revisions"),
+    ("session_schema.sql", "seg_masks"),
     ("session_schema.sql", "seg_quality_run_subjects"),
     ("session_schema.sql", "seg_quality_runs"),
     ("session_schema.sql", "run_progress"),

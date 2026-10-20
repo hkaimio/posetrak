@@ -233,6 +233,7 @@ def _copy_remaining_config_columns(
 @click.option("--no-smooth", is_flag=True, default=False, help="Disable RTS smoothing.")
 @click.option("--binary", default=None, help="Path to posetrak-tracker binary.")
 @click.option("--seg-run", "seg_run", default=None, help="Segmentation (seg_quality_runs) ID (prefix accepted) whose masks gate dot-assignment trust for the tracked subject; needs the tracker config's dot_seg_mask_enabled. The subject's mask label is looked up in the subject registry.")
+@click.option("--seg-revision", "seg_revision", default=None, type=int, help="Revision of --seg-run's masks to read (default: the newest saved revision at the start of the run). Pass the revision a tracking run recorded to reproduce it after the masks were edited.")
 @click.option("--trace-steps", "trace_steps", nargs=2, type=int, default=None, metavar="FIRST LAST", help="Record the full dot-assignment decision trace (every candidate considered per marker slot, its cost, what excluded it, whether it won) for tracker steps FIRST..LAST (inclusive) into tracking_assignment_trace. Keep the range narrow. Step 0 is the run's start time; steps follow the tracker frame rate.")
 @click.option("--seg-label", "seg_label", default=None, type=int, help="Override the mask label looked up for --seg-run (e.g. for a label not yet mapped to a subject).")
 @click.option("--dot-detection-run", "dot_detection_run", default=None, help="Detection run (prefix accepted) whose dot tracklet ids the decisions below refer to; needed with --dot-edits-trial or --dot-proposals.")
@@ -264,6 +265,7 @@ def cmd_run(
     no_smooth: bool,
     binary: str | None,
     seg_run: str | None,
+    seg_revision: int | None,
     trace_steps: tuple[int, int] | None,
     seg_label: int | None,
     dot_detection_run: str | None,
@@ -394,9 +396,21 @@ def cmd_run(
                     f"{seg_run_id}; pass --seg-label, or map the label to the subject "
                     "in the segmentation panel."
                 )
-        click.echo(f"Segmentation: {seg_run_id} (label {seg_label})", err=True)
-    elif seg_label is not None:
-        fail("--seg-label needs --seg-run.")
+        # Pinned here, at the start of the run, so a save made in the segmentation panel meanwhile
+        # does not change what the run reads; the tracker records it with the run.
+        from posetrak.db.seg_revisions import newest_closed_revision
+
+        newest = newest_closed_revision(conn, seg_run_id)
+        if newest is None:
+            fail(f"Segmentation {seg_run_id} has no saved mask revision.")
+        if seg_revision is None:
+            seg_revision = newest
+        elif not 0 <= seg_revision <= newest:
+            # An open revision is above every saved one; reading it would see an unsaved edit.
+            fail(f"--seg-revision {seg_revision}: the saved revisions of {seg_run_id} go up to {newest}.")
+        click.echo(f"Segmentation: {seg_run_id} (label {seg_label}, revision {seg_revision})", err=True)
+    elif seg_label is not None or seg_revision is not None:
+        fail("--seg-label and --seg-revision need --seg-run.")
 
     rules_path: Path | None = None
     if dot_edits_trial is not None or dot_proposals:
@@ -447,6 +461,7 @@ def cmd_run(
         smooth=not no_smooth,
         seg_run_id=seg_run_id,
         seg_mask_label=seg_label,
+        seg_revision=seg_revision,
         tracklet_assignments_path=rules_path,
         trace_assignment_steps=trace_steps,
         on_progress=lambda line: click.echo(line, err=True),

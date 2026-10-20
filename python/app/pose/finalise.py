@@ -390,8 +390,11 @@ def _make_dot_mask_filter(
     same nearest-neighbor rounding `cv2.resize(..., INTER_NEAREST)` would
     give, since a dilated label mask is binary either way.
     """
+    from posetrak.db.seg_revisions import newest_closed_revision
     from posetrak.detection.box_sources import load_mask as _load_mask
 
+    # One revision for the whole finalise, so a save made meanwhile cannot mix two states of the masks.
+    revision = newest_closed_revision(session, seg_run_id)
     native_size_cache: dict[str, tuple[int, int] | None] = {}
 
     def native_size(svid: str) -> tuple[int, int] | None:
@@ -424,7 +427,7 @@ def _make_dot_mask_filter(
         is exactly the case where that turned into real gigabytes and got
         the whole process killed for memory pressure.
         """
-        mask = _load_mask(session, seg_run_id, svid, frame_idx)
+        mask = _load_mask(session, seg_run_id, svid, frame_idx, revision)
         size = native_size(svid)
         if mask is None or size is None:
             return None

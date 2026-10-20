@@ -417,6 +417,25 @@ this: create a fresh `detection_runs` row and copy the old run's `detection_keyp
 and leaves the original run byte-for-byte unchanged) rather than mutating the original in
 place.
 
+### Segmentation masks are append-only by revision
+A segmentation run's masks (`seg_masks`) are stored per revision: the primary key is
+`(seg_quality_run_id, shot_video_id, frame_idx, revision)`, and a row holds the mask a frame has from
+that revision on (a NULL `mask_blob` records that the frame has no mask from then on). The mask of a
+frame at revision `r` is its row with the largest `revision <= r`. `seg_mask_revisions` has one row per
+revision: revision 0 is the state when the segmentation was created (or when the database was
+migrated to schema 68), `closed_at` is NULL while the revision is open for editing, and a partial unique
+index allows one open revision per segmentation run. Only closed revisions are visible: the
+`seg_masks_latest` view returns the current mask of every masked frame, and the helpers in
+`posetrak.db.seg_revisions` (Python) and `SessionReader::load_seg_mask_blob` (C++) read a frame at a
+given revision.
+
+Results derived from masks record the revision they read, resolved once when the job starts:
+`detection_runs.seg_quality_run_id` / `seg_revision` for runs whose boxes or heatmap gate come from masks,
+`tracking_run_persons.seg_quality_run_id` / `seg_mask_label` / `seg_revision` for a subject tracked with a
+mask gate. NULL means the masks were not versioned when the result was made. A revision referenced by a
+result is kept by `posetrak seg prune`. See
+`docs/roadmap/features/segmentation-versioning/segmentation-versioning-design.md`.
+
 ### Multi-person tracking via `TrackingRunPerson`
 A single tracking run can track any number of persons simultaneously.
 `TrackingRunPerson` maps each `person_id` (matching the `person_id` in `PoseObservation`)

@@ -39,16 +39,18 @@ work).
   (maximum 9.8 px), `Calibration OK`. Written with `--write` to a copy, the extrinsics equal the ones the
   prototype stored for the same capture: camera centres within 0.01 mm and rotations within 0.001 degrees
   (the test tolerance). The prototype's printed errors and positions were identical to the command's.
-- *Failing capture* (four cameras; range 100-115 s of the second clip; the box is set down at 111.7 s and
-  is at rest in view of two cameras, ace2 and gopro13_02): windows at 100.4-103.9 s are seen by all four
-  cameras and anchor the solve (102.85 s), the world frame is aligned to the final rest position (box fit
-  1.0 mm RMS). Medians 6.10 (gopro-11_mini_01), 1.39, 1.13 and 2.68 px, but means of 217-540 px and maxima
-  of 735-2030 px: `Calibration FAILED`, exit 1, no `extrinsic_calibrations` row added (3 before and
-  after). The prototype on the same range anchored on the final rest position, left gopro13_01 unsolved
-  and printed the result without failing.
-- Scanning 63-104 s of the same clip (58 windows, all cameras see most of them) gives medians of 9-20 px
-  in every camera and fails as well; the prototype's mean errors (13-40 px) match. The box video of that
-  capture cannot be solved with the stored intrinsics, which the error table now says.
+- *The design's failing capture* (four cameras; range 100-115 s of the second clip; the box is set down
+  at 111.7 s and is at rest in view of two cameras, ace2 and gopro13_02): a window at 100.35 s is seen by
+  all four cameras and anchors the solve, and the world frame is aligned to the final rest position (box
+  fit 0.8 mm RMS). Medians 0.79-1.23 px, 90th percentiles 1.9-3.9 px, maxima 2.4-5.1 px:
+  `Calibration OK`. The prototype on the same range anchored on the final rest position, left gopro13_01
+  unsolved and printed the result without failing. (The first version of the error table computed the
+  errors after that alignment, against anchor points it had not moved, and reported means of 217-540 px
+  and a failure for this capture; the errors are now computed before the alignment.)
+- *A failing range:* scanning 63-104 s of the same clip (58 windows, all cameras see most of them, the
+  final window anchors, no alignment) gives medians of 9-20 px in every camera: `Calibration FAILED`,
+  exit 1, nothing written. The prototype's mean errors (13-40 px) match; it printed the result as a
+  normal solve.
 - The command takes about 2.5 min for a 25 s range and about 12 min for a 40 s range with 58 windows
   (4K 120 fps, four to six cameras): frame reading dominates.
 - The relabeling test on a copy of the second clip's capture: exchanging the cameras of gopro13_01 and

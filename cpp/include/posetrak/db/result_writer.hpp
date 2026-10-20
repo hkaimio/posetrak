@@ -175,6 +175,14 @@ class ResultWriter {
     void set_stage_status(std::string const& group_name, std::string const& status,
                           bool set_started = false, bool set_completed = false);
 
+    /// @brief Record the segmentation masks this run's subject was gated with
+    /// (tracking_run_persons.seg_quality_run_id / seg_mask_label / seg_revision),
+    /// so the run can be reproduced after the masks were edited.
+    /// @param seg_run_id seg_quality_runs.id
+    /// @param mask_label The subject's label within that segmentation
+    /// @param revision The mask revision every mask of the run was read at
+    void record_segmentation(std::string const& seg_run_id, int mask_label, int revision);
+
     /// @brief Flush any pending batched rows to the database.
     void flush();
 

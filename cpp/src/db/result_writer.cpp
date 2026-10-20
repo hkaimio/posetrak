@@ -870,6 +870,31 @@ void ResultWriter::patch_frame(int step, bool is_smoothed, std::vector<int> cons
 
 // ---------------------------------------------------------------------------
 
+void ResultWriter::record_segmentation(std::string const& seg_run_id, int mask_label,
+                                       int revision) {
+    sqlite3_stmt* stmt = nullptr;
+    char const* sql =
+        "UPDATE tracking_run_persons"
+        " SET seg_quality_run_id = ?, seg_mask_label = ?, seg_revision = ?"
+        " WHERE run_id = ? AND person_id = ?";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        throw std::runtime_error(
+            std::string("ResultWriter: prepare UPDATE tracking_run_persons: ") +
+            sqlite3_errmsg(db_));
+    }
+    sqlite3_bind_text(stmt, 1, seg_run_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, mask_label);
+    sqlite3_bind_int(stmt, 3, revision);
+    sqlite3_bind_text(stmt, 4, run_id_.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 5, person_id_);
+    int const rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        throw std::runtime_error(std::string("ResultWriter: UPDATE tracking_run_persons failed: ") +
+                                 sqlite3_errmsg(db_));
+    }
+}
+
 void ResultWriter::set_stage_status(std::string const& group_name, std::string const& status,
                                     bool set_started, bool set_completed) {
     std::string const now = utc_iso_timestamp();

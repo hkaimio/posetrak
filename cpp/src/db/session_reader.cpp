@@ -839,15 +839,27 @@ SessionReader::load_camera_shot_video_ids(std::string const& sync_config_id) {
     return result;
 }
 
+std::optional<int> SessionReader::newest_closed_seg_revision(std::string const& seg_run_id) {
+    Stmt stmt(db_,
+              "SELECT MAX(revision) FROM seg_mask_revisions"
+              " WHERE seg_quality_run_id = ? AND closed_at IS NOT NULL");
+    sqlite3_bind_text(stmt.ptr, 1, seg_run_id.c_str(), -1, SQLITE_STATIC);
+    if (!stmt.step() || sqlite3_column_type(stmt.ptr, 0) == SQLITE_NULL)
+        return std::nullopt;
+    return sqlite3_column_int(stmt.ptr, 0);
+}
+
 std::optional<std::string> SessionReader::load_seg_mask_blob(std::string const& seg_run_id,
                                                              std::string const& shot_video_id,
-                                                             int frame_idx) {
+                                                             int frame_idx, int revision) {
     Stmt stmt(db_,
               "SELECT mask_blob FROM seg_masks"
-              " WHERE seg_quality_run_id = ? AND shot_video_id = ? AND frame_idx = ?");
+              " WHERE seg_quality_run_id = ? AND shot_video_id = ? AND frame_idx = ?"
+              "   AND revision <= ? ORDER BY revision DESC LIMIT 1");
     sqlite3_bind_text(stmt.ptr, 1, seg_run_id.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt.ptr, 2, shot_video_id.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt.ptr, 3, frame_idx);
+    sqlite3_bind_int(stmt.ptr, 4, revision);
     if (!stmt.step())
         return std::nullopt;
     void const* blob = sqlite3_column_blob(stmt.ptr, 0);

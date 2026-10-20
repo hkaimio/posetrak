@@ -44,6 +44,10 @@ def _db_path(conn: sqlite3.Connection) -> str:
     return next(r[2] for r in conn.execute("PRAGMA database_list") if r[1] == "main")
 
 
+class _Cancelled(Exception):
+    pass
+
+
 class _Worker(QThread):
     progress = Signal(str)
     finished_ok = Signal(object)   # BoxVideoResult
@@ -53,6 +57,16 @@ class _Worker(QThread):
                  params: BoxVideoParams, parent=None) -> None:
         super().__init__(parent)
         self._args = (db_path, capture_id, yaml_content, body_id, params)
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Stop at the next progress report (the final solve itself runs to its end)."""
+        self._cancelled = True
+
+    def _report(self, message: str) -> None:
+        if self._cancelled:
+            raise _Cancelled
+        self.progress.emit(message)
 
     def run(self) -> None:
         db_path, capture_id, yaml_content, body_id, params = self._args
@@ -61,7 +75,9 @@ class _Worker(QThread):
         try:
             config = load_marker_body_yaml(yaml_content, rig_id=body_id)
             self.finished_ok.emit(
-                calibrate_from_box_video(conn, capture_id, config, params, self.progress.emit))
+                calibrate_from_box_video(conn, capture_id, config, params, self._report))
+        except _Cancelled:
+            pass
         except BoxVideoError as exc:
             self.failed.emit(str(exc))
         except Exception as exc:  # noqa: BLE001 -- shown to the user, not swallowed
@@ -192,5 +208,6 @@ class BoxVideoDialog(QDialog):
 
     def done(self, code: int) -> None:  # noqa: D102 -- Qt override
         if self._worker is not None and self._worker.isRunning():
+            self._worker.cancel()
             self._worker.wait()
         super().done(code)

@@ -521,7 +521,10 @@ class CaptureController:
         self._toggle_alert(
             cam.label,
             "stopped_by_itself",
-            recording and cam.driver.confidence == "confirmed" and st.recording is False,
+            recording
+            and self.phase == CapturePhase.RECORDING
+            and cam.driver.confidence == "confirmed"
+            and st.recording is False,
             f"{cam.label}: camera stopped recording by itself",
         )
         self._toggle_alert(

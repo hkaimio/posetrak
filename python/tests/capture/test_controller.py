@@ -248,6 +248,23 @@ def test_camera_stopping_by_itself_raises_alert(make_rig) -> None:
     assert run(scenario()) == [("stopped_by_itself", "cam2")]
 
 
+def test_camera_stopped_by_command_is_not_stopped_by_itself(make_rig) -> None:
+    rig = make_rig()
+
+    async def scenario():
+        await _start(rig)
+        rig.drivers[0].stop_delay_s = 0.2
+
+        async def camera_stops_mid_command():
+            await asyncio.sleep(0.05)
+            rig.drivers[0].push_status(recording=False)
+
+        await asyncio.gather(rig.ctl.stop_capture(), camera_stops_mid_command())
+        return [a.kind for a in rig.ctl.alerts]
+
+    assert run(scenario()) == []
+
+
 def test_alerts_clear_when_condition_ends(make_rig) -> None:
     rig = make_rig()
 

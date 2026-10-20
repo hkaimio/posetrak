@@ -214,6 +214,14 @@ the pose/detection pipeline:
   row and copy the old run's rows onto it via `INSERT...SELECT` instead of
   mutating the original in place.
 
+- **Segmentation masks are append-only by revision.** `seg_masks` rows belong to a revision
+  (`seg_mask_revisions`; one open revision per segmentation run, written by the segmentation panel).
+  Never `INSERT OR REPLACE` into a closed revision. Readers that show or count the masks as they are
+  read the `seg_masks_latest` view; a job whose result must be reproducible (detection from masks, the
+  tracker's mask gate) resolves `posetrak.db.seg_revisions.newest_closed_revision` once at its start,
+  reads through `mask_at` / `masks_at` (C++: `SessionReader::load_seg_mask_blob` with a revision) and
+  records the revision (`detection_runs.seg_revision`, `tracking_run_persons.seg_revision`).
+
 **Objects and marker detection.** A tracked rigid prop is a `capture_objects` row
 (`marker_body_definition_id` names its geometry), the counterpart of `capture_persons`.
 `detection_runs.detector_type` is `'pose'` (default; every pre-existing row) or `'aruco'`

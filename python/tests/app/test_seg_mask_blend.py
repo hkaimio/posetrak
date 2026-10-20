@@ -41,6 +41,11 @@ def dummy_db(tmp_path):
 
 
 def _insert_mask(conn, mask: np.ndarray, frame_idx: int = 0) -> None:
+    # A run starts with a closed revision 0 (trigger); masks of a run without a row would be invisible.
+    conn.execute(
+        "INSERT OR IGNORE INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at) "
+        "VALUES ('sqr1', 'sh1', 0, 1, '2026-01-01T00:00:00+00:00')"
+    )
     conn.execute(
         "INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
         "VALUES ('sqr1', 'sv1', ?, ?)",

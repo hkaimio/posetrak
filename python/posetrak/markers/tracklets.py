@@ -20,6 +20,7 @@ import cv2
 import numpy as np
 
 from app.pose.db_cache import decode_dot_candidates
+from posetrak.db.seg_revisions import mask_at, newest_closed_revision
 
 Tracklets = dict[int, dict[int, tuple[float, float]]]  # {tracklet_id: {video_frame: (x, y)}}
 
@@ -52,8 +53,10 @@ class SubjectMasks:
 
     def __init__(self, conn: sqlite3.Connection, seg_run_id: str, label: int, margin_px: float,
                  native_size: dict[str, tuple[int, int]], work_width: int = 480,
-                 cache_size: int = 64) -> None:
+                 cache_size: int = 64, revision: int | None = None) -> None:
         self._conn, self._run, self._label, self._margin = conn, seg_run_id, label, margin_px
+        # Pinned at construction (or given), so a save made meanwhile does not change the masks read.
+        self.revision = newest_closed_revision(conn, seg_run_id) if revision is None else revision
         self._native = native_size
         self._work_width = work_width
         self._cache: OrderedDict[tuple[str, int], np.ndarray | None] = OrderedDict()
@@ -64,13 +67,10 @@ class SubjectMasks:
         if key in self._cache:
             self._cache.move_to_end(key)
             return self._cache[key]
-        row = self._conn.execute(
-            "SELECT mask_blob FROM seg_masks WHERE seg_quality_run_id = ? AND shot_video_id = ? "
-            "AND frame_idx = ?", (self._run, shot_video_id, frame),
-        ).fetchone()
+        blob = mask_at(self._conn, self._run, shot_video_id, frame, self.revision)
         grown = None
-        if row is not None:
-            mask = cv2.imdecode(np.frombuffer(bytes(row["mask_blob"]), np.uint8), cv2.IMREAD_UNCHANGED)
+        if blob is not None:
+            mask = cv2.imdecode(np.frombuffer(blob, np.uint8), cv2.IMREAD_UNCHANGED)
             if mask is not None:
                 if mask.ndim == 3:
                     mask = mask[:, :, 0]

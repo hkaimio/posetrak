@@ -231,7 +231,7 @@ def test_mask_box_source_scales_boxes_to_the_frame_and_attaches_the_grown_mask(s
     assert ann.bbox.tolist() == [pytest.approx((40 + 79) / 2), pytest.approx((20 + 59) / 2), 39.0, 39.0]
     assert ann.mask.shape == (45, 80)                                          # work width 80 of a 160-wide frame
     assert ann.mask[10:30, 20:40].all() and ann.mask.sum() > 20 * 20           # grown by the margin, never shrunk
-    assert source.run_inputs() == {"seg_quality_run_id": "seg", "seg_revision": None}
+    assert source.run_inputs() == {"seg_quality_run_id": "seg", "seg_revision": 0}
 
 
 def test_pipeline_records_the_run_inputs_and_options(session, monkeypatch):

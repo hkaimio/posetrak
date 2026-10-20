@@ -32,6 +32,7 @@ from typing import Any, Protocol
 import cv2
 import numpy as np
 
+from posetrak.db.seg_revisions import mask_at, newest_closed_revision
 from posetrak.detection import stage_timing as st
 from posetrak.detection.backends import PersonDetection
 
@@ -121,15 +122,25 @@ class YoloxBoxSource:
 # ---------------------------------------------------------------------------
 
 
-def load_mask(conn: sqlite3.Connection, seg_quality_run_id: str, shot_video_id: str, frame_idx: int) -> np.ndarray | None:
-    """(H, W) uint8 label mask of a frame, at the resolution it is stored in, or None if not stored."""
-    row = conn.execute(
-        "SELECT mask_blob FROM seg_masks WHERE seg_quality_run_id=? AND shot_video_id=? AND frame_idx=?",
-        (seg_quality_run_id, shot_video_id, frame_idx),
-    ).fetchone()
-    if row is None:
+def load_mask(
+    conn: sqlite3.Connection, seg_quality_run_id: str, shot_video_id: str, frame_idx: int, revision: int | None = None
+) -> np.ndarray | None:
+    """(H, W) uint8 label mask of a frame, at the resolution it is stored in, or None if not stored.
+
+    With *revision* the mask the frame had at that revision (what a recorded result saw); without it the
+    current mask.
+    """
+    if revision is None:
+        row = conn.execute(
+            "SELECT mask_blob FROM seg_masks_latest WHERE seg_quality_run_id=? AND shot_video_id=? AND frame_idx=?",
+            (seg_quality_run_id, shot_video_id, frame_idx),
+        ).fetchone()
+        blob = None if row is None else bytes(row[0])
+    else:
+        blob = mask_at(conn, seg_quality_run_id, shot_video_id, frame_idx, revision)
+    if blob is None:
         return None
-    mask = cv2.imdecode(np.frombuffer(bytes(row[0]), dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    mask = cv2.imdecode(np.frombuffer(blob, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
     if mask is None:
         return None
     return mask[:, :, 0] if mask.ndim == 3 else mask
@@ -145,6 +156,23 @@ def boxes_from_labels(mask: np.ndarray, labels: Sequence[int]) -> dict[int, tupl
             continue
         out[label] = (int(cols.argmax()), int(rows.argmax()),
                       len(cols) - 1 - int(cols[::-1].argmax()), len(rows) - 1 - int(rows[::-1].argmax()))
+    return out
+
+
+def frame_boxes(
+    mask: np.ndarray, labels: Sequence[int], frame_width: int, frame_height: int
+) -> dict[int, tuple[float, float, float, float]]:
+    """Box (x1, y1, x2, y2) of each of *labels* in the frame's pixels, from a mask stored at a lower resolution.
+
+    A label whose box is smaller than ``MIN_BOX_PX`` in either direction is left out.
+    """
+    mask_h, mask_w = mask.shape
+    sx, sy = frame_width / mask_w, frame_height / mask_h
+    out = {}
+    for label, (x1, y1, x2, y2) in boxes_from_labels(mask, labels).items():
+        box = (x1 * sx, y1 * sy, (x2 + 1) * sx - 1, (y2 + 1) * sy - 1)
+        if box[2] - box[0] >= MIN_BOX_PX and box[3] - box[1] >= MIN_BOX_PX:
+            out[label] = box
     return out
 
 
@@ -176,8 +204,10 @@ class MaskBoxSource:
     conf = 0.3
 
     def __init__(self, conn: sqlite3.Connection, seg_quality_run_id: str, persons_ordered: Sequence[str], *,
-                 gate_margin_px: float = 40.0, work_width: int = 480) -> None:
+                 gate_margin_px: float = 40.0, work_width: int = 480, revision: int | None = None) -> None:
         self.seg_quality_run_id = seg_quality_run_id
+        # Pinned for the whole run: a save made while the run goes on does not change what it reads.
+        self.revision = newest_closed_revision(conn, seg_quality_run_id) if revision is None else revision
         self._labels = list(range(1, len(persons_ordered) + 1))
         self._margin, self._work_width = gate_margin_px, work_width
         self._db = _ReadOnlyDb(conn)
@@ -190,22 +220,16 @@ class MaskBoxSource:
 
     def prepare(self, cam, video_frame, image):
         with st.stage("box_source"):
-            mask = load_mask(self._db.get(), self.seg_quality_run_id, cam.shot_video_id, video_frame)
+            mask = load_mask(self._db.get(), self.seg_quality_run_id, cam.shot_video_id, video_frame, self.revision)
             if mask is None:
                 return []
             height, width = image.shape[:2]
-            mask_h, mask_w = mask.shape
-            sx, sy = width / mask_w, height / mask_h
             work = (self._work_width, max(1, round(self._work_width * height / width)))
             radius = max(1, round(self._margin * work[0] / width))
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1,) * 2)
             detections = []
-            for label, (x1, y1, x2, y2) in boxes_from_labels(mask, self._labels).items():
-                bx1, bx2 = x1 * sx, (x2 + 1) * sx - 1
-                by1, by2 = y1 * sy, (y2 + 1) * sy - 1
+            for label, (bx1, by1, bx2, by2) in frame_boxes(mask, self._labels, width, height).items():
                 w, h = bx2 - bx1, by2 - by1
-                if w < MIN_BOX_PX or h < MIN_BOX_PX:
-                    continue
                 small = cv2.resize((mask == label).astype(np.uint8), work, interpolation=cv2.INTER_NEAREST)
                 detections.append(PersonDetection(
                     track_id=label,
@@ -219,7 +243,7 @@ class MaskBoxSource:
         return [work.prepared for work in works]
 
     def run_inputs(self) -> dict:
-        return {"seg_quality_run_id": self.seg_quality_run_id, "seg_revision": None}
+        return {"seg_quality_run_id": self.seg_quality_run_id, "seg_revision": self.revision}
 
     def options(self) -> dict:
         return {"mask_gate_margin_px": self._margin, "mask_work_width": self._work_width}

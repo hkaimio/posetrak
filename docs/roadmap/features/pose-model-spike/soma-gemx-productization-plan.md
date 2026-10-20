@@ -198,7 +198,7 @@ Stage 0 is measurement only and comes first because several later scopes depend 
 - **Design:** [tracker performance](../tracker-performance/tracker-performance-design.md).
 - **Scope:**
   - The parent stage's joint groups stored with the configuration (`tracker_configs.active_joint_groups`,
-    schema 66), and the default configuration for 77-keypoint skeletons chosen from M2b and the
+    schema 67), and the default configuration for 77-keypoint skeletons chosen from M2b and the
     harness.
   - A warning at run start for a skeleton with hand groups tracked single-stage or with an
     unrestricted parent.
@@ -225,15 +225,16 @@ Stage 0 is measurement only and comes first because several later scopes depend 
 - **Scope:** fail-loud moving-box calibration in the `extrinsics_rig` command and the dialog; safe
   camera relabeling.
 - **Depends on:** nothing.
-- **Acceptance:** a capture whose box is seen at rest by only some cameras produces an error table
-  and a non-zero exit; relabeling keeps sync points with their videos.
+- **Acceptance:** a capture whose box cannot be solved produces an error table and a non-zero exit
+  and writes nothing; a box that ends at rest in view of some cameras only is solved from an earlier
+  window every camera sees; relabeling keeps sync points with their videos.
 - **Risks:** low.
 
 ### Stage 8 — Mask versioning
 
 - **Design:** [segmentation versioning](../segmentation-versioning/segmentation-versioning-design.md).
 - **Scope:** revisions, view, panel changes, concurrent use (pinned reads, one open revision per
-  segmentation run), recorded revisions, `detect stale` and refresh, prune; schema 67.
+  segmentation run), recorded revisions, `detect stale` and refresh, prune; schema 68.
 - **Depends on:** stage 1 (status, busy timeout), stage 3 (detection records the revision).
 - **Acceptance:** the design's §4, including a tracking run that reads one revision while the panel
   saves another.
@@ -244,7 +245,7 @@ Stage 0 is measurement only and comes first because several later scopes depend 
 
 - **Design:** [keypoint candidates](../keypoint-candidates/keypoint-candidates-design.md).
 - **Scope:** extraction and online linking in the SOMA estimator; finalisation copy; loader with class
-  and duplicate merge; `KeypointClassModifier`; `kp_candidates_enabled` (schema 68).
+  and duplicate merge; `KeypointClassModifier`; `kp_candidates_enabled` (schema 69).
 - **Depends on:** stages 2, 3, M3, M5; stage 8 for reproducible mask gating.
 - **Acceptance:** the design's §8: reproduces the prototype's tracker figures within 0.5 cm, both
   scored by the harness, whose figures differ from the spike's by up to 0.3 cm; off equals no
@@ -279,7 +280,7 @@ Stage 0 is measurement only and comes first because several later scopes depend 
 ### Stage 12 — Tracklet editing, second stage
 
 - **Design:** [tracklet editing](../keypoint-editing/tracklet-editing-design.md).
-- **Scope:** force, split, groups (`edit_group_id`, schema 69), time-range and cross-camera
+- **Scope:** force, split, groups (`edit_group_id`, schema 70), time-range and cross-camera
   grouping, suggested review windows from the failure flag.
 - **Depends on:** stage 10.
 - **Acceptance:** the design's §5, second and third items.
@@ -290,9 +291,9 @@ Stage 0 is measurement only and comes first because several later scopes depend 
 
 | Release | Stages | Usable state | Schema |
 |---|---|---|---|
-| First: SOMA recommended | 0-7 | SOMA-77 from any box source in one pass, with refined hands where they help, automatic person assignment for YOLOX footage, default skeletons composed from layers with SOMA markers and corrected joint limits, hierarchical tracking within memory, robust concurrent writes, reliable box calibration. RTMPose-133 unchanged and used when the SOMA licences are declined. | 64, 65, 66 |
-| Second: candidates | 8-11 | Reproducible mask use under concurrent editing; keypoint candidates optional per detection and per tracking run, with strict mask and multi-view agreement options; first tracklet editing; intrinsics check. | 67, 68 |
-| Third: tracklet editing | 12 | Force, split and group operations, review windows. | 69 |
+| First: SOMA recommended | 0-7 | SOMA-77 from any box source in one pass, with refined hands where they help, automatic person assignment for YOLOX footage, default skeletons composed from layers with SOMA markers and corrected joint limits, hierarchical tracking within memory, robust concurrent writes, reliable box calibration. RTMPose-133 unchanged and used when the SOMA licences are declined. | 64, 65, 66, 67 |
+| Second: candidates | 8-11 | Reproducible mask use under concurrent editing; keypoint candidates optional per detection and per tracking run, with strict mask and multi-view agreement options; first tracklet editing; intrinsics check. | 68, 69 |
+| Third: tracklet editing | 12 | Force, split and group operations, review windows. | 70 |
 
 The first release adds every column its components write, including the segmentation columns of
 detection and tracking runs (NULL revision until the second release), so later releases only add

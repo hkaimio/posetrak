@@ -51,8 +51,12 @@ work).
   final window anchors, no alignment) gives medians of 9-20 px in every camera: `Calibration FAILED`,
   exit 1, nothing written. The prototype's mean errors (13-40 px) match; it printed the result as a
   normal solve.
-- The command takes about 2.5 min for a 25 s range and about 12 min for a 40 s range with 58 windows
-  (4K 120 fps, four to six cameras): frame reading dominates.
+- The command took about 2.5 min for a 25 s range and about 12 min for a 40 s range with 58 windows
+  (4K 120 fps, four to six cameras): frame decoding dominated (every frame of the range in the scan, a
+  seek per window and camera in the lookups). With several decoders in parallel (one per core, each
+  single-threaded) and one pass per camera over its windows, the 41 s range takes about 73 s and the
+  27 s range about 47 s, with identical windows, verdicts and extrinsics; the bundle adjustment is now a
+  third of the time. Per-phase tables in `calibration-robustness-design.md` §1.
 - The relabeling test on a copy of the second clip's capture: exchanging the cameras of gopro13_01 and
   gopro13_02 through `capture reassign-camera` leaves every video's file path, sync points and sync lookups
   unchanged. In that session `sync_points.camera_instance_id` holds the video id for every row written by

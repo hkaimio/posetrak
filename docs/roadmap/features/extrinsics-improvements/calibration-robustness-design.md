@@ -52,6 +52,56 @@ A box that ends at rest in view of some cameras only is no longer a failure by i
 window is seen by all cameras it anchors the solve. The error table is what fails a capture where no
 such window exists or a camera's fit is poor.
 
+### Run time
+
+Measured on a 24-thread AMD desktop (Windows 11, PyAV/FFmpeg software HEVC decode, OpenCV 4.13), 4K 120 fps
+videos with 120-frame GOPs (the Insta360 camera's GOP is 40 frames). Seconds per phase: *scan* is the
+search for stationary windows in the reference camera, *lookups* is the detection of every window in every
+camera, *solve* is `run_calibration` plus the verdict (and the re-read of the anchor window's frames).
+
+| Case | Cameras | Range | Windows | Scan | Lookups | Solve | Total |
+|---|---|---|---|---|---|---|---|
+| Reference gopro13_02 (succeeding capture) | 6 | 6-33 s | 12 | 125.6 | 81.2 | 18.4 | 225 |
+| Reference insta_ace2_pro, failing range | 4 | 63-104 s | 58 | 198.5 | 338.7 | 25.5 | 563 |
+| Reference insta_ace2_pro, passing range | 4 | 100-115 s | 6 | 101.7 | 8.7 | 8.1 | 119 |
+| Reference gopro13_02, same clip | 4 | 63-104 s | 36 | 189.2 | 211.3 | 9.1 | 410 |
+| Reference gopro13_02, same clip | 4 | 100-115 s | 6 | 73.0 | 39.4 | 8.2 | 121 |
+
+(rows: sequential scan, one open and seek per window and camera.) After the changes below:
+
+| Case | Scan | Lookups | Solve | Total |
+|---|---|---|---|---|
+| 6 cameras, 6-33 s | 14.6 | 14.4 | 18.0 | 47 |
+| 4 cameras, insta reference, 63-104 s | 17.6 | 30.7 | 24.7 | 73 |
+| 4 cameras, insta reference, 100-115 s | 7.6 | 11.5 | 8.3 | 27 |
+| 4 cameras, gopro13_02 reference, 63-104 s | 20.3 | 26.8 | 8.3 | 55 |
+| 4 cameras, gopro13_02 reference, 100-115 s | 9.8 | 9.4 | 8.1 | 27 |
+
+Each change on its own (total / the phase it changes):
+
+- Frames were decoded at about 30 ms (decode plus BGR conversion) each and the scan decoded every frame
+  of the range: 1,800 to 5,000 frames, decode 80-90 % of the scan; detection of the sampled frames
+  (about 40 ms each) is the rest. Converting only the sampled frames saves 10 % of the scan (73 to 66 s on
+  the 15 s range) and nothing more, so the decoder is the cost.
+- Windows looked up through one open container per camera, in time order, one thread per camera:
+  lookups 339 to 107 s (58 windows), 81 to 29 s (12 windows). The 6-window case got slower in this step
+  alone (9 to 21 s): a seek costs the decode from the preceding keyframe (60 frames on average with
+  120-frame GOPs), and with few windows the slowest camera bounds the phase.
+- A camera's windows split into consecutive chunks, about one decoder per core: lookups 107 to 32 s and
+  21 to 11.5 s.
+- The scan split into one chunk per core, each decoder seeking to its chunk start: scan 195 to 18 s
+  (58 windows), 107 to 15 s (6 cameras), 66 to 8 s (15 s range).
+
+Decoding stays single-threaded per decoder; the parallelism is several decoders. Windows, per-window
+corner counts, verdicts and extrinsics are identical to the sequential code on all five cases (window
+times equal to the sample, extrinsics difference 0.0000 mm and 0.00000 degrees: detections are the same
+frames, so the solver input is the same).
+What is left on the 41 s range: the solve (25 s of 73 s on the failing range: 1,700 least-squares
+iterations of the bundle adjustment, 8 s of feature matching between the anchor window's images), the
+lookups (a seek per window and camera, about 1.5 s of decode each, divided over the cores) and the scan
+(chunk seeks plus detection on a sixth of the frames). The scan was not made lower resolution: with the
+parallel decoder it takes 8-20 s, and the detections that decide the windows keep full resolution.
+
 ## 2. Room tags as scene markers
 
 Cameras moved 70-400 px between two captures of one session, so extrinsics cannot be reused across

@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from pipeline.capture.api import create_app  # noqa: E402
 from pipeline.capture.config import CameraConfig, ConfigError, parse_config  # noqa: E402
+from pipeline.capture.credentials import CohnCredentials, CredentialStore  # noqa: E402
 from pipeline.capture.daemon import (  # noqa: E402
     build_driver,
     controller_factory,
@@ -55,8 +56,33 @@ def test_qr_text_variants() -> None:
 
 def test_build_driver() -> None:
     assert isinstance(build_driver(CameraConfig("a", "manual")), ManualDriver)
-    with pytest.raises(ConfigError, match="not available"):
-        build_driver(CameraConfig("a", "gopro_cohn", "1234"))
+    with pytest.raises(ConfigError, match="no COHN credentials"):
+        build_driver(CameraConfig("a", "gopro_cohn", "1234"), parse_config({}), CredentialStore(Path("nowhere")))
+
+
+def test_build_cohn_driver_orders_networks_and_applies_reserved_addresses(tmp_path: Path) -> None:
+    from pipeline.capture.gopro_cohn import GoProCohnDriver
+
+    store = CredentialStore(tmp_path)
+    store.save("1234", CohnCredentials("HomeNet", "192.168.1.50", "gopro", "p1", "C1"))
+    store.save("1234", CohnCredentials("site-ap", "192.168.8.77", "gopro", "p2", "C2"))
+    store.save("1234", CohnCredentials("other", "10.0.0.5", "gopro", "p3", "C3"))
+    cfg = parse_config(
+        {
+            "network": [
+                {"name": "location", "ssid": "site-ap", "addresses": {"cam-1": "192.168.8.101"}},
+                {"name": "home", "ssid": "HomeNet"},
+            ]
+        }
+    )
+    driver = build_driver(CameraConfig("cam-1", "gopro_cohn", "1234"), cfg, store)
+    assert isinstance(driver, GoProCohnDriver)
+    endpoints = driver._endpoints
+    assert [(e.network, e.base_url) for e in endpoints] == [
+        ("location", "https://192.168.8.101"),
+        ("home", "https://192.168.1.50"),
+        ("other", "https://10.0.0.5"),
+    ]
 
 
 def test_resolve_camera_instances(tmp_path: Path) -> None:

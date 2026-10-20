@@ -11,6 +11,7 @@ carries the address.
 
 from __future__ import annotations
 
+import ipaddress
 import socket
 
 
@@ -71,3 +72,30 @@ def qr_text(url: str, *, ascii_only: bool = False) -> str:
     return "\n".join(
         "".join(blocks[(t, b)] for t, b in zip(top, bottom)) for top, bottom in zip(matrix[::2], matrix[1::2])
     )
+
+
+def route_warning(camera_ip: str) -> str | None:
+    """Explain a route that would keep traffic to a camera off the WLAN it is on.
+
+    A VPN that routes the camera's subnet (the same private range as the
+    capture WLAN) into a tunnel makes every request time out. When this
+    machine has an address in the camera's /24 but the operating system would
+    send traffic to the camera from a different one, return a description;
+    otherwise None. A camera on a network this machine is not on gives no
+    warning: it is simply not reachable from here.
+    """
+    try:
+        camera = ipaddress.ip_address(camera_ip)
+        subnet = ipaddress.ip_network(f"{camera}/24", strict=False)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect((camera_ip, 9))
+            chosen = ipaddress.ip_address(s.getsockname()[0])
+    except (ValueError, OSError):
+        return None
+    on_subnet = any(ipaddress.ip_address(a) in subnet for a in lan_addresses())
+    if on_subnet and chosen not in subnet:
+        return (
+            f"traffic to {camera_ip} would leave from {chosen}, not from this machine's address on {subnet}; "
+            "a VPN or another route may be shadowing the capture WLAN"
+        )
+    return None

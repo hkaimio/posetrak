@@ -137,6 +137,69 @@ def run(config_path: Path, demo: int, host: str | None, port: int | None, verbos
     uvicorn.run(app, host=listen_host, port=listen_port, log_level="debug" if verbose else "info")
 
 
+@main.command("networks")
+@click.argument("serial")
+def networks(serial: str) -> None:
+    """List the WLANs a Hero13 sees over Bluetooth and which it is provisioned on.
+
+    SERIAL is the last four digits of the camera's serial number (its Bluetooth
+    name is "GoPro <SERIAL>").
+    """
+    import asyncio
+
+    from pipeline.capture.gopro_ble import list_networks
+
+    for net in asyncio.run(list_networks(serial)):
+        marks = ",".join(m for m, on in (("provisioned", net.configured), ("joined", net.associated)) if on)
+        click.echo(f"  {net.ssid:<28} {net.frequency_mhz} MHz  bars {net.signal_bars}  {marks}")
+
+
+@main.command("provision")
+@click.argument("serial")
+@click.option("--network", "network_name", default=None, help="Name of a [[network]] block in the configuration.")
+@click.option("--ssid", default=None, help="SSID to join, when no configured network is named.")
+@click.option("--password", prompt=True, hide_input=True, help="WLAN password (prompted if omitted).")
+@click.option("--force", is_flag=True, help="Create new COHN credentials even if the camera has some.")
+@click.pass_obj
+def provision(config_path: Path, serial: str, network_name: str | None, ssid: str | None, password: str, force: bool) -> None:
+    """Set a Hero13 up for control over a WLAN, over Bluetooth.
+
+    The camera joins the WLAN, creates COHN credentials there, and they are
+    stored under the user configuration directory. Repeat for every WLAN the
+    camera will be used on (home, location access point). A camera that was
+    never paired with this computer must be in pairing mode.
+    """
+    import asyncio
+
+    from pipeline.capture.credentials import CredentialStore
+    from pipeline.capture.gopro_ble import ProvisioningError
+    from pipeline.capture.gopro_ble import provision as run_provision
+
+    cfg = None
+    if config_path.exists():
+        try:
+            cfg = load_config(config_path)
+        except ConfigError as exc:
+            raise click.ClickException(str(exc)) from exc
+    if network_name:
+        if cfg is None:
+            raise click.ClickException(f"--network needs a configuration file ({config_path})")
+        try:
+            ssid = cfg.network(network_name).ssid
+        except ConfigError as exc:
+            raise click.ClickException(str(exc)) from exc
+    if not ssid:
+        raise click.ClickException("give --network or --ssid")
+    store = CredentialStore(cfg.daemon.credentials_dir if cfg else None)
+    click.echo(f"provisioning camera {serial} on {ssid!r} ...")
+    try:
+        creds = asyncio.run(run_provision(serial, ssid, password, store, force=force))
+    except ProvisioningError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"done: the camera is at {creds.ip_address} on {ssid!r}; credentials saved in {store.directory}")
+    click.echo("Give the camera a fixed address in the router and list it under [network.addresses] if the address changes.")
+
+
 @main.command("firewall-rule")
 @click.option("--apply", "apply_rule", is_flag=True, help="Add the rule now (needs an administrator shell).")
 @click.pass_obj

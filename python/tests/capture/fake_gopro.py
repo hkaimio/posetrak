@@ -13,6 +13,8 @@ Endpoints (plain HTTP on a loopback port; the real camera serves HTTPS):
 ``GET /gopro/camera/shutter/start`` and ``/stop``
 ``GET /gopro/camera/setting?setting=<id>&option=<value>``
 ``GET /gopro/camera/presets/get``
+``GET /gopro/camera/presets/set_group?id=<group>``
+    Switches the active mode: group 1000 is video, 1001 photo, 1002 time lapse.
 
 Behaviour knobs, all settable while the server runs:
 
@@ -23,6 +25,9 @@ Behaviour knobs, all settable while the server runs:
 ``never_encodes``      shutter/start is acknowledged but the camera never records
 ``stop_after_s``       the camera stops recording by itself this long after start
 ``supported_options``  setting id -> allowed option values; others get HTTP 403
+``ignore_settings``    setting changes are acknowledged but do not take effect
+                       (a camera in a locked-down "easy" control mode)
+``flat_mode``          active mode, status 89: 12 video, 13 time lapse, 16 photo
 ``require_auth``       expected ``Authorization`` header value, or None
 """
 
@@ -38,6 +43,11 @@ ST_SYSTEM_HOT = "6"
 ST_ENCODING = "10"
 ST_SD_REMAINING_KB = "54"
 ST_BATTERY_PERCENT = "70"
+ST_REMAINING_VIDEO_S = "35"
+ST_FLAT_MODE = "89"
+
+FLAT_VIDEO, FLAT_TIME_LAPSE, FLAT_PHOTO = 12, 13, 16
+GROUP_TO_FLAT_MODE = {"1000": FLAT_VIDEO, "1001": FLAT_PHOTO, "1002": FLAT_TIME_LAPSE}
 
 # Open GoPro setting ids
 SET_RESOLUTION = "2"
@@ -59,10 +69,13 @@ class FakeGoPro:
         self.require_auth: str | None = None
         self.supported_options: dict[str, set[int]] = {
             SET_RESOLUTION: {1, 4, 9, 12},
-            SET_FPS: {5, 8, 9, 10, 13},
+            SET_FPS: {0, 1, 5, 8, 9, 10, 13},
             SET_LENS: {0, 4, 7},
         }
         self.settings: dict[str, int] = {SET_RESOLUTION: 9, SET_FPS: 8, SET_LENS: 0}
+        self.ignore_settings = False
+        self.flat_mode = FLAT_VIDEO
+        self.remaining_video_s = 20_000
         self.battery_percent = 100
         self.system_hot = False
         self.storage_kb = 100_000_000
@@ -115,6 +128,8 @@ class FakeGoPro:
                 ST_BATTERY_PERCENT: self.battery_percent,
                 ST_SYSTEM_HOT: int(self.system_hot),
                 ST_SD_REMAINING_KB: self.storage_kb,
+                ST_REMAINING_VIDEO_S: self.remaining_video_s,
+                ST_FLAT_MODE: self.flat_mode,
             },
             "settings": dict(self.settings),
         }
@@ -156,7 +171,17 @@ class FakeGoPro:
             sid, option = query.get("setting"), int(query.get("option", "-1"))
             if sid not in self.supported_options or option not in self.supported_options[sid]:
                 return self._reply(handler, 403, {"error": "unsupported setting"})
-            self.settings[sid] = option
+            if not self.ignore_settings:
+                self.settings[sid] = option
+            return self._reply(handler, 200, {})
+        if url.path == "/gopro/camera/presets/set_group":
+            mode = GROUP_TO_FLAT_MODE.get(query.get("id", ""))
+            if mode is None:
+                return self._reply(handler, 403, {"error": "unknown group"})
+            with self._lock:
+                if self._record_started_at is not None:
+                    return self._reply(handler, 500, {"error": "busy"})
+            self.flat_mode = mode
             return self._reply(handler, 200, {})
         if url.path == "/gopro/camera/presets/get":
             return self._reply(handler, 200, {"presetGroupArray": [], "serial": self.serial})

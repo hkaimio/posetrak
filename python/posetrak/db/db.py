@@ -15,10 +15,13 @@ from __future__ import annotations
 
 import importlib.resources
 import json
+import logging
 import sqlite3
 import uuid
 from pathlib import Path
 from typing import Final
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Schema version constants
@@ -29,7 +32,7 @@ REGISTRY_SCHEMA_VERSION: Final[int] = 17
 #: Seconds a connection waits for another writer's lock before failing. The C++
 #: tracker's connections use the same value.
 BUSY_TIMEOUT_S: Final[float] = 60.0
-SESSION_SCHEMA_VERSION: Final[int] = 67
+SESSION_SCHEMA_VERSION: Final[int] = 68
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -2119,6 +2122,69 @@ def _migrate_session_v66_to_v67(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v67_to_v68(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 67 to 68.
+
+    v68 makes segmentation masks append-only by revision: seg_mask_revisions, seg_masks.revision
+    in the primary key (mask_blob nullable), the seg_masks_latest view, and a trigger giving every
+    new segmentation run a closed revision 0. SQLite cannot change a primary key in place, so
+    seg_masks is rebuilt: every row is copied once with revision 0, run by run, reporting progress
+    through the ``posetrak.db.db`` logger. The whole rebuild is one transaction. See
+    031_seg_mask_revisions.sql and the segmentation versioning design.
+    """
+    if "revision" not in {row[1] for row in conn.execute("PRAGMA table_info(seg_masks)")}:
+        sql = (_DB_DIR / "migrations" / "031_seg_mask_revisions.sql").read_text(encoding="utf-8")
+        before, after = sql.split("-- @@ after copy")
+        # The rebuild drops seg_masks while seg_quality_runs rows point at it; foreign-key
+        # enforcement cannot change inside a transaction, so it brackets the whole rebuild.
+        conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            conn.execute("BEGIN")
+            for stmt in _split_statements(before):
+                conn.execute(stmt)
+            runs = conn.execute("SELECT id, created_at FROM seg_quality_runs ORDER BY created_at").fetchall()
+            for i, (run_id, created_at) in enumerate(runs, 1):
+                conn.execute(
+                    "INSERT INTO seg_mask_revisions (seg_quality_run_id, revision, created_at, closed_at)"
+                    " VALUES (?, 0, ?, ?)",
+                    (run_id, created_at, created_at),
+                )
+                n = conn.execute(
+                    "INSERT INTO seg_masks_new (seg_quality_run_id, shot_video_id, frame_idx, revision, mask_blob)"
+                    " SELECT seg_quality_run_id, shot_video_id, frame_idx, 0, mask_blob FROM seg_masks"
+                    " WHERE seg_quality_run_id = ?",
+                    (run_id,),
+                ).rowcount
+                _log.info("seg_masks migration: run %d/%d %s, %d masks copied", i, len(runs), run_id, n)
+            conn.execute("DROP TABLE seg_masks")
+            conn.execute("ALTER TABLE seg_masks_new RENAME TO seg_masks")
+            for stmt in _split_statements(after):
+                conn.execute(stmt)
+            _set_schema_version(conn, 68)
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
+    else:
+        _set_schema_version(conn, 68)
+        conn.commit()
+
+
+def _split_statements(sql: str) -> list[str]:
+    """Split a migration script into complete statements (triggers keep their ``;`` inside BEGIN..END)."""
+    out, buf = [], ""
+    for line in sql.splitlines(keepends=True):
+        if line.lstrip().startswith("--"):
+            continue
+        buf += line
+        if sqlite3.complete_statement(buf):
+            out.append(buf.strip())
+            buf = ""
+    return out
+
+
 def _migrate_session_v57_to_v58(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 57 to 58.
 
@@ -2479,6 +2545,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 66
     if actual == 66:
         _migrate_session_v66_to_v67(conn)
+        actual = 67
+    if actual == 67:
+        _migrate_session_v67_to_v68(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

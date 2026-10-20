@@ -822,15 +822,82 @@ CREATE TABLE IF NOT EXISTS detection_track_assignments (
     last_frame        INTEGER NOT NULL,  -- last video frame of the assigned segment (inclusive)
     PRIMARY KEY (detection_run_id, shot_video_id, track_id, first_frame)
 );
--- Segmentation masks for interactive Cutie init widget.
--- One row per (seg_quality_run, camera, frame).  Indexed PNG blob, label 0=bg, 1..N=person.
-CREATE TABLE IF NOT EXISTS seg_masks (
-    seg_quality_run_id TEXT    NOT NULL REFERENCES seg_quality_runs(id),
-    shot_video_id      TEXT    NOT NULL REFERENCES capture_videos(id),
-    frame_idx          INTEGER NOT NULL,
-    mask_blob          BLOB    NOT NULL,
-    PRIMARY KEY (seg_quality_run_id, shot_video_id, frame_idx)
+-- Revisions of a segmentation run. A run's masks are append-only: each explicit save of the
+-- segmentation panel (also closing the panel, or the end of a propagation job) closes one
+-- revision, and derived results (detection runs, tracking runs) record the revision they read.
+-- Written by the segmentation panel and the migration to schema 68. See
+-- docs/roadmap/features/segmentation-versioning/segmentation-versioning-design.md.
+-- Columns:
+--   seg_quality_run_id -- seg_quality_runs.id the revision belongs to.
+--   revision           -- 0 for the masks the run had when versioning started (or when it was
+--                         created by a tool that does not version), then 1, 2, ... in order. A
+--                         revision opens only after the previous one is closed, so the closed
+--                         revisions of a run are always a prefix 0..n.
+--   created_at         -- ISO 8601 UTC time the revision was opened.
+--   closed_at          -- ISO 8601 UTC time the revision was saved; NULL while it is open for
+--                         editing. Rows of an open revision are invisible to every reader but the
+--                         panel that owns it.
+--   note               -- free text (for example 'recovered after a crash'); NULL if none.
+CREATE TABLE IF NOT EXISTS seg_mask_revisions (
+    seg_quality_run_id TEXT    NOT NULL REFERENCES seg_quality_runs(id), -- the segmentation run
+    revision           INTEGER NOT NULL,  -- 0, 1, 2, ...
+    created_at         TEXT    NOT NULL,  -- ISO 8601 UTC, opened
+    closed_at          TEXT,              -- ISO 8601 UTC, saved; NULL while open
+    note               TEXT,              -- free text; NULL if none
+    PRIMARY KEY (seg_quality_run_id, revision)
 );
+-- At most one open revision per segmentation run: one editor at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_seg_mask_revisions_open
+    ON seg_mask_revisions (seg_quality_run_id) WHERE closed_at IS NULL;
+
+-- Segmentation masks for the interactive Cutie init widget, append-only by revision.
+-- A row holds the mask a frame has from its revision on, until a later row of the same frame.
+-- Only frames changed by a revision have a row in it. Written by the segmentation panel and by
+-- tools that create a segmentation (revision 0).
+-- Columns:
+--   seg_quality_run_id -- seg_quality_runs.id the mask belongs to.
+--   shot_video_id      -- capture_videos.id: the camera view the mask is for.
+--   frame_idx          -- video frame number of the mask, 0-based.
+--   revision           -- seg_mask_revisions.revision that wrote the row.
+--   mask_blob          -- indexed (greyscale) PNG at reduced resolution, label 0 = background,
+--                         1..255 = the subject's mask label. NULL records that the frame has
+--                         no mask from this revision on (a deletion).
+-- The mask of a frame at revision r is the row with the largest revision <= r for that frame;
+-- no row, or a NULL blob, means no mask.
+CREATE TABLE IF NOT EXISTS seg_masks (
+    seg_quality_run_id TEXT    NOT NULL REFERENCES seg_quality_runs(id), -- the segmentation run
+    shot_video_id      TEXT    NOT NULL REFERENCES capture_videos(id),   -- camera view
+    frame_idx          INTEGER NOT NULL,  -- video frame number, 0-based
+    revision           INTEGER NOT NULL DEFAULT 0, -- seg_mask_revisions.revision that wrote the row
+    mask_blob          BLOB,              -- indexed PNG, 0 = background, 1..255 = subject label; NULL = no mask from this revision on
+    PRIMARY KEY (seg_quality_run_id, shot_video_id, frame_idx, revision)
+);
+
+-- The masks as they are now: per frame the newest row among closed revisions, frames without a
+-- mask (NULL blob) left out. For readers that show or count current masks; a result that must
+-- be reproduced reads at a recorded revision instead (posetrak.db.seg_revisions).
+CREATE VIEW IF NOT EXISTS seg_masks_latest AS
+SELECT m.seg_quality_run_id, m.shot_video_id, m.frame_idx, m.revision, m.mask_blob
+FROM seg_masks m
+WHERE m.mask_blob IS NOT NULL
+  AND m.revision = (
+      SELECT MAX(m2.revision)
+      FROM seg_masks m2
+      JOIN seg_mask_revisions r2
+        ON r2.seg_quality_run_id = m2.seg_quality_run_id AND r2.revision = m2.revision
+      WHERE m2.seg_quality_run_id = m.seg_quality_run_id
+        AND m2.shot_video_id = m.shot_video_id
+        AND m2.frame_idx = m.frame_idx
+        AND r2.closed_at IS NOT NULL);
+
+-- Every segmentation run starts with a closed revision 0, so masks written for it by tools that
+-- do not version (revision defaults to 0) are visible to readers.
+CREATE TRIGGER IF NOT EXISTS trg_seg_quality_runs_revision0
+AFTER INSERT ON seg_quality_runs
+BEGIN
+    INSERT INTO seg_mask_revisions (seg_quality_run_id, revision, created_at, closed_at)
+    VALUES (NEW.id, 0, NEW.created_at, NEW.created_at);
+END;
 
 -- Capture-scoped identity for persons and objects: a permanent integer label
 -- per subject, used directly as its segmentation-mask label. Kept in step

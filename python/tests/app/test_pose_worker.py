@@ -36,7 +36,7 @@ def db_path(tmp_path):
     mask = np.zeros((H, W), np.uint8)
     mask[10:50, 20:40] = 1
     blob = cv2.imencode(".png", mask)[1].tobytes()
-    conn.executemany("INSERT INTO seg_masks VALUES ('seg', 'svid', ?, ?)", [(f, blob) for f in range(5)])
+    conn.executemany("INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) VALUES ('seg', 'svid', ?, ?)", [(f, blob) for f in range(5)])
     conn.commit()
     conn.close()
     return path

@@ -32,8 +32,10 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import os
 import sqlite3
 import struct
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -57,7 +59,7 @@ from app.setup.fiducial_markers import (
     anchor_from_marker_rig,
     merge_detections_into_groups,
 )
-from posetrak.detection.frame_source import iter_frames
+from posetrak.detection.frame_source import iter_frames, iter_frames_at
 
 # A camera "sees" a window when at least one whole marker (4 corners) is detected.
 _MIN_CORNERS_PER_CAMERA = 4
@@ -205,26 +207,62 @@ def find_stationary_windows(
     return runs
 
 
-def _detect_at(
-    ts: float,
+def _detect_windows(
+    times: list[float],
     cams: list[_Cam],
     sync: SyncTable,
-    detector: MarkerRigDetector,
-    frames: dict[str, np.ndarray] | None = None,
-) -> dict[str, list[FiducialDetection]]:
-    """Detect the box in every camera at synced time *ts*; fill *frames* with the frames read."""
-    out: dict[str, list[FiducialDetection]] = {}
+    make_detector: Callable[[], MarkerRigDetector],
+    workers: int | None = None,
+) -> list[dict[str, list[FiducialDetection]]]:
+    """Detect the box in every camera at each synced time in *times*.
+
+    Each camera's frames are read in time order through an open container instead of one
+    open and seek per window. A camera's frames are split into consecutive chunks so that
+    about *workers* decoders run at once (decoding and ArUco detection both release the GIL;
+    FFmpeg's own decoder threads stay off, see ``frame_source``). Each entry of the result
+    maps camera label to detections, in camera order; a camera whose frame is unavailable
+    is missing from it.
+    """
+    workers = workers or os.cpu_count() or 1
+    chunks_per_cam = max(1, workers // len(cams))
+    frame_of = [{ts: sync.lookup(ts, cam.video_id) for ts in times} for cam in cams]
+
+    def decode_chunk(task: tuple[_Cam, list[int]]) -> dict[int, list[FiducialDetection]]:
+        cam, frames = task
+        detector = make_detector()
+        return {
+            idx: detector.detect(img, video_id=cam.label, frame_idx=idx)
+            for idx, img in iter_frames_at(cam.file_path, frames)
+        }
+
+    tasks = []
+    for cam, lookup in zip(cams, frame_of):
+        wanted = sorted({f for f in lookup.values() if f is not None})
+        n = min(chunks_per_cam, len(wanted))
+        tasks += [(cam, wanted[i * len(wanted) // n:(i + 1) * len(wanted) // n]) for i in range(n)]
+    with ThreadPoolExecutor(max_workers=max(1, len(tasks))) as pool:
+        chunks = list(pool.map(decode_chunk, tasks))
+    by_cam: dict[str, dict[int, list[FiducialDetection]]] = {cam.label: {} for cam in cams}
+    for (cam, _), dets in zip(tasks, chunks):
+        by_cam[cam.label].update(dets)
+    out: list[dict[str, list[FiducialDetection]]] = []
+    for i, ts in enumerate(times):
+        row: dict[str, list[FiducialDetection]] = {}
+        for cam, lookup in zip(cams, frame_of):
+            if lookup[ts] in by_cam[cam.label]:
+                row[cam.label] = by_cam[cam.label][lookup[ts]]
+        out.append(row)
+    return out
+
+
+def _read_window_frames(ts: float, cams: list[_Cam], sync: SyncTable) -> dict[str, np.ndarray]:
+    """The frame of every camera at synced time *ts*."""
+    frames: dict[str, np.ndarray] = {}
     for cam in cams:
         frame_idx = sync.lookup(ts, cam.video_id)
-        if frame_idx is None:
-            continue
-        img = next((im for _, im in iter_frames(cam.file_path, frame_idx, frame_idx + 1)), None)
-        if img is None:
-            continue
-        if frames is not None:
-            frames[cam.label] = img
-        out[cam.label] = detector.detect(img, video_id=cam.label, frame_idx=frame_idx)
-    return out
+        if frame_idx is not None:
+            frames.update({cam.label: img for _, img in iter_frames_at(cam.file_path, [frame_idx])})
+    return frames
 
 
 def rank_key(w: Window, final_ts: float) -> tuple:
@@ -368,10 +406,14 @@ def calibrate_from_box_video(
     if params.world_z_offset:
         for corners in config.marker_corners.values():
             corners[:, 2] += params.world_z_offset
-    detector = MarkerRigDetector(
-        config, dictionary=params.rig_dict,
-        min_marker_perimeter_rate=params.min_marker_perimeter_rate,
-    )
+
+    def make_detector() -> MarkerRigDetector:
+        return MarkerRigDetector(
+            config, dictionary=params.rig_dict,
+            min_marker_perimeter_rate=params.min_marker_perimeter_rate,
+        )
+
+    detector = make_detector()
     cams, sync = load_capture_cameras(conn, capture_id)
     ref = next((c for c in cams if c.label == params.reference_camera), None)
     if ref is None:
@@ -407,12 +449,9 @@ def calibrate_from_box_video(
         raise BoxVideoError("All stationary windows were excluded")
 
     # --- detect every window in every camera -----------------------------------------------
+    progress(f"Detecting the box in {len(times)} windows in {len(cams)} cameras…")
     windows: list[Window] = []
-    frames_by_window: dict[float, dict[str, np.ndarray]] = {}
-    for i, ts in enumerate(times):
-        progress(f"Detecting the box in window {i + 1}/{len(times)} (t={ts:.2f} s)…")
-        frames: dict[str, np.ndarray] = {}
-        dets = _detect_at(ts, cams, sync, detector, frames)
+    for ts, dets in zip(times, _detect_windows(times, cams, sync, make_detector)):
         w = Window(ts, {c: sum(len(d.corners) for d in ds) for c, ds in dets.items()}, dets)
         if w.n_corners < params.min_window_corners:
             dropped.append((ts, f"only {w.n_corners} corners detected"))
@@ -420,7 +459,6 @@ def calibrate_from_box_video(
             dropped.append((ts, f"seen by {w.n_cameras} camera(s), needs 2"))
         else:
             windows.append(w)
-            frames_by_window[ts] = frames
     if not windows:
         raise BoxVideoError("No stationary window has enough box corners in at least two cameras")
 
@@ -433,6 +471,7 @@ def calibrate_from_box_video(
         )
 
     # --- solve ----------------------------------------------------------------------------
+    anchor_frames = _read_window_frames(anchor.timestamp_s, cams, sync)
     states = []
     for cam in cams:
         if cam.intrinsics_calibration_id is None:
@@ -446,7 +485,7 @@ def calibrate_from_box_video(
         states.append(CamCalibState(
             video_id=cam.label, label=cam.label, K=intr["K"], K_orig=intr["K_orig"],
             dist=intr["dist"], fisheye=intr["fisheye"],
-            image=frames_by_window[anchor.timestamp_s].get(cam.label),
+            image=anchor_frames.get(cam.label),
         ))
 
     anchor_cps = anchor_from_marker_rig(anchor.detections, config)

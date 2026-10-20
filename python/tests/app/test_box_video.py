@@ -119,9 +119,10 @@ def scenario(monkeypatch):
             d.corners[:] = [dataclasses.replace(c, px=c.px + px) for c in d.corners]
         monkeypatch.setattr(box_video, "load_capture_cameras", lambda conn, cap: (cams, _FakeSync()))
         monkeypatch.setattr(box_video, "find_stationary_windows", lambda *a, **k: [int(t * 100) for t in times])
-        monkeypatch.setattr(box_video, "_detect_at", lambda ts, c, s, d, frames=None: (
-            frames.update({n: np.zeros((4, 4, 3), np.uint8) for n in _CAMERAS}) if frames is not None else None,
-            det_by_time[round(ts, 3)])[1])
+        monkeypatch.setattr(box_video, "_detect_windows", lambda ts_list, c, s, d: [
+            det_by_time[round(ts, 3)] for ts in ts_list])
+        monkeypatch.setattr(box_video, "_read_window_frames", lambda ts, c, s: {
+            n: np.zeros((4, 4, 3), np.uint8) for n in _CAMERAS})
         monkeypatch.setattr(box_video, "_load_intrinsics", lambda conn, cid: {
             "K": _K, "K_orig": _K, "dist": np.zeros((1, 4)), "fisheye": False})
         real = run_calibration

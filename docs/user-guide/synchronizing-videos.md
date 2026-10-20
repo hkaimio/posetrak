@@ -36,6 +36,17 @@ the same instant.
   match what the file claims. Click the suggested corrected fps in the
   warning dialog — the timeline recalculates using the real capture
   rate, which is what lets that camera line up with the others.
+- **A video is labelled with the wrong camera** — do not swap the file
+  paths between the capture's videos: the sync points belong to each video
+  row and would stay with the wrong file. Use the capture panel's
+  **Cameras…** button (or `posetrak capture reassign-camera --capture ID
+  --assign VIDEO=CAMERA`, repeated to exchange two videos' cameras). The
+  video keeps its file, frame range and sync points; the camera and, for a
+  camera of another model, its mode and intrinsics change. If detection or
+  tracking has been run for the capture the change is refused until you
+  confirm that those results will be recomputed (they keep the old camera
+  ids); an extrinsic calibration linked to the capture belongs to the cameras
+  by id, so check it afterwards or calibrate again.
 - *(TBD: what it looks like when sync is off in other ways — warnings at
   trial creation? bad triangulation later on? how to tell sync is the
   actual cause rather than, say, extrinsics.)*

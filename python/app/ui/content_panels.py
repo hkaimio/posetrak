@@ -936,6 +936,10 @@ class CapturePanel(QWidget):
         self._ext_btn = QPushButton("Extrinsics…")
         self._ext_btn.clicked.connect(self._open_extrinsics)
 
+        cameras_btn = QPushButton("Cameras…")
+        cameras_btn.setToolTip("Fix which camera recorded each video (keeps the sync points)")
+        cameras_btn.clicked.connect(self._open_reassign_cameras)
+
         self._detect_btn = QPushButton("New trial…")
         self._detect_btn.clicked.connect(self._open_new_trial_dialog)
         self._detect_btn.setEnabled(has_sync and bool(videos))
@@ -949,6 +953,7 @@ class CapturePanel(QWidget):
         toolbar.addWidget(mark_end_btn)
         toolbar.addStretch()
         toolbar.addWidget(sync_btn)
+        toolbar.addWidget(cameras_btn)
         toolbar.addWidget(self._ext_btn)
         toolbar.addWidget(self._detect_btn)
 
@@ -1012,6 +1017,13 @@ class CapturePanel(QWidget):
             for r in sp_rows
         ]
         self._scrubber.reload_sync(SyncTable(sync_pts, fps_by_video))
+
+    def _open_reassign_cameras(self) -> None:
+        from app.ui.reassign_camera_dialog import ReassignCameraDialog
+        dlg = ReassignCameraDialog(self._conn, self._capture_id, parent=self)
+        dlg.exec()
+        if dlg.changed:
+            self.data_changed.emit()
 
     def _open_extrinsics(self) -> None:
         from app.setup.page_extrinsics import ExtrinsicsStatusDialog

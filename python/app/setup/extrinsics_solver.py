@@ -1236,22 +1236,46 @@ def compute_reprojection_errors(
     for vid, errs in per_cam.items():
         e = np.array(errs)
         result[vid] = {"mean": float(e.mean()), "std": float(e.std()),
-                       "max": float(e.max()), "n": len(e)}
+                       "median": float(np.median(e)), "max": float(e.max()), "n": len(e)}
     return result
 
 
-def compute_cp_errors(
+def triangulate_dlt(
+    obs: dict[str, tuple[float, float]],
+    state_by_id: dict[str, CamCalibState],
+) -> np.ndarray | None:
+    """DLT triangulation of one point from undistorted pixel observations in solved cameras.
+
+    Two rows per observation: ``[px*P[2]-P[0]; py*P[2]-P[1]]``. Returns ``None`` when the
+    system is degenerate.
+    """
+    rows = []
+    for v, (px, py) in obs.items():
+        P = _proj_matrix(state_by_id[v])
+        rows.append(px * P[2] - P[0])
+        rows.append(py * P[2] - P[1])
+    A = np.array(rows, dtype=np.float64)
+    if not np.isfinite(A).all():
+        return None
+    _, _, Vt = np.linalg.svd(A)
+    h = Vt[-1]
+    if abs(h[3]) < 1e-10:
+        return None
+    return (h[:3] / h[3]).astype(np.float64)
+
+
+def control_point_residuals(
     states: list[CamCalibState],
     control_points: list[ControlPoint],
-) -> dict[str, dict]:
-    """Per-camera reprojection errors for control points.
+) -> list[tuple[str, str, float]]:
+    """Reprojection error of every control point observation, as ``(cp name, video_id, px)``.
 
     For each CP with ≥2 observations in solved cameras, the 3D position is either
     taken from world_xyz (if set) or triangulated via DLT from all observations.
     The projected position is then compared to the observed (undistorted) position.
     """
     state_by_id = {s.video_id: s for s in states}
-    per_cam: dict[str, list[float]] = defaultdict(list)
+    rows: list[tuple[str, str, float]] = []
 
     for cp in control_points:
         undist = _undistort_control_obs(cp, state_by_id)
@@ -1263,21 +1287,10 @@ def compute_cp_errors(
         if cp.world_xyz is not None:
             xyz = cp.world_xyz.astype(np.float64)
         else:
-            # DLT triangulate: stack two rows per observation: [px*P[2]-P[0]; py*P[2]-P[1]]
-            A_rows = []
-            for v, (px, py) in solved_obs.items():
-                P = _proj_matrix(state_by_id[v])
-                A_rows.append(px * P[2] - P[0])
-                A_rows.append(py * P[2] - P[1])
-            A = np.array(A_rows, dtype=np.float64)
-            if not np.isfinite(A).all():
-                _log.warning("CP error: free CP '%s' has non-finite DLT matrix — skipping", cp.name)
+            xyz = triangulate_dlt(solved_obs, state_by_id)
+            if xyz is None:
+                _log.warning("CP error: free CP '%s' cannot be triangulated — skipping", cp.name)
                 continue
-            _, _, Vt = np.linalg.svd(A)
-            h = Vt[-1]
-            if abs(h[3]) < 1e-10:
-                continue
-            xyz = (h[:3] / h[3]).astype(np.float64)
 
         for vid, (px, py) in undist.items():
             s = state_by_id.get(vid)
@@ -1288,13 +1301,25 @@ def compute_cp_errors(
                 xyz.reshape(1, 3), rvec, s.t.reshape(3, 1), s.K, np.zeros(4)
             )
             err = float(np.linalg.norm(proj.reshape(2) - np.array([px, py])))
-            per_cam[vid].append(err)
+            rows.append((cp.name, vid, err))
+    return rows
+
+
+def compute_cp_errors(
+    states: list[CamCalibState],
+    control_points: list[ControlPoint],
+) -> dict[str, dict]:
+    """Per-camera reprojection error statistics (mean, std, median, max, n) of the
+    control point observations; see ``control_point_residuals``."""
+    per_cam: dict[str, list[float]] = defaultdict(list)
+    for _, vid, err in control_point_residuals(states, control_points):
+        per_cam[vid].append(err)
 
     result = {}
     for vid, errs in per_cam.items():
         e = np.array(errs)
         result[vid] = {"mean": float(e.mean()), "std": float(e.std()),
-                       "max": float(e.max()), "n": len(e)}
+                       "median": float(np.median(e)), "max": float(e.max()), "n": len(e)}
     return result
 
 

@@ -382,7 +382,7 @@ def _run_pose_detection(
             seg_run_id = resolve_id_prefix(session, "seg_quality_runs", segmentation)
             persons_ordered = persons_ordered_for_seg_run(session, seg_run_id)
             box_source = MaskBoxSource(session, seg_run_id, persons_ordered)
-            click.echo(f"Bbox source: segmentation {seg_run_id}", err=True)
+            click.echo(f"Bbox source: segmentation {seg_run_id} revision {box_source.revision}", err=True)
         elif from_run is not None:
             from posetrak.detection.box_sources import RunBoxSource
 
@@ -609,6 +609,61 @@ def cmd_assign(ctx: click.Context, run_id: str, persons: int | None, subjects: s
         except RuntimeError as exc:
             fail(str(exc))
         click.echo("Built the person sequences.", err=True)
+
+
+# ---------------------------------------------------------------------------
+# detect stale
+# ---------------------------------------------------------------------------
+
+
+@detect_group.command("stale")
+@click.argument("run_id")
+@click.option("--tolerance", type=float, default=1.0, show_default=True,
+              help="Largest box-edge movement, in pixels of the pose model's input, that does not make a frame stale.")
+@click.option("--refresh", is_flag=True, default=False,
+              help="Create a new detection run: unchanged frames copied from RUN_ID, stale frames run again "
+                   "on the current masks. RUN_ID itself is left as it is.")
+@click.pass_context
+def cmd_stale(ctx: click.Context, run_id: str, tolerance: float, refresh: bool) -> None:
+    """List the frames of a mask-sourced detection run whose boxes changed after the masks were edited.
+
+    Compares the person boxes the run used with those of the newest saved mask revision. With --refresh
+    the new run's id is printed to stdout.
+    """
+    session_path: str | None = ctx.obj.get("session")
+    if session_path is None:
+        fail("--session / POSETRAK_SESSION_DB is required for 'detect stale'.")
+    from posetrak.detection.stale import refresh_run, stale_frames
+
+    try:
+        session = open_session(Path(session_path))
+        full_id = resolve_id_prefix(session, "detection_runs", run_id)
+        stale = stale_frames(session, full_id, tolerance=tolerance)
+    except (FileNotFoundError, ValueError) as exc:
+        fail(str(exc))
+    for s in stale:
+        click.echo(f"{s.shot_video_id}\t{s.video_frame}\tlabels {','.join(map(str, s.labels))}", err=True)
+    click.echo(f"{len(stale)} stale frames.", err=True)
+    if not refresh:
+        return
+    if not stale:
+        fail("Nothing to refresh.")
+    new_id = refresh_run(
+        session, full_id, stale,
+        on_progress=lambda done, total, cam: click.echo(f"\r  {cam}  {done}/{total} frames", nl=False, err=True))
+    click.echo("", err=True)
+    run = session.execute("SELECT shot_id, sync_config_id, pose_model FROM detection_runs WHERE id = ?", (new_id,)).fetchone()
+    from posetrak.db.manage_person import persons_ordered_for_seg_run
+
+    seg_id = session.execute("SELECT seg_quality_run_id FROM detection_runs WHERE id = ?", (new_id,)).fetchone()[0]
+    if session.execute("SELECT 1 FROM detection_track_assignments WHERE detection_run_id = ? LIMIT 1", (full_id,)).fetchone():
+        from app.pose.finalise import auto_assign_and_finalise, conf_scale_for_model
+
+        auto_assign_and_finalise(
+            session=session, detection_run_id=new_id, shot_id=run["shot_id"], sync_config_id=run["sync_config_id"],
+            persons_ordered=persons_ordered_for_seg_run(session, seg_id), pose_model=run["pose_model"],
+            confidence_scale=conf_scale_for_model(run["pose_model"]))
+    click.echo(new_id)
 
 
 # ---------------------------------------------------------------------------

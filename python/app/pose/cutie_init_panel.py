@@ -691,6 +691,14 @@ class CutieInitPanel(QWidget):
         )
         pose_row.addWidget(self._refine_hands_check)
 
+        self._candidates_check = QCheckBox("Keypoint candidates")
+        self._candidates_check.setToolTip(
+            "SOMA-77 only. Also store up to six heatmap maxima per keypoint, linked into tracklets, so that "
+            "tracking can choose among them. About four times the keypoint data and a few percent more "
+            "detection time. A detection run holds candidates for all of its cameras or for none."
+        )
+        pose_row.addWidget(self._candidates_check)
+
         self._queue_pose_btn = QPushButton("🎯 Queue Pose")
         self._queue_pose_btn.setToolTip(
             "Queue pose extraction for the current camera using stored seg masks"
@@ -1967,6 +1975,7 @@ class CutieInitPanel(QWidget):
 
         pose_model, _reason = prepare_pose_model(self, self._pose_model_combo.currentData())
         refine_hands = self._refine_hands_check.isChecked()
+        candidates = self._candidates_check.isChecked() and pose_model.startswith("soma77")
         detection_run_id = self._resolve_or_create_detection_run(pose_model)
         if detection_run_id is None:
             return  # user cancelled
@@ -2005,6 +2014,7 @@ class CutieInitPanel(QWidget):
                 pose_model=pose_model,
                 overwrite_range=True,
                 refine_hands=refine_hands,
+                candidates=candidates,
             )
             self._runner.enqueue(job)
             queued += 1

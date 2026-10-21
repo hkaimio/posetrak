@@ -159,7 +159,7 @@ def refresh_run(
 ) -> str:
     """Create a new detection run from *run_id*, with the *stale* frames run again on *revision*.
 
-    Frames that are not stale keep the detections and keypoints of *run_id*; the new run records
+    Frames that are not stale keep the detections and keypoints of *run_id* (keypoint candidates included); the new run records
     the revision (the newest saved one by default) and names *run_id* as its source run. Returns
     the new run's id; its status is ``complete`` or ``failed``.
 
@@ -175,7 +175,12 @@ def refresh_run(
     run = _run_row(conn, run_id)
     seg_id = run["seg_quality_run_id"]
     revision = newest_closed_revision(conn, seg_id) if revision is None else revision
-    estimator = estimator or create_estimator(run["pose_model"], device=None)
+    from posetrak.detection.kp_candidates import CandidateOptions
+
+    # A run with candidates is refreshed with candidates: the copied frames keep theirs, the re-run frames get new
+    # ones with tracklet ids after the copied ones (a tracklet does not continue across a re-run frame).
+    candidates = CandidateOptions.from_config(json.loads(run["config_json"] or "{}"))
+    estimator = estimator or create_estimator(run["pose_model"], device=None, candidates=candidates)
     box_source = MaskBoxSource(conn, seg_id, [""] * _label_count(conn, run_id, seg_id), revision=revision)
     wanted: dict[str, set[int]] = defaultdict(set)
     for sf in stale:

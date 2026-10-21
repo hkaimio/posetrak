@@ -32,6 +32,7 @@ import numpy as np
 
 from posetrak.detection import stage_timing as st
 from posetrak.detection.backends import PersonDetection, PoseResult, register_estimator
+from posetrak.detection.kp_candidates import CandidateOptions, extract_candidates
 from posetrak.detection.pose_models import SOMA77_FLIP_PAIRS as FLIP_PAIRS
 from posetrak.detection.pose_models import SOMA77_NAMES, SOMA77_PARENTS  # noqa: F401  (re-exported)
 
@@ -199,8 +200,10 @@ class Soma77Estimator:
         mask_gate: bool = True,
         mask_gate_floor: float = 0.0,
         batch_crops: int = 16,
+        candidates: CandidateOptions | None = None,
         onnx: Soma77Onnx | None = None,
     ) -> None:
+        self.candidates = candidates
         self.flip_test, self.enlarge, self.refine = flip_test, enlarge, refine
         self.mask_gate, self.mask_gate_floor, self.batch_crops = mask_gate, mask_gate_floor, batch_crops
         if onnx is None:
@@ -238,13 +241,19 @@ class Soma77Estimator:
             for i, (index, det, frame, _, cx, cy, s) in enumerate(chunk):
                 with st.stage("heatmap_decode"):
                     heat = (maps[2 * i] + flip_heatmaps(maps[2 * i + 1])) * 0.5 if self.flip_test else maps[i]
+                found = None
+                if self.candidates is not None:
+                    # The maxima come from the heatmap before the mask gate: the gate would remove exactly the
+                    # off-person alternatives the tracker may need to choose among.
+                    with st.stage("candidates"):
+                        found = extract_candidates(heat, self.candidates, lambda fx, fy: cells_to_frame(fx, fy, cx, cy, s))
                 if self.mask_gate and det.mask is not None:
                     with st.stage("mask_gate"):
                         cells = mask_cells(det.mask, frame.shape[1], frame.shape[0], cx, cy, s)
                         heat = gate_heatmaps(heat, cells, self.mask_gate_floor)
                 with st.stage("heatmap_decode"):
                     kp = decode(heat, cx, cy, s, self.refine)
-                results[index].append(PoseResult(det.track_id, kp, noise_scale=0.75 * s / INPUT_W))
+                results[index].append(PoseResult(det.track_id, kp, noise_scale=0.75 * s / INPUT_W, candidates=found))
         return results
 
     def options(self) -> dict:

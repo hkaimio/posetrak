@@ -217,7 +217,9 @@ class DetectionLoop:
         if not jobs:
             return 0
         width = self._estimator.input_size[1]
-        writers = {j.cam.shot_video_id: DetectionBatchWriter(self._session, self._run_id, j.cam.shot_video_id, width)
+        candidates = getattr(self._estimator, "candidates", None)
+        writers = {j.cam.shot_video_id: DetectionBatchWriter(self._session, self._run_id, j.cam.shot_video_id, width,
+                                                             candidates=candidates)
                    for j in jobs}
         totals = {j.cam.shot_video_id: max(1, j.last_frame - j.first_frame) for j in jobs}
         done = dict.fromkeys(totals, 0)
@@ -284,13 +286,17 @@ def recompute_track_spans(session: sqlite3.Connection, run_id: str, shot_video_i
 
 def run_config(box_source: BoxSource, estimator: PoseEstimator, hand_pass, decode_mode: str, batch_frames: int) -> dict:
     """The options of a run, as stored in ``detection_runs.config_json``."""
-    return {
+    config = {
         "box_source": {"name": box_source.name, **box_source.options()},
         "estimator": estimator.options(),
         "hand_pass": hand_pass is not None,
         "decode_mode": decode_mode,
         "batch_frames": batch_frames,
     }
+    candidates = getattr(estimator, "candidates", None)
+    if candidates is not None:
+        config["candidates"] = candidates.to_config()
+    return config
 
 
 def record_run_options(session: sqlite3.Connection, run_id: str, box_source: BoxSource, config: dict) -> None:

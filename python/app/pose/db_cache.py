@@ -17,6 +17,7 @@ import numpy as np
 
 from posetrak.db.db import generate_id
 from posetrak.detection import stage_timing as st
+from posetrak.detection.kp_candidates import PersonLinker, TrackletIds, decode_kp_candidates_blob, encode_kp_candidates_blob
 from posetrak.db.observation_merge import (
     BODY_SOURCE,
     infer_body_width,
@@ -233,6 +234,21 @@ def _encode_crop(img: "np.ndarray", bbox: tuple) -> "tuple[bytes, int, int, int,
     return buf.tobytes(), crop.shape[1], crop.shape[0], x1, y1, src_w, src_h
 
 
+KP_CANDIDATES_REGION = "kp_candidates"
+
+
+def _first_free_tracklet_id(session: sqlite3.Connection, run_id: str, shot_video_id: str) -> TrackletIds:
+    """Tracklet ids of a camera continue after the ones the run already holds (a refreshed or resumed run)."""
+    highest = -1
+    for (blob,) in session.execute(
+            "SELECT keypoints FROM detection_keypoints WHERE detection_run_id=? AND shot_video_id=? AND region_type=?",
+            (run_id, shot_video_id, KP_CANDIDATES_REGION)):
+        table = decode_kp_candidates_blob(bytes(blob))
+        if len(table):
+            highest = max(highest, int(table[:, 5].max()))
+    return TrackletIds(highest + 1)
+
+
 class DetectionBatchWriter:
     """Accumulates detection rows and flushes to DB in batches."""
 
@@ -242,11 +258,15 @@ class DetectionBatchWriter:
         detection_run_id: str,
         shot_video_id: str,
         pose_input_width: int,
+        candidates=None,      # CandidateOptions: also write and link the keypoint candidates of the pose results
     ) -> None:
         self._session = session
         self._run_id = detection_run_id
         self._svid = shot_video_id
         self._pose_input_width = pose_input_width
+        self._candidates = candidates
+        self._linkers: dict[int, PersonLinker] = {}
+        self._tracklet_ids = _first_free_tracklet_id(session, detection_run_id, shot_video_id) if candidates else None
         self._det_rows: list[tuple] = []
         self._kp_rows: list[tuple] = []
         self._crop_rows: list[tuple] = []
@@ -263,6 +283,7 @@ class DetectionBatchWriter:
     ) -> None:
         kp_by_track = {pr.track_id: pr.keypoints for pr in pose_results}
         pose_noise_scale = {pr.track_id: pr.noise_scale for pr in pose_results if pr.noise_scale is not None}
+        candidates_by_track = {pr.track_id: pr.candidates for pr in pose_results if pr.candidates is not None}
 
         for det in detections:
             self._det_rows.append((
@@ -285,6 +306,9 @@ class DetectionBatchWriter:
                     noise_scale,
                 ))
 
+            if self._candidates is not None and det.track_id in candidates_by_track:
+                self._add_candidates(video_frame, det, candidates_by_track[det.track_id], pose_noise_scale.get(det.track_id))
+
             if img is not None:
                 with st.stage("preview_encode"):
                     result = _encode_crop(img, det.bbox)
@@ -301,6 +325,17 @@ class DetectionBatchWriter:
 
         if len(self._det_rows) >= _BATCH_SIZE:
             self._flush()
+
+    def _add_candidates(self, video_frame: int, det, table: np.ndarray, noise_scale: float | None) -> None:
+        """Link a person's candidates to the earlier frames' and queue the ``kp_candidates`` row."""
+        linker = self._linkers.get(det.track_id)
+        if linker is None:
+            linker = self._linkers[det.track_id] = PersonLinker(
+                self._tracklet_ids, self._candidates.max_gap_frames, self._candidates.gate_box_frac)
+        with st.stage("candidate_link"):
+            tracklets = linker.link(video_frame, table, float(max(det.bbox[2], det.bbox[3])))
+        blob = encode_kp_candidates_blob(table[:, 0], table[:, 1], table[:, 2], table[:, 3], table[:, 4], tracklets)
+        self._kp_rows.append((self._run_id, self._svid, video_frame, det.track_id, KP_CANDIDATES_REGION, blob, noise_scale))
 
     def add_hand_rows(self, video_frame: int, track_id: int, rows) -> None:
         """Refined hand keypoints of a person: ``(region_type, hand_kp[21, 3], noise_scale)`` rows."""
@@ -689,9 +724,9 @@ def read_observations_with_edits(
     """
     obs_rows = session.execute(
         "SELECT video_frame, source, kp_blob FROM pose_observations"
-        " WHERE sequence_id = ? AND camera_instance_id = ? AND source != ?"
+        " WHERE sequence_id = ? AND camera_instance_id = ? AND source NOT IN (?, ?)"
         " ORDER BY video_frame",
-        (sequence_id, camera_instance_id, DOT_REGION_TYPE),
+        (sequence_id, camera_instance_id, DOT_REGION_TYPE, KP_CANDIDATES_REGION),
     ).fetchall()
     if not obs_rows:
         return {}

@@ -32,7 +32,10 @@ from pathlib import Path
 
 import numpy as np
 
-KP_CANDIDATE_FIELDS = ("keypoint_idx", "x", "y", "peak", "rank", "tracklet_id")
+from posetrak.detection.kp_candidates import (  # noqa: F401  (the one codec, re-exported for callers)
+    KP_CANDIDATE_FIELDS, decode_kp_candidates_blob, encode_kp_candidates_blob,
+)
+
 LABEL_COLUMNS = ("cam", "slot", "frame", "state", "row", "x", "y", "tracklet", "source_person")
 # Label states of the export that hold a visible keypoint: proposal (agreeing), proposal (uncertain),
 # edited: tracklet, proposal next to the neighbouring keypoints.
@@ -41,25 +44,6 @@ VISIBLE_STATES = (0, 1, 2, 5)
 _CROP_PER_BOX_HEIGHT = 1.6
 # Joint names of the SOMA skeleton that belong to the hands' fingers; excluded from body-joint distances.
 _FINGER_JOINT_MARKS = ("f_", "thumb")
-
-
-def encode_kp_candidates_blob(keypoint_idx, x, y, peak, rank, tracklet_id) -> bytes:
-    """Pack candidates of one (video, frame, track) into the ``kp_candidates`` blob."""
-    table = np.column_stack([keypoint_idx, x, y, peak, rank, tracklet_id]).astype("<f4")
-    header = np.array([len(table), len(KP_CANDIDATE_FIELDS)], "<i4")
-    return header.tobytes() + table.tobytes()
-
-
-def decode_kp_candidates_blob(blob: bytes) -> np.ndarray:
-    """Unpack a ``kp_candidates`` blob to ``float32[n, n_fields]``.
-
-    The field count is read from the header, so a blob with more fields than this module knows
-    still decodes; the first six columns are always :data:`KP_CANDIDATE_FIELDS`.
-    """
-    n, n_fields = np.frombuffer(blob, "<i4", 2)
-    if n_fields < len(KP_CANDIDATE_FIELDS):
-        raise ValueError(f"kp_candidates blob has {n_fields} fields, expected at least {len(KP_CANDIDATE_FIELDS)}")
-    return np.frombuffer(blob, "<f4", n * n_fields, offset=8).reshape(n, n_fields)
 
 
 @dataclass

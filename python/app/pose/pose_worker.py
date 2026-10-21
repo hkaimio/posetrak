@@ -14,6 +14,7 @@ signal queue problems entirely. Only progress and tracking_done signals cross th
 """
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import threading
@@ -45,6 +46,7 @@ class PoseExtractionJob:
     pose_model: str = "rtmpose-l-133kp"
     overwrite_range: bool = True    # delete existing keypoints in range first
     refine_hands: bool = True       # run HandRefinementPipeline after estimation
+    candidates: bool = False        # also store linked heatmap maxima (SOMA-77 only); must match the run
     status: str = "pending"
     keypoints_written: int = 0
     error: str = ""
@@ -126,7 +128,10 @@ class PoseWorker(QThread):
             if job.overwrite_range:
                 _delete_range(conn, job)
 
-            estimator = create_estimator(job.pose_model, device=self._device)
+            from posetrak.detection.kp_candidates import CandidateOptions
+
+            options = {"candidates": CandidateOptions()} if job.candidates else {}
+            estimator = create_estimator(job.pose_model, device=self._device, **options)
             box_source = MaskBoxSource(conn, job.seg_quality_run_id, job.persons_ordered)
             hand_pass = None
             if job.refine_hands:
@@ -147,6 +152,14 @@ class PoseWorker(QThread):
             )
             record_run_options(conn, job.detection_run_id, box_source,
                                run_config(box_source, estimator, hand_pass, DEFAULT_DECODE_MODE, 6))
+
+            recorded = json.loads(conn.execute("SELECT config_json FROM detection_runs WHERE id=?",
+                                               (job.detection_run_id,)).fetchone()[0] or "{}")
+            if ("candidates" in recorded) != job.candidates:
+                raise ValueError(
+                    "This detection run was made "
+                    + ("with" if "candidates" in recorded else "without")
+                    + " keypoint candidates; a run holds one or the other. Start a new run to change it.")
 
             def on_progress(done: int, total: int, label: str) -> None:
                 if done % _PROGRESS_EVERY == 0:

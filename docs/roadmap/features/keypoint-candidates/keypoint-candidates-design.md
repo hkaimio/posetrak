@@ -96,7 +96,7 @@ Written by the detection run when `config_json.candidates` is present:
 
 Up to six maxima per keypoint; the spike averaged about two above the threshold. For 77 keypoints that
 is roughly 150 candidates, 3.6 kB per person, camera and frame, against 0.9 kB for the ordinary row.
-Measured on the evaluation trial: 91 candidates, 2.4 kB per row (section 9.4).
+Measured on the evaluation trial: 91 candidates, 2.4 kB per row (section 9.5).
 Dropping body-crop fingers from extraction is not done: the stored maxima are cheap, and the
 decision which keypoints to track is the skeleton's.
 
@@ -110,10 +110,12 @@ decision which keypoints to track is the skeleton's.
 - `tracker_configs.kp_candidates_enabled` (0/1) selects candidate use for a run; with 0 the fixed
   observations are used even if the sequence holds candidates. Recorded with the run, so two runs on
   the same sequence differ in their configuration only.
-- Gate, tracklet continuity, reacquisition, multi-view agreement and the mask settings are the
-  existing `dot_*` settings: one set for every anonymous candidate. If a subject wears dots and
-  is tracked from keypoint candidates and the two need different values, separate settings are added
-  then; nothing measured so far asks for it.
+- Gate, reacquisition, multi-view agreement and the mask settings are the existing `dot_*` settings: one set
+  for every anonymous candidate. If a subject wears dots and is tracked from keypoint candidates and the two
+  need different values, separate settings are added then; nothing measured so far asks for it. The exception is
+  what only a keypoint candidate has: the cost is a negative log-likelihood with a peak term
+  (`kp_candidate_peak_weight`) and tracklet continuity has its own multiplier
+  (`kp_candidate_tracklet_multiplier`), because the dots' is 1.0 by default (section 9.2).
 - An optional `suggest` rule per candidate tracklet can come from an automatic grouped choice (the
   spike's cross-camera grouped assignment) written into `dot_assignment_proposals`. Not part of the
   first release: the tracker's own assignment is measured first.
@@ -236,8 +238,9 @@ decision which keypoints to track is the skeleton's.
   smaller of their two radii; the pool keeps the first position and the union of the owners. Merging is in
   `append_unique_candidates`, i.e. when the subjects of a multi-person run share a pool; a single-subject run
   has one crop per keypoint and nothing to merge.
-- **Slot covariance.** The shared assignment costs a pair by the squared Mahalanobis distance under the
-  prediction's pixel covariance, which for dots is the state's uncertainty alone. A keypoint candidate adds
+- **Slot covariance.** The shared assignment gates a pair on the squared Mahalanobis distance under the
+  prediction's pixel covariance, which for dots is the state's uncertainty alone (the cost of a keypoint candidate
+  has two more terms, section 9.2). A keypoint candidate adds
   its detection noise, `(pose_noise_std * crop_scale + calib_noise_std) / max(confidence, 0.1)`, squared, the
   way the filter's innovation covariance adds it for a fixed observation. Without it the gate would reject
   correct candidates whenever the state is confident.
@@ -257,17 +260,80 @@ decision which keypoints to track is the skeleton's.
 - **Not built.** A candidate-row `box_height` field, a tracklet table, candidates for RTMPose runs, the
   `suggest` rule and the tracklet editor (stage 10).
 
-### 9.2 Acceptance run
+### 9.2 Cost and continuity of the assignment
 
-Capture and range as in section 7 (the five-camera, three-person trial, range 3 = 51.7-56.8 s, subjects 1 and 2),
-on a work copy of the spike's session database. Boxes: `detect run --from-run 69c1d770 --candidates` (the
-spike's hybrid box run), finalised over the whole span of every track (a mask label is a stable identity; the
-source run's assignments have gaps where the track identity was uncertain, which the prototype's sequences do
-not have). Tracking: the tracker config and skeletons of the label-fed reference runs (`hier-dualhand`,
-skeletons with `soma77:`-qualified landmarks), 51.7-56.8 s, optimized build. Scored by
-`eval_kp_candidates.py tracker`: mean body-joint distance (cm) to the label-fed reference run from 52.0 s, over
-the range and inside the hard windows. Target: no worse than the prototype's cross-camera run plus 0.5 cm,
-i.e. at most 10.7 / 3.9 cm over the range.
+The first build costed a keypoint candidate by the squared Mahalanobis distance alone and left tracklet continuity
+off (the `dot_tracklet_gate_multiplier` of the acceptance config is 1.0, and the modifier is registered only above
+1.0). Two things in that follow from the detection noise a candidate adds to the slot covariance
+(section 9.1, divided by the peak):
+
+- At equal distance a weak maximum has the wider covariance and so the **lower** cost; nothing rewarded peak height.
+  Dots all have one noise, so this never showed for them. With that cost the tracker followed the strongest maxima
+  worse than the strongest maxima themselves (subject 1: 18.7 against 18.0 cm, subject 2: 7.6 against 5.3, first
+  measurement).
+- The tracklets linked at detection took no part in the choice, which is where the prototype's gain came from.
+
+As built, the cost of a keypoint candidate is a negative log-likelihood of the detection under the slot's
+distribution:
+
+    cost = d^2 + ln det S - w_peak * ln(max(peak, 0.01))
+
+with `d^2` the squared Mahalanobis distance under `S`, the slot covariance with the detection noise, and `w_peak`
+= `tracker_configs.kp_candidate_peak_weight` (0 leaves the peak out; `ln det S` is always in, for candidates only;
+a dot's cost is unchanged). The gate tests `d^2` alone, after the modifiers, as before. The terms can be negative
+and the solver takes non-negative costs below one gate: every pair that passed the gate is shifted by the smallest
+extra term of the camera's matrix and the solver's gate is widened by the spread of the extra terms, so passing
+pairs stay below it and the hopeless and the excluded ones (all one cost, above) stay above. With no keypoint
+candidate in the camera both are zero and the matrix is exactly the dots' (unit-tested: a dot-only assignment is
+the same whatever the keypoint settings; at equal distance the stronger of two keypoint candidates wins).
+
+`TrackletContinuityModifier` divides `d^2` by `tracker_configs.kp_candidate_tracklet_multiplier` for a keypoint
+candidate that continues the tracklet resolved into the same (subject, camera, marker) slot on the previous step; a
+dot keeps `dot_tracklet_gate_multiplier`. A marker is bound to one keypoint and a tracklet id is unique per camera
+across keypoints, so continuation is per slot and keypoint without further bookkeeping (unit-tested next to
+`KeypointClassModifier`). The multiplier is a setting of its own because the dots' is 1.0 by default and
+`dot_*` values are not to be retuned for this stage. `track run --kp-peak-weight W --kp-tracklet-multiplier M`
+sets them. Defaults: 0 and 1.0 (see the grid below for why they stay).
+
+**Tuning on range 1** (43.5-47.5 s, subjects 1 and 3, no hard window and no label-fed tracker run). Each setting is
+tracked on the finalised candidates of boxes `fcb6b961` (detection run `b3390a8b`, sequences `c740eb22` and
+`95a56392`) and scored by `eval_kp_candidates.py track-picks`: each used POSITION observation of the run
+(`obs_blob`, mode 0, inlier) is traced to the candidate of its keypoint, in the sequence row nearest in time,
+whose undistorted position is the nearest to it (97-98% of the used observations are traced; the rest are
+candidates merged from two crops, which keep one of the two positions). The score is the share of labelled
+keypoint-frames, among those the run took a candidate for, where that candidate lies within 3% of the box height of
+the label, next to the strongest maximum's share on the same keypoint-frames. Share of the picks within 3%,
+subject 1 / subject 3 (the strongest maximum: 90.7-90.8% / 94.4-94.7%):
+
+| `w_peak` \ multiplier | 1 | 2 | 4 | 8 |
+|---|---|---|---|---|
+| 0 | 91.7 / 96.4 | 91.7 / 96.4 | 91.9 / 96.4 | |
+| 0.5 | 91.7 / 96.4 | 91.8 / 96.4 | 91.8 / 96.3 | |
+| 1 | 91.7 / 96.4 | 91.7 / 96.4 | 91.8 / 96.3 | |
+| 2 | 91.7 / 96.3 | 91.7 / 96.3 | **92.7 / 96.3** | 92.6 / 96.3 |
+| 4 | | | 92.6 / 96.2 | |
+| 8 | | | | 91.6 / 96.2 |
+
+The grid is flat: the settings move the share by less than 0.2 points, apart from a point at multiplier 4 or 8 with
+`w_peak` 2 or more for subject 1, where the relaxed gate also keeps about 500 more keypoint-frames. Every setting
+is 1-2 points above the strongest maximum on its own picks. Setting chosen: `w_peak` 2, multiplier 4: the best
+of subject 1, equal for subject 3 within 0.1, in the middle of the plateau (its neighbours 92.6) with the grid's
+corner (8, 8) lower. The evidence is thin; the labelled frames lack the contact windows where the picks fail
+(any candidate is within 3% of the label for 99.7% of the labelled keypoint-frames, the strongest one for 94.3-94.9%).
+The defaults stay at 0 and 1.0 (off): a default on needs a measured gain, and range 3 gives the chosen setting none over the cost
+term alone (section 9.3). Tracklets exist for every keypoint candidate by construction, which is why continuity is a
+setting here and not a precondition; whether it should be on follows from the `suggest` decision.
+
+### 9.3 Acceptance run
+
+Capture and range as in section 7 (the five-camera, three-person trial, range 3 = 51.7-56.8 s, subjects 1 and 2).
+Boxes: `detect run --from-run fcb6b961 --candidates` (boxes from the masks; holds the prototype's crop on 82-83% of
+the frames, section 9.4), run `b56f18cd`, finalised over the whole span of every track (a mask label is a stable
+identity; the source run's assignments have gaps where the track identity was uncertain, which the prototype's
+sequences do not have): subject 1 `9bfda1ba`, subject 2 `40fd1be1`. Tracking: the tracker config and skeletons of the
+label-fed reference runs (`hier-dualhand`, skeletons with `soma77:`-qualified landmarks), 51.7-56.8 s, optimized
+build. Scored by `eval_kp_candidates.py tracker`: mean body-joint distance (cm) to the label-fed reference run from
+52.0 s, over the range and inside the hard windows. The setting is the one chosen on range 1, not tuned on this range.
 
 | Run | Subject 1 range / hard | Subject 2 range / hard |
 |---|---|---|
@@ -276,82 +342,85 @@ i.e. at most 10.7 / 3.9 cm over the range.
 | prototype, cross-camera + body mask term (`47613f1f`, `01aa291b`) | 10.0 / 10.2 | 3.3 / 4.0 |
 | prototype, strict mask filter + proposal (`b3c714df`, `d8b198ed`) | 8.7 / 11.9 | 4.8 / 6.2 |
 | prototype, strict mask filter + cross-camera (`bea2b0fd`, `150da557`) | 8.8 / 12.0 | 4.7 / 5.9 |
-| productized, candidates off (sequence without candidate rows: `bdc8c963`, `22673d9e`) | 18.0 / 21.1 | 5.3 / 6.8 |
-| productized, candidates off (sequence with candidate rows: `2a51e2fa`, `5d577395`) | 18.0 / 21.1 | 5.3 / 6.8 |
-| productized, candidates on (`e9000211`, `44fb7af3`) | 18.7 / 21.8 | 7.6 / 9.6 |
-| productized, candidates + strict mask (`4e219f3d`, `c8a24ead`) | 14.6 / 16.0 | 7.9 / 10.2 |
-| productized, candidates + multi-view agreement (`71f9d80c`, `b5bc77da`) | 14.4 / 16.0 | 6.9 / 8.8 |
-| productized, candidates, gate 36 (diagnosis only, `a3b11abd`, `aff37cdd`) | 17.5 / 20.4 | 6.4 / 8.3 |
+| productized, candidates off (`f751edad`, `1d44260e`) | 17.3 / 20.2 | 5.4 / 6.9 |
+| productized, candidates on, `w_peak` 2, multiplier 4 (`ed62ae0c`, `b3e3ebf0`) | 16.8 / 19.0 | 5.6 / 7.2 |
+| productized, candidates on + multi-view agreement (`8a495422`, `dabf4fab`) | 16.5 / 18.9 | 5.8 / 7.3 |
+| productized, candidates on, cost only: `w_peak` 0, multiplier 1 (`380c2f18`, `763b375c`) | 15.3 / 17.3 | 5.7 / 7.3 |
 
-(Run ids are those of the work copy of the spike database, which holds the prototype's runs too.)
+(Run ids are those of the work copy of the spike database, which holds the prototype's runs too. Target: no worse
+than the prototype's cross-camera run plus 0.5 cm, at most 10.7 / 3.9 cm over the range: **not met**.)
 
-**Result: the acceptance bar is not met.** With candidates on and no options the tracker's own per-step choice is
-8.0 cm (subject 1) and 4.2 cm (subject 2) behind the prototype's cross-camera run, and 0.7 and 2.3 cm behind its own
-run on the strongest maxima of the same sequence. Nothing was retuned and the `suggest` rule was not built. The
-figures and their sources:
+**Result: candidates on do not clearly beat candidates off.** The gain over the run's own strongest maxima, which
+leaves out the pipeline differences the candidates are not responsible for, is 0.5 cm (subject 1) and -0.2 cm
+(subject 2) with the chosen setting, against 4.5 and 2.7 cm for the prototype's cross-camera choice over its
+strongest-peak run; with the cost alone 2.0 and -0.3 cm. The correct candidate is chosen more often (range 3 picks
+within 3% of the label: 88.2% against 86.9% for the strongest maximum on the same keypoint-frames for subject 1,
+93.2 against 92.5 for subject 2), but the joint error does not follow:
 
-- **Identity with candidates off.** A tracking run of the sequence that holds the candidate rows with
-  `--no-candidates`, a run of a copy of that sequence without the rows, and a repeat of the first give bit-identical
-  state vectors, for both subjects. Two detection runs over the same frames are not bit-identical (105 of 3,007
-  body rows of subject 1 differ, median 0.03 px, maximum 4 px, from the GPU), so comparing runs on sequences of two
-  detection runs compares different data.
-- **Where the difference comes from.** Not only the hard windows: for subject 1 the mean joint distance in the frames
-  outside them is 12.3 cm with the strongest maxima, 13.2 cm with candidates and 8.0 cm for the prototype's
-  cross-camera run (inside them 21.4, 22.1 and 11.5 cm). By joint, candidates are worse than the strongest maxima
-  on the hands (right hand 11.7 to 18.0 cm outside the hard windows, 22.7 to 36.7 inside) and the left leg in the hard
-  windows (left shin 11.4 to 17.2 cm), and better on the feet (right foot 29.9 to 23.9 cm in the hard windows); the
-  prototype's choice is better than both on nearly every joint. That choice used the other cameras' picks and the
-  tracklet over the whole range; the tracker's has the prediction of one step. Where the prediction is off (fast
-  limbs) the candidate nearest to it keeps the error, where the strongest maximum does not depend on it. The options
-  help in the direction the prototype's did: with strict mask adherence 14.6 cm and with multi-view agreement 14.4 cm
-  against 18.7 for subject 1; for subject 2 agreement gives 6.9 and the mask 7.9 against 7.6, all still behind the
-  strongest maxima (5.3). The assignment gate is not the cause: at 36 (the 6 sigma of the filter's own outlier test)
-  the figures are 17.5 and 6.4 cm.
-- **Next step, not taken here.** The prototype's gain came from a choice made per tracklet and over time. The
-  `suggest` rule from an automatic grouped choice (section 5) is what would carry it into the tracker; its
-  decision, like any change of the `dot_*` defaults, is the operator's.
+- The cost change turns the first build's loss into a small gain (subject 2: 7.6 to 5.6 cm; the two measurements
+  are on different boxes, `69c1d770` and `fcb6b961`). Subject 2 is still not better than candidates off.
+- The continuity multiplier and the peak weight, as chosen on range 1, do not add to the cost term here: the cost
+  alone is 1.5 cm better for subject 1 and equal for subject 2. This is reported, not used: range 3 is not for choosing.
+- By joint (subject 1, cm, inside / outside the hard windows, off / chosen / cost only / prototype): the chosen setting
+  improves the arms, shoulders, neck and head (forearm L 27.4 to 22.0 inside, head 31.7 to 28.5, upper arm L 33.3 to
+  27.9) and worsens the legs (foot L 13.5 to 18.5, shin L 10.8 to 15.4, hips 11.0 to 12.5, toe L 13.4 to 17.7). The
+  cost alone keeps the left foot and toe better than off (11.5 and 11.7 cm), the shin and hips a little worse (12.1,
+  13.1), and the arms by more (forearm L 20.8, head 24.6). The right foot and toe are 18-30 cm off in every
+  productized run, with or without candidates, and 13-16 cm in the prototype's.
+  The prototype's choice (other cameras' picks and the tracklet over the whole range) is better than all of them on
+  nearly every joint.
+- Multi-view agreement on top: 0.3 cm better for subject 1, 0.2 cm worse for subject 2.
 
-### 9.3 Like for like
+Next step, not taken here: the prototype's gain came from a choice made per tracklet and over time. The `suggest`
+rule from an automatic grouped choice (section 5) is what would carry it into the tracker; its decision, like any
+change of the `dot_*` defaults, is the operator's.
 
-- **Candidates.** `eval_kp_candidates.py compare` against the prototype's candidate file: on frames whose crop is
-  the same (2,200 of 3,007 for subject 1, 2,256 of 3,051 for subject 2; 73-74%) the run reproduces 100.0% of the
-  prototype's candidates within 0.5 px, and the prototype's 100.0% of the run's, once the file's positions are moved
-  by half a heatmap cell: the frozen file stores the cell index at the cell's left edge, the decoder places a
-  position at the cell centre (4 px at a crop of 513 px, 1.3% of the person's height), and nothing else differs. On
-  the other frames (the crops differ by more than 1 px) 2-5% are reproduced.
-- **Boxes.** The run uses `69c1d770` as box source, which holds the prototype's crop on 73% of the frames of
-  subject 1 in the range (2,204 of 3,017); the other 27% are concentrated at 53-56 s, the hard windows (112, 24, 19,
-  120, 120, 166, 126, 75 and 51 frames in the bins 51.7-52.5, 52.5-53, 53-53.5, ... 56-56.8 s). Another existing run
-  (`fcb6b961`, boxes from the masks) holds 82%; 18% (547 frames) belong to no run: the prototype re-extracted them with
-  boxes from the masks as edited later. In the hard windows about a third of the frames are therefore not on the prototype's
-  crops. Not fixed: every existing run covers only part of the frames, and a synthetic run is
-  not an existing one. `--from-run fcb6b961` is the closer choice for a repeat.
-- **Frames.** The sequences cover 3,007 (subject 1) and 3,051 (subject 2) frames of 5 cameras x 612; the prototype's
-  candidate file has 3,017 frames of subject 1 in the range. A frame without a box is absent in both.
+### 9.4 Like for like
+
+- **Candidates.** `eval_kp_candidates.py compare` against the prototype's candidate file, boxes `fcb6b961`
+  (run `b56f18cd`): on the frames whose crop is the same (2,466 of 3,013 for subject 1, 2,522 of 3,051 for subject 2;
+  82-83%) the run reproduces 100.0% of the prototype's candidates within 0.5 px, and the prototype's 100.0% of the
+  run's, once the file's positions are moved by half a heatmap cell: the frozen file stores the cell index at the
+  cell's left edge, the decoder places a position at the cell centre (4 px at a crop of 513 px, 1.3% of the
+  person's height), and nothing else differs. Over all common frames 82.2% of the prototype's candidates are
+  reproduced (subject 1; 83.0% the other way) and 84.7% (subject 2; 83.0%). On the other frames (the crops differ
+  by more than 1 px; 547 and 529 frames, which belong to no existing run: the prototype re-extracted them with boxes
+  from the masks as edited later) 4-6% are reproduced. The earlier box run `69c1d770` held the crop on 73-74%.
+- **Frames.** The run's sequences cover 3,013 and 3,051 frames of the 5 cameras x 612 (the prototype's candidate
+  file: 3,017 and 3,051 in the range); a frame without a box is absent in both.
 - **Other differences of the pipeline.** The prototype's tracker sequences were built from the candidate file's
   picks (positions in the left-edge convention, so a systematic half-cell offset in the label-fed reference too, one
   camera left on the strongest maxima), with keypoints it judged invisible removed; the productized sequence holds
   every strongest maximum. The strongest-maxima run of the productized pipeline is at the level of the prototype's
-  own (subject 1: 18.0 cm against 14.7 and 18.5; subject 2: 5.3 against 6.1 and 10.2, for its range-3 and whole-trial
-  strongest-peak runs).
+  own (subject 1: 17.3 cm against 14.7 and 18.5; subject 2: 5.4 against 6.1 and 10.2, for its range-3 and
+  whole-trial strongest-peak runs).
+- **Identity with candidates off.** A tracking run with `--no-candidates` of a sequence that holds the candidate
+  rows, a run of a copy without the rows and a repeat are bit-identical (first measurement, before the cost
+  change; a run without candidates does not reach the changed code). Two detection runs over the same frames are not bit-identical (105 of 3,007
+  body rows differ, median 0.03 px, maximum 4 px, from the GPU), so comparing runs on sequences of two detection
+  runs compares different data.
 
-### 9.4 Cost
+### 9.5 Cost
 
-Optimized build, the acceptance runs, one machine, other work idle except where noted.
+Optimized build, the acceptance runs one after the other, one machine, other work idle.
 
-| | Candidates off | Candidates on |
+| | Candidates off | Candidates on (`w_peak` 2, multiplier 4) |
 |---|---|---|
-| Detection, 51.7-56.8 s, 5 cameras, 3 persons, boxes from a run (wall) | 6 min 23 s | 7 min 24 s (+16%; a few short test runs overlapped it) |
+| Detection, 51.7-56.8 s, 5 cameras, 3 persons, boxes from a run (wall) | 6 min 23 s | 7 min 24 s (+16%; first measurement) and 8 min 11 s with `fcb6b961` as box source |
 | Detection rows of the run | `full_body` 8.15 MB, hands 2.9 MB, previews 48 MB | + `kp_candidates` 21.0 MB: 2.4 kB per person, camera and frame (91 maxima), 2.6 times the ordinary row, +26% of the run's rows |
 | Sequence rows after finalisation | | the same 21.0 MB again in `pose_observations` |
-| Tracking, subject 1 (wall, peak memory of the process tree) | 100.5 s, 4,863 MB | 110.5 s (+10%), 4,904 MB (+0.8%) |
-| Tracking, subject 2 | 109.9 s, 4,883 MB | 114.2 s (+4%), 4,930 MB (+1.0%) |
-| Shared assignment per step with candidates (about 90 per camera and person) | | 13.8 ms (subject 1), 13.3 ms (subject 2), of 181 ms and 187 ms per step; the prediction of the 77 slots in 5 cameras is on top (inside the wall figures) |
-| Strict mask option | | 130.8 s and 139.8 s (+23% and +25% over the plain candidate runs of the first pass, 106.6 s and 112.2 s: one mask decode per camera and step) |
+| Tracking, subject 1 (wall, peak memory of the process tree) | 97.4 s, 4,867 MB | 103.9 s (+6.7%), 4,915 MB (+1.0%); with multi-view agreement 107.3 s |
+| Tracking, subject 2 | 105.6 s, 4,882 MB | 111.2 s (+5.3%), 4,927 MB (+0.9%); with multi-view agreement 112.1 s |
+| Shared assignment per step with candidates (about 90 per camera and person) | | 13.8 ms (subject 1), 13.3 ms (subject 2), of 181 ms and 187 ms per step (first measurement) |
+| Strict mask option | | 130.8 s and 139.8 s (+30% and +22% over the plain candidate run in the first pass: one mask decode per camera and step) |
 
-### 9.5 Strict mask option
+The cost term adds one logarithm per pair and the continuity test one lookup. The +6.7% and +5.3% of tracking
+time are of the size of the +10% and +4% of the first measurement.
 
-Compared with the prototype's strict person-mask filter (a candidate kept only if at least half the detections of
+### 9.6 Strict mask option
+
+Measured with the first build (cost on the distance alone, no continuity, boxes `69c1d770`), not repeated with the
+likelihood cost; the modifier itself is unchanged. Compared with the prototype's strict person-mask filter (a candidate kept only if at least half the detections of
 its tracklet within +-10 frames lie on the person's mask; masks reviewed for 52.5-57 s only), scored by the harness:
 the filter with the proposal gave 8.7 / 11.9 and 4.8 / 6.2 cm, with the cross-camera choice 8.8 / 12.0 and 4.7 / 5.9
 (range / hard windows, subject 1 and 2); the tracker's mask modifier with candidates gives 14.6 / 16.0 and

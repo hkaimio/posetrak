@@ -299,6 +299,11 @@ Stage 0 is measurement only and comes first because several later scopes depend 
   each help. The cost is +4-10% tracking time, +16% detection time and +26% stored detection rows; the shared
   assignment takes 14 ms per step. The `suggest` rule from an automatic grouped choice is the open decision;
   figures and the like-for-like check in the design §9. Candidates are off by default and stay so.
+  **Follow-up:** the cost of a keypoint candidate is now a negative log-likelihood (squared distance plus
+  ln det S minus a peak term) and tracklet continuity has a setting of its own (design §9.2); on closer boxes
+  (82-83% of the prototype's crops) candidates on are 16.8 / 5.6 cm against 17.3 / 5.4 with them off, still not
+  a clear gain over the strongest maxima (the prototype's cross-camera choice gains 4.5 / 2.7 cm), so the
+  `suggest` rule stays the operator's decision; both new settings default to off.
 
 ### Stage 10 — Tracklet editing, first stage
 

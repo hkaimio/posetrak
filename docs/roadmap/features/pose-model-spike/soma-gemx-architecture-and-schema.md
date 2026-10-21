@@ -64,7 +64,7 @@ licence acceptance and falls back to RTMPose-133 without them.
 |---|---|
 | Where the segmentation used by a result is recorded (detection pipeline, mask versioning, candidates) | Columns on `detection_runs` and `tracking_run_persons`, added in the first release with `seg_revision` NULL; mask versioning fills the revision later, no rewrite. |
 | Manifest layout (skeleton binding, hand refinement) | One change: `pose_sequence_keypoints.obs_source` with the key `(sequence_id, obs_source, keypoint_idx)`; hand refinement writes `hand21` rows under it. |
-| Candidate settings (candidates, dots) | The existing `dot_*` settings govern every anonymous candidate; the only new setting is `kp_candidates_enabled`. |
+| Candidate settings (candidates, dots) | The existing `dot_*` settings govern every anonymous candidate; the new settings are `kp_candidates_enabled` and the two that only a keypoint candidate has, `kp_candidate_peak_weight` and `kp_candidate_tracklet_multiplier`. |
 | Tracklet decisions (editing, dots) | One table, `dot_assignment_edits`, for both; tracklet ids are unique per (detection run, camera). Its name stays to avoid churn in the dot review code; its comment says it covers keypoint tracklets. |
 | Tracklet table (candidates, editing) | None. Extents and statistics are computed from candidate rows; a summary table is added only if the editor measures the computation as too slow. |
 | Run status (concurrency, detection) | `detection_runs.status` exists; `tracking_runs` gets the same three values. Interrupted runs are detected the same way for both. |
@@ -262,6 +262,8 @@ apply to every anonymous candidate, dots and keypoint candidates.
 |---|---|---|
 | active_joint_groups | TEXT | **new, first release** JSON array of the skeleton group names the top-level (parent) stage tracks, e.g. `["main"]`; NULL = the whole skeleton. Replaces the tracker's `--joint-groups` option as the source of the parent's groups, so a run records them |
 | kp_candidates_enabled | INTEGER | **new, second release** **new** 0/1: use the sequence's keypoint candidates instead of its fixed body observations for the markers of that model; NULL/0 = off |
+| kp_candidate_peak_weight | REAL | **new, second release** weight of -ln(peak) in the assignment cost of a keypoint candidate (cost = squared Mahalanobis distance + ln det S - weight * ln(peak)); NULL/0 = no peak term |
+| kp_candidate_tracklet_multiplier | REAL | **new, second release** divisor of the squared Mahalanobis distance of a keypoint candidate that continues the tracklet of the same marker's previous step; NULL/1.0 = off |
 
 ### 3.10 `dot_assignment_edits` (session) — third release (rebuild)
 
@@ -293,7 +295,7 @@ The `CHECK` on `kind` is the reason for the rebuild. `dot_assignment_proposals` 
 | 66 | first | `detection_runs.seg_quality_run_id`, `seg_revision`, `source_detection_run_id`; existing rows stay NULL (mask-sourced runs did not record their segmentation; the spike's prototype runs name their source run in `config_json`, which is copied into `source_detection_run_id`) (stage 3) | `ALTER TABLE ADD COLUMN` + update |
 | next free | first | `tracker_configs.active_joint_groups` (registry version 17 in step) | `ALTER TABLE ADD COLUMN` |
 | 67 | second | `seg_mask_revisions`; `seg_masks.revision`, nullable blob, new key; `seg_masks_latest` view | table rebuild with copy, revision 0 rows |
-| 68 | second | `tracker_configs.kp_candidates_enabled` (registry version 18 in step) | `ALTER TABLE ADD COLUMN` |
+| 68 | second | `tracker_configs.kp_candidates_enabled`, `kp_candidate_peak_weight`, `kp_candidate_tracklet_multiplier` (registry version 18 in step) | `ALTER TABLE ADD COLUMN` |
 | 69 | third | `dot_assignment_edits` kinds 'force', 'split', column `edit_group_id` | table rebuild with copy |
 
 The version numbers are provisional and follow version 63; the order is what matters. A stage

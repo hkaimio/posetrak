@@ -363,7 +363,10 @@ computed from the rows. Finalisation multiplies `peak` by the pose model's confi
 frames it copies and links the frames it re-runs after them.
 
 A tracking run uses the candidates when `tracker_configs.kp_candidates_enabled` is 1 (`track run
---candidates`); with 0 the sequence's fixed `body` observations are used even if it holds candidates.
+--candidates`); with 0 the sequence's fixed `body` observations are used even if it holds candidates. Two
+further columns set how the tracker chooses among them: `kp_candidate_peak_weight` (weight of the candidate's
+peak in its assignment cost) and `kp_candidate_tracklet_multiplier` (preference for the candidate that continues
+the tracklet chosen for the same keypoint on the previous step); NULL means off for both.
 
 ### Pose blob extensibility: the keypoint manifest
 A `PoseObservation.kp_blob` has its keypoint count and ordering named by a per-source

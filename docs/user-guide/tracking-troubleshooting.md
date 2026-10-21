@@ -40,13 +40,20 @@ independently of the other:
 - `--multi-view-agreement`: a candidate is preferred when another camera's candidate for the same keypoint
   lies on its epipolar line (`--agreement-px`, `--agreement-factor`).
 
-The settings are recorded with the run (`kp_candidates_enabled` and the `dot_*` columns of its tracker
+A candidate's cost is its distance to the prediction plus the log-determinant of the covariance it implies, so a
+weak maximum, which implies a wide covariance, does not win on distance alone. `--kp-peak-weight` adds a reward for
+a high peak (default 0, off) and `--kp-tracklet-multiplier` a preference for the candidate that continues the track
+(tracklet) chosen for the same keypoint on the previous step (default 1, off). On the evaluation trial neither
+changed the result noticeably, so both stay off unless you have measured a gain on your footage.
+
+The settings are recorded with the run (`kp_candidates_enabled`, `kp_candidate_*` and the `dot_*` columns of its tracker
 config), so two runs on one sequence differ in their configuration only. **Cost.** The shared assignment takes about 14 ms
 per step for 90 candidates per camera and person, a 4-10% longer run, and the memory is the same to 1%; the mask
 option adds another 20-25% (it decodes a mask per camera and step).
 
-The choice is made per step from the tracker's prediction. On the multi-person evaluation trial it was not better
-than the strongest keypoint by itself (the two options each helped); the measurements are in section 9 of the
+The choice is made per step from the tracker's prediction. On the multi-person evaluation trial it was about as good
+as the strongest keypoint by itself (0.5 cm better for one person and 0.2 cm worse for the other; the offline
+choice of the research prototype was 3-4 cm better, and the two options each helped); the measurements are in section 9 of the
 keypoint candidates design (`docs/roadmap/features/keypoint-candidates/`), so try it on your footage before relying on it.
 
 ## Diagnosing a run (MCP diagnostic server)

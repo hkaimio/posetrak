@@ -223,7 +223,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
         "       COALESCE(dot_seg_mask_cost_scale_at_zero_fraction, 4.0) AS "
         "dot_seg_mask_cost_scale_at_zero_fraction,"
         "       COALESCE(dot_seg_mask_hard_distance_px, 0.0) AS dot_seg_mask_hard_distance_px,"
-        "       active_joint_groups"
+        "       active_joint_groups,"
+        "       COALESCE(kp_candidates_enabled, 0) AS kp_candidates_enabled"
         " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -263,7 +264,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //         63=dot_seg_mask_enabled, 64=dot_seg_mask_dilate_px,
     //         65=dot_seg_mask_tracklet_window, 66=dot_seg_mask_min_tracklet_fraction,
     //         67=dot_seg_mask_cost_scale_at_zero_fraction,
-    //         68=dot_seg_mask_hard_distance_px, 69=active_joint_groups
+    //         68=dot_seg_mask_hard_distance_px, 69=active_joint_groups,
+    //         70=kp_candidates_enabled
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -483,6 +485,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     apply_real(66, out.tracker.dot_seg_mask_min_tracklet_fraction);
     apply_real(67, out.tracker.dot_seg_mask_cost_scale_at_zero_fraction);
     apply_real(68, out.tracker.dot_seg_mask_hard_distance_px);
+
+    out.tracker.kp_candidates_enabled = sqlite3_column_int(stmt.ptr, 70) != 0;
 
     // active_joint_groups: stored as a JSON string array, e.g. ["main"]; NULL or [] tracks the
     // whole skeleton.
@@ -962,6 +966,8 @@ ObservationSet SessionReader::load_observations(
             };
             while (sqlite3_step(manifest_raw) == SQLITE_ROW) {
                 std::string const obs_source = text(0);
+                if (obs_source == "kp_candidates")
+                    continue;  // names the candidate blobs, which load_keypoint_candidates() reads
                 int const layer = obs_source == "hand_l"   ? kHandLeftLayer
                                   : obs_source == "hand_r" ? kHandRightLayer
                                                            : kPrimaryLayer;
@@ -1153,7 +1159,8 @@ ObservationSet SessionReader::load_observations(
                   "SELECT po.camera_instance_id, po.video_frame, po.source, po.timestamp_s,"
                   " po.kp_blob, COALESCE(po.noise_scale, 1.0) AS crop_scale"
                   " FROM pose_observations po"
-                  " WHERE po.sequence_id = ? AND po.person_id = ? AND po.source != 'dots'"
+                  " WHERE po.sequence_id = ? AND po.person_id = ? AND po.source NOT IN ('dots', "
+                  "'kp_candidates')"
                   " AND (? OR po.timestamp_s >= ?) AND (? OR po.timestamp_s < ?)"
                   " ORDER BY po.camera_instance_id, po.video_frame");
     sqlite3_bind_text(obs_stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
@@ -1663,6 +1670,114 @@ SessionReader::load_unlabeled_candidates(std::string const& sequence_id,
             cand.dir_y = c.dir_y;
             cand.tracklet_id = static_cast<int>(std::lround(c.tracklet_id));
             result.push_back(cand);
+        }
+    }
+    return result;
+}
+
+KeypointCandidates
+SessionReader::load_keypoint_candidates(std::string const& sequence_id,
+                                        std::map<std::string, Camera> const& cameras,
+                                        Skeleton const& skeleton, double min_confidence,
+                                        int person_id, double window_start_s, double window_end_s) {
+    KeypointCandidates result;
+
+    // keypoint_idx -> marker, through the manifest names against Marker::landmark. A name without
+    // a model prefix also matches the qualified landmark, as for the body row.
+    std::unordered_map<std::string, int> landmark_to_marker;
+    auto const& markers = skeleton.markers();
+    for (size_t i = 0; i < markers.size(); ++i) {
+        if (!markers[i].landmark.empty())
+            landmark_to_marker[markers[i].landmark] = static_cast<int>(i);
+    }
+    std::unordered_map<int, int> keypoint_to_marker;
+    {
+        sqlite3_stmt* manifest_raw = nullptr;
+        // A database from before obs_source existed has no candidates either.
+        if (sqlite3_prepare_v2(db_,
+                               "SELECT keypoint_idx, name, source FROM pose_sequence_keypoints"
+                               " WHERE sequence_id = ? AND obs_source = 'kp_candidates'",
+                               -1, &manifest_raw, nullptr) != SQLITE_OK)
+            return result;
+        sqlite3_bind_text(manifest_raw, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
+        auto text = [&](int col) {
+            auto const* t = sqlite3_column_text(manifest_raw, col);
+            return t != nullptr ? std::string(reinterpret_cast<char const*>(t)) : std::string();
+        };
+        while (sqlite3_step(manifest_raw) == SQLITE_ROW) {
+            int const keypoint_idx = sqlite3_column_int(manifest_raw, 0);
+            std::string const name = text(1);
+            std::string const model = text(2);
+            auto it = landmark_to_marker.find(name);
+            if (it == landmark_to_marker.end() && name.find(':') == std::string::npos &&
+                !model.empty())
+                it = landmark_to_marker.find(model + ":" + name);
+            if (it != landmark_to_marker.end()) {
+                keypoint_to_marker[keypoint_idx] = it->second;
+                result.marker_keypoint[it->second] = keypoint_idx;
+            }
+        }
+        sqlite3_finalize(manifest_raw);
+    }
+    if (keypoint_to_marker.empty())
+        return result;
+
+    bool const pixels_are_undistorted = load_pixels_are_undistorted(sequence_id);
+    std::unordered_map<std::string, Camera const*> inst_to_cam =
+        load_instance_camera_map(sequence_id, cameras);
+
+    Stmt stmt(db_,
+              "SELECT po.camera_instance_id, po.video_frame, po.timestamp_s, po.kp_blob,"
+              " COALESCE(po.noise_scale, 1.0)"
+              " FROM pose_observations po"
+              " WHERE po.sequence_id = ? AND po.person_id = ? AND po.source = 'kp_candidates'"
+              " AND (? OR po.timestamp_s >= ?) AND (? OR po.timestamp_s < ?)"
+              " ORDER BY po.camera_instance_id, po.video_frame");
+    sqlite3_bind_text(stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt.ptr, 2, person_id);
+    sqlite3_bind_int(stmt.ptr, 3, std::isfinite(window_start_s) ? 0 : 1);
+    sqlite3_bind_double(stmt.ptr, 4, std::isfinite(window_start_s) ? window_start_s : 0.0);
+    sqlite3_bind_int(stmt.ptr, 5, std::isfinite(window_end_s) ? 0 : 1);
+    sqlite3_bind_double(stmt.ptr, 6, std::isfinite(window_end_s) ? window_end_s : 0.0);
+
+    // Radius of "the same image point" for candidates of overlapping crops: 3 px, or 0.5% of the
+    // person's box height when that is more. The box height follows from the crop scale (model
+    // input pixels to frame pixels): the 192 px wide model input covers 0.75 of the crop side,
+    // which is 1.6 times the box, so a unit of crop scale is 192 / (0.75 * 1.6) = 160 px of box.
+    constexpr double kMergeMinPx = 3.0;
+    constexpr double kMergeBoxFraction = 0.005;
+    constexpr double kBoxHeightPerCropScale = 160.0;
+
+    while (stmt.step()) {
+        std::string inst_id = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 0));
+        auto cam_it = inst_to_cam.find(inst_id);
+        if (cam_it == inst_to_cam.end())
+            continue;
+        Camera const* camera = cam_it->second;
+        int const video_frame = sqlite3_column_int(stmt.ptr, 1);
+        double const timestamp_s = sqlite3_column_double(stmt.ptr, 2);
+        double const crop_scale = sqlite3_column_double(stmt.ptr, 4);
+        for (auto const& c : db::decode_kp_candidates(sqlite3_column_blob(stmt.ptr, 3),
+                                                      sqlite3_column_bytes(stmt.ptr, 3))) {
+            if (keypoint_to_marker.find(c.keypoint_idx) == keypoint_to_marker.end() ||
+                c.peak < min_confidence)
+                continue;
+            UnlabeledCandidate cand;
+            cand.camera_id = camera->id();
+            cand.frame_idx = video_frame;
+            cand.timestamp = timestamp_s;
+            cand.position_distorted = Eigen::Vector2d(c.x, c.y);
+            cand.position = pixels_are_undistorted ? cand.position_distorted
+                                                   : camera->undistort(cand.position_distorted);
+            cand.confidence = c.peak;
+            cand.area = 0.0;
+            cand.compactness = 0.0;
+            cand.tracklet_id = c.tracklet_id;
+            cand.keypoint_idx = c.keypoint_idx;
+            cand.crop_scale = crop_scale;
+            cand.merge_radius_px =
+                std::max(kMergeMinPx, kMergeBoxFraction * kBoxHeightPerCropScale * crop_scale);
+            result.candidates.push_back(cand);
         }
     }
     return result;

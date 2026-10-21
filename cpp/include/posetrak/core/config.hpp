@@ -159,6 +159,13 @@ struct TrackerConfig {
     /// whose mask does not contain the label at all.
     double dot_seg_mask_hard_distance_px = 0.0;
 
+    /// Use the sequence's keypoint candidates (pose_observations source 'kp_candidates') through
+    /// the shared assignment instead of the fixed body observations, for the markers bound to the
+    /// pose model of those candidates. The dot_* settings above govern them like dots. False: the
+    /// fixed observations are used even if the sequence holds candidates. The hand stages of a
+    /// hierarchical run always keep their refined-hand observations.
+    bool kp_candidates_enabled = false;
+
     // === Streak-derived dot velocity ===
     // See docs/roadmap/features/marker-based-mocap/streak-velocity-design.md §3/§4.
     // A motion-blur streak's own length/axis is a real, otherwise-unused frame-internal
@@ -410,6 +417,7 @@ struct TrackerAppConfig {
     /// tracklet's history (a young tracklet has none). 0 = off. Skipped for a camera
     /// whose mask does not contain the label at all.
     double dot_seg_mask_hard_distance_px = 0.0;
+    bool kp_candidates_enabled = false;  ///< See TrackerConfig's own field doc comment.
 
     // === Streak-derived dot velocity === (see TrackerConfig's own field doc comments)
     bool dot_streak_velocity_enabled = false;
@@ -571,6 +579,7 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.dot_seg_mask_min_tracklet_fraction = dot_seg_mask_min_tracklet_fraction;
     tc.dot_seg_mask_cost_scale_at_zero_fraction = dot_seg_mask_cost_scale_at_zero_fraction;
     tc.dot_seg_mask_hard_distance_px = dot_seg_mask_hard_distance_px;
+    tc.kp_candidates_enabled = kp_candidates_enabled;
     tc.dot_streak_velocity_enabled = dot_streak_velocity_enabled;
     tc.dot_streak_k_window = dot_streak_k_window;
     tc.dot_streak_k_min_samples = dot_streak_k_min_samples;

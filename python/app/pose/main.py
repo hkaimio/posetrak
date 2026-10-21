@@ -115,6 +115,7 @@ class DetectionJob(BackgroundJob):
         detector_conf: float,
         refine_hands: bool = True,
         seg_run_id: str | None = None,
+        candidates: bool = False,
     ):
         """*seg_run_id*, when given, replaces the YOLOX detector as the box source: the person boxes come from the
         labels of that segmentation run, and the run is finalised automatically (a label is already an identity)."""
@@ -129,6 +130,7 @@ class DetectionJob(BackgroundJob):
         self._detector_conf = detector_conf
         self._refine_hands = refine_hands
         self._seg_run_id = seg_run_id
+        self._candidates = candidates
 
     def run(self):
         from posetrak.db.db import open_session
@@ -152,7 +154,12 @@ class DetectionJob(BackgroundJob):
                 det = YOLOXDetector(model_name=self._detector_name, conf=self._detector_conf)
                 box_source = YoloxBoxSource(det)
                 devices = [det.device]
-            est = create_estimator(self._pose_model_name)
+            options = {}
+            if self._candidates:
+                from posetrak.detection.kp_candidates import CandidateOptions
+
+                options["candidates"] = CandidateOptions()
+            est = create_estimator(self._pose_model_name, **options)
             devices.append(getattr(est, "device", "cuda"))
             if "cpu" in devices:
                 self.device_notice.emit(
@@ -403,6 +410,12 @@ class PoseExtractionWindow(QMainWindow):
             "Only has an effect for 133-keypoint pose models."
         )
         row3.addWidget(self._refine_hands_check)
+        self._candidates_check = QCheckBox("Keypoint candidates")
+        self._candidates_check.setToolTip(
+            "SOMA-77 only. Also store up to six heatmap maxima per keypoint, linked into tracklets, so that "
+            "tracking can choose among them. About a quarter more stored data and about 15% longer detection."
+        )
+        row3.addWidget(self._candidates_check)
         row3.addStretch()
         top_layout.addLayout(row3)
 
@@ -790,6 +803,7 @@ class PoseExtractionWindow(QMainWindow):
             pose_model_name=self._pose_combo.currentText(),
             detector_conf=self._conf_spin.value(),
             refine_hands=self._refine_hands_check.isChecked(),
+            candidates=self._candidates_check.isChecked() and self._pose_combo.currentText().startswith("soma77"),
         )
         self._job.progress.connect(self._on_job_progress)
         self._job.camera_progress.connect(self._on_camera_progress)

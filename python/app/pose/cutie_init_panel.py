@@ -694,8 +694,8 @@ class CutieInitPanel(QWidget):
         self._candidates_check = QCheckBox("Keypoint candidates")
         self._candidates_check.setToolTip(
             "SOMA-77 only. Also store up to six heatmap maxima per keypoint, linked into tracklets, so that "
-            "tracking can choose among them. About four times the keypoint data and a few percent more "
-            "detection time. A detection run holds candidates for all of its cameras or for none."
+            "tracking can choose among them. About a quarter more stored detection data and detection that takes "
+            "about 15% longer. A detection run holds candidates for all of its cameras or for none."
         )
         pose_row.addWidget(self._candidates_check)
 

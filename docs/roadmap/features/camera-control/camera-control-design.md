@@ -298,8 +298,13 @@ configuration; it does not repeat serial numbers or settings.
 device identity (`gopro_serial`, `ble_mac`, `adb_serial`, ...). Provisioning starts from a
 registry camera: `provision <label>` resolves the serial from the endpoint row. If the
 camera has none, a BLE scan lists the cameras in range, the operator picks one, and the
-link is stored. Where `camera_instances.serial_number` holds the full manufacturer serial
-and the device identity is its tail, matching is by suffix.
+link is stored. `camera_instances.serial_number` is entered by hand and is often empty,
+so it is not relied on for matching. The link is the endpoint row, made once by the
+operator. Once the camera is reachable, provisioning reads the full manufacturer serial
+from it and offers to fill an empty `serial_number` (a differing value is reported, never
+overwritten). That serial also appears in the metadata of the camera's video files, so it
+later lets mode detection and the capture wizard identify the instance of a video taken
+outside the daemon, and warns when a link points at the wrong registry camera.
 
 **Capture modes.** A *mode* is a `camera_modes` row of the camera's model. Intrinsic
 calibrations are attached to modes, so a capture is only useful for tracking when it

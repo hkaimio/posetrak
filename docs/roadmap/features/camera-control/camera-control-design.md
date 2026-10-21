@@ -288,6 +288,134 @@ stopping; Hero11 and Insta360 cameras go on the dock after teardown.
    frame range) and write provenance (§4). The capture wizard's manual
    "add videos" step becomes a review step.
 
+### 3.6 Registry integration: identity, capture modes, credentials
+
+The capture daemon takes everything about a physical camera from the registry. The
+daemon configuration names which cameras take part in a capture and under which
+configuration; it does not repeat serial numbers or settings.
+
+**Identity.** `control_endpoints` links a `camera_instances` row to its control method and
+device identity (`gopro_serial`, `ble_mac`, `adb_serial`, ...). Provisioning starts from a
+registry camera: `provision <label>` resolves the serial from the endpoint row. If the
+camera has none, a BLE scan lists the cameras in range, the operator picks one, and the
+link is stored. Where `camera_instances.serial_number` holds the full manufacturer serial
+and the device identity is its tail, matching is by suffix.
+
+**Capture modes.** A *mode* is a `camera_modes` row of the camera's model. Intrinsic
+calibrations are attached to modes, so a capture is only useful for tracking when it
+used a mode that exists in the registry. The picker therefore offers the modes of each
+camera's model. `camera_modes` has no lens, performance or exposure fields and the set of
+parameters differs per model, so a mode also carries the settings its driver applies:
+
+```sql
+ALTER TABLE camera_modes ADD COLUMN capture_settings TEXT;   -- JSON object, driver-specific
+ALTER TABLE camera_modes ADD COLUMN settings_control TEXT;   -- 'driver' | 'manual'
+```
+
+`capture_settings` holds the keys of the driver's settings vocabulary (for the Hero13
+those of `gopro_profile.translate`: resolution, fps, lens, bit_rate, performance, or a raw
+numeric setting id). When it is empty the driver derives what it can from width, height
+and fps. The settings that define a mode's *image* (resolution, fps, lens) are part of
+the mode identity and select its intrinsics; settings that do not (exposure, bit rate)
+may differ between captures within one mode.
+
+**Capture setups.** Users define named *capture setups* in the daemon configuration. A
+setup says which mode each camera uses when it is selected, either per camera label or
+per camera model, plus optional per-camera overrides:
+
+```toml
+[setup.default]
+mode = { "GoPro Hero13" = "4K 120 linear", "GoPro Hero11" = "4K 60 linear" }
+[setup.default.camera.gopro13_03]
+mode = "2.7K 120 linear"          # override
+[setup.default.camera.gopro13_03.settings]
+exposure_time = "1/480"           # extra driver parameter on top of the mode
+```
+
+The operator picks a setup in the UI (default if there is only one) and may override a
+camera's mode for one capture. Cameras of different models in one rig get different
+modes by construction. Resolution of "which mode does camera X use" is: per-capture
+override, then the setup's per-camera entry, then its per-model entry; a camera that
+resolves to nothing is reported as not ready.
+
+**Driver contract.** Every driver implements:
+
+- `supported_settings() -> dict[str, SettingSpec]`: the vocabulary of parameters the
+  driver understands with their types and allowed values. The UI renders per-capture
+  adjustments (exposure time etc.) from it, so a new parameter is a driver change only.
+- `settings_control` capability: `driver` (settings can be applied and verified over the
+  control channel; Hero13, later Hero11) or `manual` (Android, iPhone, Insta360 Ace Pro 2
+  cannot be configured remotely). For `manual` cameras arm does not write settings; it
+  shows the mode the operator must select on the device and the checklist records the
+  confirmation. A `manual` camera is never reported as ready on the controller's say-so
+  alone.
+- `describe_mode(mode) -> list[str]`: the instruction text for the manual case.
+- `read_settings()` where the camera can report them, so arm can verify even a camera
+  the operator set by hand.
+
+The mode actually used is recorded per camera in `capture_events` (`camera_mode_id`,
+`settings_json` with the settings as read back, or as commanded for `manual` cameras).
+
+**Mode detection from video files.** Calibration footage and any other video recorded
+outside the capture daemon must land on the right mode without the camera being connected.
+Detection is a function of the file, in the driver layer but independent of any control
+connection:
+
+```python
+class ModeDetector(Protocol):
+    def detect(self, probe: VideoProbeResult, modes: list[CameraMode]) -> ModeMatch: ...
+```
+
+`ModeMatch` is a ranked list of candidate modes, each with a confidence and the
+evidence. Inputs are the existing `video_probe` result (container size and fps, capture
+fps, codec, make/model/serial) and any vendor metadata a detector knows how to parse
+(for GoPro the GPMF/`udta` atoms give lens, sensor mode and linear/wide flags; for
+Insta360 the proprietary trailer). A detector registers per camera make/model; the
+generic fallback matches only width, height and fps. The serial number in the metadata
+selects the camera instance. The result is used in three places:
+
+1. Collection verify (§3.5): the detected mode is compared with the commanded one;
+   disagreement gives `verify_status = 'mode_mismatch'`.
+2. The capture wizard: videos added by hand get `shot_videos.camera_mode_id`
+   pre-filled. A unique match with high confidence is assigned silently; an ambiguous
+   one (for instance linear and wide lens indistinguishable from the metadata) is
+   presented as a choice with the evidence.
+3. Calibration import: the matched mode selects its default intrinsics calibration.
+
+**Credentials.** COHN credentials belong to the camera, not to the PC, and any machine
+on the WLAN can use them, so they live in the registry with the rest of the machine
+setup, but in a table of their own:
+
+```sql
+CREATE TABLE control_credentials (
+    camera_instance_id TEXT NOT NULL,       -- references camera_instances(id)
+    ssid               TEXT NOT NULL,
+    ip_address         TEXT NOT NULL,
+    username           TEXT NOT NULL,
+    password           TEXT NOT NULL,
+    certificate        TEXT NOT NULL,
+    PRIMARY KEY (camera_instance_id, ssid)
+);
+```
+
+The password gives full control of the camera. This table exists only in the registry
+and is never copied into session databases or into registry exports, which differs from
+`control_endpoints`, `camera_models` and `camera_instances`, whose rows sessions embed.
+Session creation is tested to leave it out. The registry file's permissions are
+restricted where the platform supports it. The existing per-camera JSON credential files
+are imported once and then ignored.
+
+**Operator flow.**
+
+1. *Add a camera* (CLI first, web UI later): choose or create a registry camera
+   instance, pick the device from a scan, choose the WLAN, provision. The endpoint,
+   credentials and instance end up linked.
+2. *Define modes* for each camera model in the registry (settings editor in the
+   desktop app); a mode can be created from a camera's current settings.
+3. *Define setups* in the daemon configuration.
+4. *Capture*: pick a setup, optionally override per camera, arm. Arm applies and
+   verifies settings on `driver` cameras and lists the manual instructions for the rest.
+
 ---
 
 ## 4. Data model additions
@@ -339,7 +467,12 @@ CREATE TABLE capture_events (
     start_ack_ts        TEXT,                   -- node/ADB/camera executed the command
     start_confirm_ts    TEXT,                   -- positive recording confirmation (NULL if none)
     stop_cmd_ts         TEXT,
+    stop_ack_ts         TEXT,
     stop_confirm_ts     TEXT,
+    camera_mode_id      TEXT,                   -- mode the camera was armed with (§3.6);
+                                                -- references registry: camera_modes(id)
+    settings_json       TEXT,                   -- settings read back (or commanded, for
+                                                -- manual cameras)
     confidence          TEXT NOT NULL,          -- 'confirmed' | 'commanded' | 'manual'
     status              TEXT NOT NULL,          -- 'ok' | 'failed' | 'operator_override'
     notes               TEXT,

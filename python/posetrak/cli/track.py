@@ -217,6 +217,46 @@ def _copy_remaining_config_columns(
     )
 
 
+def _apply_assignment_options(
+    conn: sqlite3.Connection,
+    config_id: str,
+    *,
+    candidates: bool | None,
+    strict_mask: bool,
+    mask_min_fraction: float | None,
+    mask_window: int | None,
+    multi_view_agreement: bool,
+    agreement_px: float | None,
+    agreement_factor: float | None,
+) -> None:
+    """Set the keypoint-candidate and candidate-assignment settings a ``track run`` option names on the run's config.
+
+    Each option changes only its own columns; a value the base config already holds is kept unless the option
+    gives one. Strict mask adherence is the segmentation-mask modifier of the shared assignment, multi-view
+    agreement its cross-view corroboration: the same ``dot_*`` settings dots use.
+    """
+    row = conn.execute("SELECT * FROM tracker_configs WHERE id = ?", (config_id,)).fetchone()
+    changes: dict[str, float | int] = {}
+    if candidates is not None:
+        changes["kp_candidates_enabled"] = int(candidates)
+    if strict_mask:
+        changes["dot_seg_mask_enabled"] = 1
+        changes["dot_seg_mask_min_tracklet_fraction"] = (
+            mask_min_fraction if mask_min_fraction is not None else row["dot_seg_mask_min_tracklet_fraction"] or 0.5)
+        if mask_window is not None:
+            changes["dot_seg_mask_tracklet_window"] = mask_window
+    if multi_view_agreement:
+        changes["dot_cross_view_corroboration_px"] = (
+            agreement_px if agreement_px is not None else row["dot_cross_view_corroboration_px"] or 12.0)
+        changes["dot_corroboration_gate_multiplier"] = (
+            agreement_factor if agreement_factor is not None else row["dot_corroboration_gate_multiplier"] or 4.0)
+    if changes:
+        with conn:
+            conn.execute(
+                f"UPDATE tracker_configs SET {', '.join(f'{c} = ?' for c in changes)} WHERE id = ?",
+                (*changes.values(), config_id))
+
+
 # ---------------------------------------------------------------------------
 # track run
 # ---------------------------------------------------------------------------
@@ -239,6 +279,13 @@ def _copy_remaining_config_columns(
 @click.option("--dot-detection-run", "dot_detection_run", default=None, help="Detection run (prefix accepted) whose dot tracklet ids the decisions below refer to; needed with --dot-edits-trial or --dot-proposals.")
 @click.option("--dot-edits-trial", "dot_edits_trial", default=None, help="Trial ID (prefix accepted) whose dot-assignment review decisions (assign / forbid / reject / other, from the review tool) the tracker follows for whole dot tracklets.")
 @click.option("--dot-proposals", "dot_proposals", is_flag=True, default=False, help="Also use the newest automatic dot-to-slot proposals of --dot-detection-run: a high-confidence proposal is followed like a review decision, any other makes its slot cheaper; a review decision overrides a proposal.")
+@click.option("--candidates/--no-candidates", "candidates", default=None, help="Take the sequence's keypoint candidates (detect run --candidates) instead of its fixed body observations for the markers bound to the pose model, choosing among them with the tracker's prediction. Default: the base config's setting, off if it has none. Hand stages keep their refined-hand observations.")
+@click.option("--strict-mask", "strict_mask", is_flag=True, default=False, help="Use a candidate or dot only if its tracklet lies on the tracked subject's own mask for enough of the recent steps (needs --seg-run).")
+@click.option("--mask-min-fraction", "mask_min_fraction", default=None, type=float, help="With --strict-mask: smallest share of recent steps a tracklet must lie on the subject's mask. Default: the base config's, else 0.5.")
+@click.option("--mask-window", "mask_window", default=None, type=int, help="With --strict-mask: number of recent steps the share is taken over. Default: the base config's, else 60.")
+@click.option("--multi-view-agreement", "multi_view_agreement", is_flag=True, default=False, help="Prefer a candidate when another camera's candidate for the same marker lies on its epipolar line.")
+@click.option("--agreement-px", "agreement_px", default=None, type=float, help="With --multi-view-agreement: epipolar tolerance (px). Default: the base config's, else 12.")
+@click.option("--agreement-factor", "agreement_factor", default=None, type=float, help="With --multi-view-agreement: factor the cost of an agreeing candidate is divided by. Default: the base config's, else 4.")
 # Config parameter overrides
 @click.option("--process-noise-std", default=None, type=float, help="Process noise std (rad/s²). Default 0.1.")
 @click.option("--process-vel-noise-std", default=None, type=float, help="Velocity process noise std. Default 0.5.")
@@ -271,6 +318,13 @@ def cmd_run(
     dot_detection_run: str | None,
     dot_edits_trial: str | None,
     dot_proposals: bool,
+    candidates: bool | None,
+    strict_mask: bool,
+    mask_min_fraction: float | None,
+    mask_window: int | None,
+    multi_view_agreement: bool,
+    agreement_px: float | None,
+    agreement_factor: float | None,
     process_noise_std: float | None,
     process_vel_noise_std: float | None,
     vel_half_life: float | None,
@@ -368,6 +422,17 @@ def cmd_run(
         )
     except ValueError as exc:
         fail(str(exc))
+
+    if strict_mask and seg_run is None:
+        fail("--strict-mask needs --seg-run: the masks of the segmentation to hold the tracklets against.")
+    if (mask_min_fraction is not None or mask_window is not None) and not strict_mask:
+        fail("--mask-min-fraction and --mask-window need --strict-mask.")
+    if (agreement_px is not None or agreement_factor is not None) and not multi_view_agreement:
+        fail("--agreement-px and --agreement-factor need --multi-view-agreement.")
+    _apply_assignment_options(
+        conn, config_id, candidates=candidates, strict_mask=strict_mask, mask_min_fraction=mask_min_fraction,
+        mask_window=mask_window, multi_view_agreement=multi_view_agreement, agreement_px=agreement_px,
+        agreement_factor=agreement_factor)
 
     # Default output dir
     if output_dir:

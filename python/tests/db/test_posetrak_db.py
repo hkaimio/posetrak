@@ -1197,6 +1197,23 @@ def test_migrate_adds_the_active_joint_groups_column() -> None:
         conn.close()
 
 
+def test_migrate_adds_the_kp_candidates_enabled_column() -> None:
+    """Registry v17->v18 and session v68->v69 add tracker_configs.kp_candidates_enabled, repeatably."""
+    import sqlite3
+
+    from posetrak.db.db import _migrate_registry_v17_to_v18, _migrate_session_v68_to_v69
+
+    for migrate, version in ((_migrate_registry_v17_to_v18, 18), (_migrate_session_v68_to_v69, 69)):
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE tracker_configs (id TEXT PRIMARY KEY)")
+        migrate(conn)
+        migrate(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tracker_configs)")}
+        assert "kp_candidates_enabled" in cols
+        assert get_schema_version(conn) == version
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # PRAGMA foreign_keys
 # ---------------------------------------------------------------------------

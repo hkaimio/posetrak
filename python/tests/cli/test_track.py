@@ -978,3 +978,42 @@ def test_a_run_config_made_from_a_base_keeps_every_other_setting(tmp_path):
     assert row["dot_assignment_gate_mahalanobis"] == 12.5
     assert row["outlier_threshold"] == 9.0   # the CLI override still wins
     assert row["parent_id"] == "base"
+
+
+def _config_with_options(tmp_path, base_columns="", **options):
+    from posetrak.cli.track import _apply_assignment_options, _build_run_config
+    from posetrak.db.db import create_session
+
+    conn = create_session(tmp_path / "s.db")
+    conn.execute("INSERT INTO tracker_configs (id, name, created_at) VALUES ('base', 'b', '2026-01-01')")
+    if base_columns:
+        conn.execute(f"UPDATE tracker_configs SET {base_columns} WHERE id = 'base'")
+    new_id = _build_run_config(
+        conn, base_config_id="base", process_noise_std=None, process_noise_vel_std=None,
+        velocity_half_life_s=None, measurement_noise_std=None, pose_noise_std=None, outlier_threshold=None,
+        tracker_fps=None, use_relative_obs=False, relative_min_conf=None, cross_pair_radius=None,
+        cross_pair_max_n=None, velocity_cam_labels=None, sequence_cameras=[])
+    defaults = dict(candidates=None, strict_mask=False, mask_min_fraction=None, mask_window=None,
+                    multi_view_agreement=False, agreement_px=None, agreement_factor=None)
+    _apply_assignment_options(conn, new_id, **{**defaults, **options})
+    return conn.execute("SELECT * FROM tracker_configs WHERE id = ?", (new_id,)).fetchone()
+
+
+def test_candidates_option_sets_only_the_candidate_column(tmp_path):
+    row = _config_with_options(tmp_path, candidates=True)
+    assert row["kp_candidates_enabled"] == 1
+    assert row["dot_seg_mask_enabled"] is None and row["dot_cross_view_corroboration_px"] is None
+    (tmp_path / "off").mkdir()
+    assert _config_with_options(tmp_path / "off", candidates=False)["kp_candidates_enabled"] == 0
+
+
+def test_no_option_leaves_the_base_configs_candidate_setting(tmp_path):
+    assert _config_with_options(tmp_path, "kp_candidates_enabled = 1")["kp_candidates_enabled"] == 1
+
+
+def test_strict_mask_and_agreement_set_their_own_settings_with_base_values_kept(tmp_path):
+    row = _config_with_options(tmp_path, "dot_cross_view_corroboration_px = 20.0",
+                               strict_mask=True, multi_view_agreement=True, agreement_factor=2.5)
+    assert (row["dot_seg_mask_enabled"], row["dot_seg_mask_min_tracklet_fraction"]) == (1, 0.5)
+    assert (row["dot_cross_view_corroboration_px"], row["dot_corroboration_gate_multiplier"]) == (20.0, 2.5)
+    assert row["kp_candidates_enabled"] is None

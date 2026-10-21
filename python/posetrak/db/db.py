@@ -27,12 +27,12 @@ _log = logging.getLogger(__name__)
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 17
+REGISTRY_SCHEMA_VERSION: Final[int] = 18
 
 #: Seconds a connection waits for another writer's lock before failing. The C++
 #: tracker's connections use the same value.
 BUSY_TIMEOUT_S: Final[float] = 60.0
-SESSION_SCHEMA_VERSION: Final[int] = 68
+SESSION_SCHEMA_VERSION: Final[int] = 69
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -346,6 +346,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 16
     if actual == 16:
         _migrate_registry_v16_to_v17(conn)
+        actual = 17
+    if actual == 17:
+        _migrate_registry_v17_to_v18(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -819,6 +822,18 @@ def _migrate_registry_v16_to_v17(conn: sqlite3.Connection) -> None:
     if "active_joint_groups" not in _tracker_config_columns(conn):
         conn.execute("ALTER TABLE tracker_configs ADD COLUMN active_joint_groups TEXT")
     _set_schema_version(conn, 17)
+    conn.commit()
+
+
+def _migrate_registry_v17_to_v18(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 17 to 18.
+
+    v18 adds tracker_configs.kp_candidates_enabled, mirroring the session schema
+    v68->v69 change -- see _migrate_session_v68_to_v69.
+    """
+    if "kp_candidates_enabled" not in _tracker_config_columns(conn):
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN kp_candidates_enabled INTEGER")
+    _set_schema_version(conn, 18)
     conn.commit()
 
 
@@ -2172,6 +2187,20 @@ def _migrate_session_v67_to_v68(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def _migrate_session_v68_to_v69(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 68 to 69.
+
+    v69 adds tracker_configs.kp_candidates_enabled: whether a tracking run takes the keypoint candidates of its
+    sequence (pose_observations rows with source 'kp_candidates') instead of the fixed body observations for the
+    markers bound to that pose model. NULL keeps the previous behaviour, the fixed observations. Mirrors the
+    registry schema v17->v18 change, since every session embeds a copy of tracker_configs.
+    """
+    if "kp_candidates_enabled" not in _tracker_config_columns(conn):
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN kp_candidates_enabled INTEGER")
+    _set_schema_version(conn, 69)
+    conn.commit()
+
+
 def _split_statements(sql: str) -> list[str]:
     """Split a migration script into complete statements (triggers keep their ``;`` inside BEGIN..END)."""
     out, buf = [], ""
@@ -2548,6 +2577,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 67
     if actual == 67:
         _migrate_session_v67_to_v68(conn)
+        actual = 68
+    if actual == 68:
+        _migrate_session_v68_to_v69(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

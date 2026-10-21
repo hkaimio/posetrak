@@ -248,7 +248,13 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     -- restriction the parent stage tracks the whole skeleton and the child stages run in
     -- addition. An explicit --joint-groups on the tracker command line overrides this column.
     -- See docs/roadmap/features/tracker-performance/tracker-performance-design.md.
-    active_joint_groups               TEXT     -- JSON array of skeleton group names, e.g. ["main"]; NULL/[] = the whole skeleton
+    active_joint_groups               TEXT,    -- JSON array of skeleton group names, e.g. ["main"]; NULL/[] = the whole skeleton
+    -- Added in schema migration v69 (session)/v18 (registry): keypoint candidates. 1 = the tracker takes the
+    -- sequence's keypoint candidates (pose_observations source 'kp_candidates') through the shared assignment
+    -- instead of the fixed body observations, for the markers bound to that pose model (the hand stages keep
+    -- their refined-hand observations). Gate, tracklet, corroboration and mask behaviour are the dot_* settings
+    -- above. See docs/roadmap/features/keypoint-candidates/keypoint-candidates-design.md.
+    kp_candidates_enabled             INTEGER  -- 0/1 flag; NULL/0 = the fixed observations are used even if the sequence holds candidates
 );
 
 -- Added in schema migration v37: hierarchical body/hand solver -- per-stage

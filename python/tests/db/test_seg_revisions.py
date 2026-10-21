@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from posetrak.db import seg_revisions as sr
-from posetrak.db.db import create_session, get_schema_version, open_session
+from posetrak.db.db import SESSION_SCHEMA_VERSION, create_session, get_schema_version, open_session
 
 RUN, VID = "run-1", "vid-1"
 
@@ -114,7 +114,7 @@ def test_migration_from_67_keeps_every_blob(tmp_path: Path) -> None:
     c.close()
 
     m = open_session(path)
-    assert get_schema_version(m) == 68
+    assert get_schema_version(m) == SESSION_SCHEMA_VERSION
     assert {run: digest(m, run) for run in "ab"} == want
     assert m.execute("SELECT COUNT(*) FROM seg_masks WHERE revision = 0").fetchone()[0] == 6
     assert m.execute("SELECT COUNT(*) FROM seg_mask_revisions WHERE revision = 0 AND closed_at IS NOT NULL").fetchone()[0] == 2

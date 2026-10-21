@@ -121,6 +121,38 @@ def _from_database(conn: sqlite3.Connection, run_id: str, track_ids, sync) -> Ca
     return cand
 
 
+def reproduction(reference: Candidates, other: Candidates, camera_map: dict[int, int], tol_px: float, *,
+                 frames: set[tuple[int, int]] | None = None) -> dict[str, float]:
+    """Share of the *reference* candidates that *other* reproduces within *tol_px*, and the reverse share.
+
+    A candidate is reproduced when *other* has a candidate of the same keypoint, camera and frame that close.
+    ``camera_map`` maps a reference camera index to the other's; only frames present in both are compared
+    (``frames`` restricts them further to (reference camera, frame) pairs). Returns the two shares and the
+    counts compared.
+    """
+    from scipy.spatial import cKDTree
+
+    other_cam = {v: k for k, v in camera_map.items()}
+    ref_frames = {(int(c), int(f)) for c, f in zip(reference.camera, reference.frame)}
+    oth_frames = {(other_cam[int(c)], int(f)) for c, f in zip(other.camera, other.frame) if int(c) in other_cam}
+    common = ref_frames & oth_frames if frames is None else ref_frames & oth_frames & frames
+
+    def points(c: Candidates, cams: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        keep = np.array([(int(a), int(b)) in common for a, b in zip(cams, c.frame)], bool)
+        key = (cams[keep].astype(np.int64) * 1_000_000 + c.frame[keep]) * 100 + c.keypoint[keep]
+        return np.column_stack([key * 1000.0, c.x[keep], c.y[keep]]), keep
+
+    ref_pts, ref_keep = points(reference, reference.camera.astype(np.int64))
+    oth_cams = np.array([other_cam.get(int(c), -1) for c in other.camera], np.int64)
+    oth_pts, _ = points(other, oth_cams)
+    if not len(ref_pts) or not len(oth_pts):
+        return {"reference_reproduced": float("nan"), "other_reproduced": float("nan"), "n_reference": 0, "n_other": 0}
+    d_ref = cKDTree(oth_pts).query(ref_pts)[0]
+    d_oth = cKDTree(ref_pts).query(oth_pts)[0]
+    return {"reference_reproduced": float((d_ref <= tol_px).mean()), "other_reproduced": float((d_oth <= tol_px).mean()),
+            "n_reference": int(len(ref_pts)), "n_other": int(len(oth_pts))}
+
+
 def read_candidates(source, *, run_id: str | None = None, track_ids=None, sync=None) -> Candidates:
     """Read keypoint candidates from one source.
 

@@ -475,6 +475,27 @@ def test_finalise_writes_the_soma_body_manifest_and_replaces_it_on_refinalising(
     assert len(_manifest(session, second)["body"]) == 77
 
 
+def test_finalise_scales_the_candidate_peaks_like_the_body_confidence(session):
+    from posetrak.detection.kp_candidates import decode_kp_candidates_blob, encode_kp_candidates_blob
+
+    blob = encode_kp_candidates_blob([0, 0], [1.0, 2.0], [3.0, 4.0], [0.5, 0.25], [0, 1], [5, 6])
+    for region, data in (("full_body", _kp(0.5, 77)), ("kp_candidates", blob)):
+        session.execute(
+            "INSERT INTO detection_keypoints"
+            " (detection_run_id, shot_video_id, video_frame, track_id, region_type, keypoints, noise_scale)"
+            " VALUES ('run1', ?, 0, 1, ?, ?, 0.5)", (_SVID, region, data))
+    session.commit()
+    seq_id = finalise_to_db(
+        session, detection_run_id="run1", shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
+        assignments=[TrackAssignment(_SVID, 1, "alice", 0, 0)], pose_model="soma77-vitpose-h", confidence_scale=5.0)[0]
+    rows = {r["source"]: bytes(r["kp_blob"]) for r in session.execute(
+        "SELECT source, kp_blob FROM pose_observations WHERE sequence_id = ?", (seq_id,))}
+    table = decode_kp_candidates_blob(rows["kp_candidates"])
+    np.testing.assert_allclose(table[:, 3], [2.5, 1.25])
+    np.testing.assert_array_equal(table[:, [0, 1, 2, 4, 5]], decode_kp_candidates_blob(blob)[:, [0, 1, 2, 4, 5]])
+    np.testing.assert_allclose(np.frombuffer(rows["body"], np.float32).reshape(-1, 3)[0, 2], 2.5)
+
+
 def test_finalise_copies_candidate_rows_with_the_body_manifest(session):
     from posetrak.detection.kp_candidates import encode_kp_candidates_blob
 

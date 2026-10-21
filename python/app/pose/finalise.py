@@ -38,6 +38,16 @@ def _scale_kp_confidence(kp_blob: bytes, scale: float) -> bytes:
     return arr.tobytes()
 
 
+def _scale_candidate_peaks(blob: bytes, scale: float) -> bytes:
+    """Multiply the peak column of a ``kp_candidates`` blob by *scale* (the confidence scale of the body row)."""
+    from posetrak.detection.kp_candidates import decode_kp_candidates_blob
+
+    n, n_fields = np.frombuffer(blob, "<i4", 2)
+    table = decode_kp_candidates_blob(blob).copy()
+    table[:, 3] *= scale
+    return np.array([n, n_fields], "<i4").tobytes() + table.astype("<f4").tobytes()
+
+
 #: SOMA-77 outputs heatmap peaks (0-1), like ViTPose, and takes ViTPose's scale into the tracker's noise range.
 SOMA77_CONF_SCALE = 5.0
 
@@ -257,6 +267,10 @@ def finalise_to_db(
                 # carry a hand-model-appropriate scale from hand_refinement.py.
                 if source == "body" and confidence_scale != 1.0:
                     kp_blob = _scale_kp_confidence(kp_blob, confidence_scale)
+                elif source == "kp_candidates" and confidence_scale != 1.0:
+                    # The peak of a candidate is its confidence: same scale as the body row's, so a
+                    # candidate has the measurement noise the fixed observation of that keypoint has.
+                    kp_blob = _scale_candidate_peaks(kp_blob, confidence_scale)
                 obs_by_key[(camera_instance_id, frame_idx, source)] = (
                     seq_id, camera_instance_id, frame_idx,
                     timestamp_s, 0,  # person_id=0, single person per sequence

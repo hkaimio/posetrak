@@ -286,7 +286,8 @@ CREATE TABLE IF NOT EXISTS sequence_persons (
 -- source: 'body' | 'hand_l' | 'hand_r' | 'kp_candidates' — matches detection_keypoints.region_type's
 --   spelling ('full_body' rows become source='body' here). 'kp_candidates' rows hold the several heatmap maxima
 --   per keypoint of a candidate detection run (blob: int32 n, int32 n_fields, float32[n, n_fields] with
---   keypoint_idx, x, y, peak, rank, tracklet_id; not the [n_keypoints, 3] layout above), their keypoint_idx
+--   keypoint_idx, x, y, peak, rank, tracklet_id; not the [n_keypoints, 3] layout above; peak times the pose model's
+--   confidence scale, like the confidence of the body row), their keypoint_idx
 --   named by the sequence's pose_sequence_keypoints rows with obs_source 'kp_candidates'. Multiple sources can
 --   coexist for the same (sequence, camera, frame, person); the C++ loader merges
 --   them into one dense per-marker array, each source keeping its own noise_scale.

@@ -283,8 +283,11 @@ CREATE TABLE IF NOT EXISTS sequence_persons (
 -- kp_blob: little-endian float32 array shaped [n_keypoints, 3] (x, y, confidence)
 -- camera_instance_id -- references registry: camera_instances(id)
 -- noise_scale: measurement noise scale factor (bbox_w / pose_input_width)
--- source: 'body' | 'hand_l' | 'hand_r' — matches detection_keypoints.region_type's
---   spelling ('full_body' rows become source='body' here). Multiple sources can
+-- source: 'body' | 'hand_l' | 'hand_r' | 'kp_candidates' — matches detection_keypoints.region_type's
+--   spelling ('full_body' rows become source='body' here). 'kp_candidates' rows hold the several heatmap maxima
+--   per keypoint of a candidate detection run (blob: int32 n, int32 n_fields, float32[n, n_fields] with
+--   keypoint_idx, x, y, peak, rank, tracklet_id; not the [n_keypoints, 3] layout above), their keypoint_idx
+--   named by the sequence's pose_sequence_keypoints rows with obs_source 'kp_candidates'. Multiple sources can
 --   coexist for the same (sequence, camera, frame, person); the C++ loader merges
 --   them into one dense per-marker array, each source keeping its own noise_scale.
 -- detection_run_id: the detection run that produced this row. Usually matches the
@@ -327,7 +330,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS pose_observation_edits_unique
 CREATE TABLE IF NOT EXISTS pose_sequence_keypoints (
     -- the sequence the slot belongs to: pose_observation_sequences.id
     sequence_id   TEXT NOT NULL REFERENCES pose_observation_sequences(id),
-    -- the pose_observations.source whose kp_blob the row indexes: 'body', 'hand_l' or 'hand_r' (the '.refined' variant
+    -- the pose_observations.source whose kp_blob the row indexes: 'body', 'hand_l', 'hand_r' or 'kp_candidates' (the
+    -- keypoint_idx column of a candidate blob; same names as the sequence's 'body' rows) (the '.refined' variant
     -- of a hand source uses its plain source's rows). 'body' also stands for the primary row of a sequence that has no
     -- body, such as the 'markers' row of an object sequence.
     obs_source    TEXT NOT NULL DEFAULT 'body',
@@ -656,7 +660,11 @@ CREATE TABLE IF NOT EXISTS detection_runs (
 );
 
 -- Raw keypoints produced by pose estimation, keyed by detection run.
--- keypoints: float32 blob shaped [n_kp, 3] (x, y, confidence) in distorted px.
+-- keypoints: float32 blob shaped [n_kp, 3] (x, y, confidence) in distorted px; for region_type 'kp_candidates'
+--   the candidate blob instead (int32 n, int32 n_fields = 6, float32[n, 6]: keypoint_idx, x, y, peak, rank,
+--   tracklet_id; x, y in distorted px, rank 0 = strongest maximum of the keypoint, tracklet_id -1 = unlinked and
+--   unique per (detection run, camera) otherwise), written by detection runs made with candidates.
+-- region_type: 'full_body' | 'hand_l' | 'hand_r' | 'kp_candidates' | 'dots' | 'markers'.
 -- noise_scale: bbox_w / pose_input_width, used when converting to pose_observations.
 CREATE TABLE IF NOT EXISTS detection_keypoints (
     detection_run_id    TEXT NOT NULL REFERENCES detection_runs(id),

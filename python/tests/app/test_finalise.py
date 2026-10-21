@@ -473,3 +473,33 @@ def test_finalise_writes_the_soma_body_manifest_and_replaces_it_on_refinalising(
     second = _finalise_with_hands(session, "soma77-dinov3-vitpose", 77)
     assert session.execute("SELECT COUNT(*) FROM pose_sequence_keypoints WHERE sequence_id = ?", (seq_id,)).fetchone()[0] == 0
     assert len(_manifest(session, second)["body"]) == 77
+
+
+def test_finalise_copies_candidate_rows_with_the_body_manifest(session):
+    from posetrak.detection.kp_candidates import encode_kp_candidates_blob
+
+    blob = encode_kp_candidates_blob([0, 0], [1.0, 2.0], [3.0, 4.0], [0.9, 0.2], [0, 1], [5, 6])
+    for region, data in (("full_body", _kp(1.0, 77)), ("kp_candidates", blob)):
+        session.execute(
+            "INSERT INTO detection_keypoints"
+            " (detection_run_id, shot_video_id, video_frame, track_id, region_type, keypoints, noise_scale)"
+            " VALUES ('run1', ?, 0, 1, ?, ?, 0.5)", (_SVID, region, data))
+    session.commit()
+    seq_id = finalise_to_db(
+        session, detection_run_id="run1", shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
+        assignments=[TrackAssignment(_SVID, 1, "alice", 0, 0)], pose_model="soma77-vitpose-h")[0]
+
+    rows = {r["source"]: r for r in session.execute(
+        "SELECT source, kp_blob, noise_scale FROM pose_observations WHERE sequence_id = ?", (seq_id,))}
+    assert set(rows) == {"body", "kp_candidates"}
+    assert bytes(rows["kp_candidates"]["kp_blob"]) == blob            # copied as it is, not confidence-scaled
+    assert rows["kp_candidates"]["noise_scale"] == pytest.approx(0.5)
+    names = {src: {r[0]: r[1] for r in session.execute(
+        "SELECT keypoint_idx, name FROM pose_sequence_keypoints WHERE sequence_id = ? AND obs_source = ?",
+        (seq_id, src))} for src in ("body", "kp_candidates")}
+    assert len(names["kp_candidates"]) == 77 and names["kp_candidates"] == names["body"]
+
+    from app.pose.db_cache import read_observations_with_edits
+
+    merged = read_observations_with_edits(session, seq_id, _CAM_ID)    # readers of keypoint blobs skip the candidates
+    assert set(merged) == {0}

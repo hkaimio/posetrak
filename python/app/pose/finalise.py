@@ -71,6 +71,8 @@ def _write_manifest(
     layout stays the implied one) and each refined-hand source the hand21 names of its side.
     """
     rows = [(sequence_id, "body", idx, name, source) for idx, name, source in body_manifest(pose_model)]
+    if "kp_candidates" in obs_sources:      # the candidates index the same keypoints as the body row
+        rows += [(sequence_id, "kp_candidates", idx, name, source) for idx, name, source in body_manifest(pose_model)]
     for obs_source in sorted(obs_sources & {"hand_l", "hand_r"}):
         rows += [(sequence_id, obs_source, idx, name, source) for idx, name, source in hand_manifest(obs_source)]
     session.executemany(
@@ -234,7 +236,7 @@ def finalise_to_db(
                 "FROM detection_keypoints "
                 "WHERE detection_run_id=? AND shot_video_id=? AND track_id=? "
                 "AND video_frame BETWEEN ? AND ? "
-                "AND region_type IN ('full_body','hand_l','hand_r') "
+                "AND region_type IN ('full_body','hand_l','hand_r','kp_candidates') "
                 "ORDER BY video_frame",
                 (detection_run_id, asgn.shot_video_id, asgn.track_id,
                  asgn.first_frame, asgn.last_frame),
@@ -246,7 +248,7 @@ def finalise_to_db(
                 if timestamp_s is None:
                     continue
                 # detection_keypoints.region_type='full_body' becomes
-                # pose_observations.source='body'; hand_l/hand_r pass through
+                # pose_observations.source='body'; hand_l/hand_r and kp_candidates pass through
                 # unchanged (same spelling, both enums already agree).
                 source = "body" if kp_row["region_type"] == "full_body" else kp_row["region_type"]
                 kp_blob = bytes(kp_row["keypoints"])

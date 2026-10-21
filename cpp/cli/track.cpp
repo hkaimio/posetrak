@@ -1074,7 +1074,7 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
             // step -- every other step (including every step of a dot-free
             // sequence, e.g. the sword's own ArUco corners) keeps calling the
             // untouched step_person_context() below.
-            if (ctx->has_dot_track) {
+            if (ctx->uses_candidate_assignment()) {
                 using Clock = std::chrono::steady_clock;
                 using Ms = std::chrono::duration<double, std::milli>;
 
@@ -1085,8 +1085,8 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                 frame_step_profile::add_bucket_candidates_ms(Ms(Clock::now() - t_bucket0).count());
                 if (!candidates_by_camera.empty()) {
                     step_person_context_predict(*ctx, step);
-                    std::vector<DotAssignmentSubject> subjects = {
-                        DotAssignmentSubject{0, ctx->tracker.get(), seg_mask_subject_config}};
+                    std::vector<DotAssignmentSubject> subjects = {DotAssignmentSubject{
+                        0, ctx->tracker.get(), seg_mask_subject_config, ctx->kp_marker_keypoint}};
                     double const t_effective = t_start + ctx->dt / 2.0;
                     auto const t_assign0 = Clock::now();
                     // AssignmentTrace::wants() gates on frame_idx (== step here), so this

@@ -23,6 +23,32 @@ fixing it, without re-capturing.
   `docs/per-frame-measurement-noise-design.md` for the underlying design
   if you need to go deeper before this section is written.)*
 
+## Choosing among keypoint candidates
+
+A sequence made from a detection run with *Keypoint candidates* (see
+[Analyzing poses](analyzing-poses.md)) holds several maxima per keypoint. By default the tracker uses the
+strongest one, as always. `posetrak track run ... --candidates` makes it choose, per camera and step,
+among the candidates of each body keypoint, by how well they fit its prediction (the same assignment that
+chooses among reflective dots, restricted to the keypoint's own candidates). Hands keep their refined-hand
+keypoints, and the first frame still starts from the strongest maxima. Two options change the choice, each
+independently of the other:
+
+- `--strict-mask` (needs `--seg-run`): a candidate is used only while its tracklet lies on the tracked
+  person's own mask; `--mask-min-fraction` and `--mask-window` set how much and over how many steps.
+  It helps where one person is often hidden behind another, and costs the correct candidates of joints
+  that really are under the other person's mask.
+- `--multi-view-agreement`: a candidate is preferred when another camera's candidate for the same keypoint
+  lies on its epipolar line (`--agreement-px`, `--agreement-factor`).
+
+The settings are recorded with the run (`kp_candidates_enabled` and the `dot_*` columns of its tracker
+config), so two runs on one sequence differ in their configuration only. **Cost.** The shared assignment takes about 14 ms
+per step for 90 candidates per camera and person, a 4-10% longer run, and the memory is the same to 1%; the mask
+option adds another 20-25% (it decodes a mask per camera and step).
+
+The choice is made per step from the tracker's prediction. On the multi-person evaluation trial it was not better
+than the strongest keypoint by itself (the two options each helped); the measurements are in section 9 of the
+keypoint candidates design (`docs/roadmap/features/keypoint-candidates/`), so try it on your footage before relying on it.
+
 ## Diagnosing a run (MCP diagnostic server)
 
 - For tracking runs with a session database, `python/app/mcp/` exposes a

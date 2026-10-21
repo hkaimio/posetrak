@@ -327,11 +327,49 @@ a unit.  Tools that write paths should prefer relative paths when the file is un
 project root; tools that read paths must resolve against the registry's `project_root`
 when the path is not absolute.
 
+### Detection regions and observation sources
+
+`detection_keypoints.region_type` names what a row holds; finalisation copies the rows of the
+tracks assigned to a person into `pose_observations` with the source below.  Every row is
+keyed by (detection run, video, frame, track, region type).
+
+| `region_type` | `pose_observations.source` | Blob | Written by |
+|---|---|---|---|
+| `full_body` | `body` | `float32[n_kp, 3]`: x, y, confidence (distorted pixels) | every pose detection run |
+| `hand_l`, `hand_r` | same | `float32[21, 3]`, refined hand keypoints | detection runs with hand refinement |
+| `kp_candidates` | `kp_candidates` | candidate blob (below) | SOMA-77 runs made with candidates |
+| `dots` | `dots` | dot candidate blob, `int32 n` then `float32[n, 9]` | dot detection runs |
+| `markers` | `markers` | `float32[n, 3]` marker corners | coded-marker (ArUco) runs |
+
+**Keypoint candidates.** A heatmap model has several local maxima per keypoint. A run made with
+`detect run --candidates` (or the "Keypoint candidates" box of the pose extraction panel; SOMA-77
+only, recorded as `detection_runs.config_json.candidates`) stores up to six per keypoint next to the
+ordinary row, which keeps the strongest. One `kp_candidates` row per (run, video, frame, track):
+
+```
+int32 n, int32 n_fields (= 6), then float32[n, n_fields] little endian:
+keypoint_idx, x, y, peak, rank, tracklet_id
+```
+
+`x, y` are distorted pixels, `peak` the heatmap value, `rank` 0 the strongest maximum of the keypoint,
+`tracklet_id` the causal constant-velocity tracklet the maximum was linked to (-1 unlinked), unique
+per (detection run, camera) across keypoints and tracks. The row's `noise_scale` is the one of the
+person's body row. A reader takes the first six fields and ignores any more, so fields can be
+appended. The maxima come from the flip-averaged heatmap before the person-mask gate, so the mask
+does not remove the alternatives a tracker may need. Writer and reader in Python:
+`posetrak.detection.kp_candidates`; reader in C++: `db::decode_kp_candidates` (`blob_codec.hpp`);
+both are tested against the same bytes. There is no tracklet table; extents and statistics are
+computed from the rows. Finalisation multiplies `peak` by the pose model's confidence scale (the same factor as the confidence of the `body` row), so that the tracker's measurement noise of a candidate is that of the fixed observation of its keypoint. A refreshed run (`detect stale --refresh`) keeps the candidate rows of the
+frames it copies and links the frames it re-runs after them.
+
+A tracking run uses the candidates when `tracker_configs.kp_candidates_enabled` is 1 (`track run
+--candidates`); with 0 the sequence's fixed `body` observations are used even if it holds candidates.
+
 ### Pose blob extensibility: the keypoint manifest
 A `PoseObservation.kp_blob` has its keypoint count and ordering named by a per-source
 manifest, so the blob is indexed by `keypoint_idx` and the name of the slot rather than by
 model convention.  The manifest is kept per observation source of the sequence (`body`,
-`hand_l`, `hand_r`), because the rows of one sequence come from different keypoint
+`hand_l`, `hand_r`, `kp_candidates`), because the rows of one sequence come from different keypoint
 vocabularies:
 
 ```sql
@@ -356,7 +394,8 @@ skeleton marker whose `Marker::landmark` equals the row's `name` (a name without
 prefix also matches `<source>:<name>`), and only those; the implied COCO map is used only
 for a source without rows.  A COCO-133 or hand21 slot is also bound to the marker whose
 `openpose_keypoint` is its COCO-133 index, so skeletons with `openpose_keypoint` markers and
-no landmarks keep working.  The per-frame blob is sized as `max(keypoint_idx) + 1` rather
+no landmarks keep working.  The `kp_candidates` source (below) has the same names as the
+`body` source of its sequence.  The per-frame blob is sized as `max(keypoint_idx) + 1` rather
 than by how many slots happened to match.  A skeleton that binds no slot of a manifest
 fails the run with a message naming the pose model.  Hand rows are laid over the COCO hand
 slots of a COCO-133-wide body row (`posetrak.db.observation_merge`); after a narrower body

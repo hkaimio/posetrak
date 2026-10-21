@@ -290,6 +290,15 @@ Stage 0 is measurement only and comes first because several later scopes depend 
 - **Risks:** per-step cost of the shared assignment with about 150 candidates per person and camera
   (the dot phase was tuned for a few dozen); measured in the acceptance run, with the class
   restriction pruning the cost matrix per keypoint.
+- **Outcome:** built (session schema 69, registry 18): `detect run --candidates`, finalisation, loader, merge,
+  `KeypointClassModifier`, `track run --candidates / --strict-mask / --multi-view-agreement`. Candidates off give
+  a result identical to a sequence without candidates, and the extracted candidates equal the prototype's
+  on the same crops. **The accuracy bar is not met**: the tracker's per-step choice with candidates is 18.7 / 7.6 cm
+  on range 3 against 10.2 / 3.4 for the prototype's offline cross-camera choice (bar 10.7 / 3.9) and not better
+  than the strongest maxima (18.0 / 5.3); strict mask adherence (14.6 / 7.9) and multi-view agreement (14.4 / 6.9)
+  each help. The cost is +4-10% tracking time, +16% detection time and +26% stored detection rows; the shared
+  assignment takes 14 ms per step. The `suggest` rule from an automatic grouped choice is the open decision;
+  figures and the like-for-like check in the design §9. Candidates are off by default and stay so.
 
 ### Stage 10 — Tracklet editing, first stage
 

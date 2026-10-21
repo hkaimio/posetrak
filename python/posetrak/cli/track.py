@@ -228,6 +228,8 @@ def _apply_assignment_options(
     multi_view_agreement: bool,
     agreement_px: float | None,
     agreement_factor: float | None,
+    kp_peak_weight: float | None = None,
+    kp_tracklet_multiplier: float | None = None,
 ) -> None:
     """Set the keypoint-candidate and candidate-assignment settings a ``track run`` option names on the run's config.
 
@@ -239,6 +241,10 @@ def _apply_assignment_options(
     changes: dict[str, float | int] = {}
     if candidates is not None:
         changes["kp_candidates_enabled"] = int(candidates)
+    if kp_peak_weight is not None:
+        changes["kp_candidate_peak_weight"] = kp_peak_weight
+    if kp_tracklet_multiplier is not None:
+        changes["kp_candidate_tracklet_multiplier"] = kp_tracklet_multiplier
     if strict_mask:
         changes["dot_seg_mask_enabled"] = 1
         changes["dot_seg_mask_min_tracklet_fraction"] = (
@@ -280,6 +286,8 @@ def _apply_assignment_options(
 @click.option("--dot-edits-trial", "dot_edits_trial", default=None, help="Trial ID (prefix accepted) whose dot-assignment review decisions (assign / forbid / reject / other, from the review tool) the tracker follows for whole dot tracklets.")
 @click.option("--dot-proposals", "dot_proposals", is_flag=True, default=False, help="Also use the newest automatic dot-to-slot proposals of --dot-detection-run: a high-confidence proposal is followed like a review decision, any other makes its slot cheaper; a review decision overrides a proposal.")
 @click.option("--candidates/--no-candidates", "candidates", default=None, help="Take the sequence's keypoint candidates (detect run --candidates) instead of its fixed body observations for the markers bound to the pose model, choosing among them with the tracker's prediction. Default: the base config's setting, off if it has none. Hand stages keep their refined-hand observations.")
+@click.option("--kp-peak-weight", "kp_peak_weight", default=None, type=float, help="Weight of ln(peak) in the assignment cost of a keypoint candidate (cost = distance^2 + ln det S - weight * ln(peak)). Default: the base config's, else 0.")
+@click.option("--kp-tracklet-multiplier", "kp_tracklet_multiplier", default=None, type=float, help="Divisor of the distance^2 of a keypoint candidate that continues the tracklet of the same marker's previous step. Default: the base config's, else 1 (off).")
 @click.option("--strict-mask", "strict_mask", is_flag=True, default=False, help="Use a candidate or dot only if its tracklet lies on the tracked subject's own mask for enough of the recent steps (needs --seg-run).")
 @click.option("--mask-min-fraction", "mask_min_fraction", default=None, type=float, help="With --strict-mask: smallest share of recent steps a tracklet must lie on the subject's mask. Default: the base config's, else 0.5.")
 @click.option("--mask-window", "mask_window", default=None, type=int, help="With --strict-mask: number of recent steps the share is taken over. Default: the base config's, else 60.")
@@ -319,6 +327,8 @@ def cmd_run(
     dot_edits_trial: str | None,
     dot_proposals: bool,
     candidates: bool | None,
+    kp_peak_weight: float | None,
+    kp_tracklet_multiplier: float | None,
     strict_mask: bool,
     mask_min_fraction: float | None,
     mask_window: int | None,
@@ -432,7 +442,7 @@ def cmd_run(
     _apply_assignment_options(
         conn, config_id, candidates=candidates, strict_mask=strict_mask, mask_min_fraction=mask_min_fraction,
         mask_window=mask_window, multi_view_agreement=multi_view_agreement, agreement_px=agreement_px,
-        agreement_factor=agreement_factor)
+        agreement_factor=agreement_factor, kp_peak_weight=kp_peak_weight, kp_tracklet_multiplier=kp_tracklet_multiplier)
 
     # Default output dir
     if output_dir:

@@ -224,7 +224,9 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
         "dot_seg_mask_cost_scale_at_zero_fraction,"
         "       COALESCE(dot_seg_mask_hard_distance_px, 0.0) AS dot_seg_mask_hard_distance_px,"
         "       active_joint_groups,"
-        "       COALESCE(kp_candidates_enabled, 0) AS kp_candidates_enabled"
+        "       COALESCE(kp_candidates_enabled, 0) AS kp_candidates_enabled,"
+        "       COALESCE(kp_candidate_peak_weight, 0.0) AS kp_candidate_peak_weight,"
+        "       COALESCE(kp_candidate_tracklet_multiplier, 1.0) AS kp_candidate_tracklet_multiplier"
         " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -265,7 +267,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //         65=dot_seg_mask_tracklet_window, 66=dot_seg_mask_min_tracklet_fraction,
     //         67=dot_seg_mask_cost_scale_at_zero_fraction,
     //         68=dot_seg_mask_hard_distance_px, 69=active_joint_groups,
-    //         70=kp_candidates_enabled
+    //         70=kp_candidates_enabled, 71=kp_candidate_peak_weight,
+    //         72=kp_candidate_tracklet_multiplier
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -487,6 +490,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     apply_real(68, out.tracker.dot_seg_mask_hard_distance_px);
 
     out.tracker.kp_candidates_enabled = sqlite3_column_int(stmt.ptr, 70) != 0;
+    apply_real(71, out.tracker.kp_candidate_peak_weight);
+    apply_real(72, out.tracker.kp_candidate_tracklet_multiplier);
 
     // active_joint_groups: stored as a JSON string array, e.g. ["main"]; NULL or [] tracks the
     // whole skeleton.

@@ -254,7 +254,14 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     -- instead of the fixed body observations, for the markers bound to that pose model (the hand stages keep
     -- their refined-hand observations). Gate, tracklet, corroboration and mask behaviour are the dot_* settings
     -- above. See docs/roadmap/features/keypoint-candidates/keypoint-candidates-design.md.
-    kp_candidates_enabled             INTEGER  -- 0/1 flag; NULL/0 = the fixed observations are used even if the sequence holds candidates
+    kp_candidates_enabled             INTEGER, -- 0/1 flag; NULL/0 = the fixed observations are used even if the sequence holds candidates
+    -- Weight of the peak term in the assignment cost of a keypoint candidate: cost = squared Mahalanobis distance
+    -- + ln det S - weight * ln(peak), S the slot covariance with the candidate's detection noise (the gate tests
+    -- the distance alone). NULL/0 = no peak term. Has no meaning for dots.
+    kp_candidate_peak_weight          REAL,
+    -- Divides the squared Mahalanobis distance of a keypoint candidate that continues the tracklet resolved into
+    -- the same camera and marker on the previous step (dot_tracklet_gate_multiplier is the dot's). NULL/1.0 = off.
+    kp_candidate_tracklet_multiplier  REAL
 );
 
 -- Added in schema migration v37: hierarchical body/hand solver -- per-stage

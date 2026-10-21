@@ -1209,7 +1209,7 @@ def test_migrate_adds_the_kp_candidates_enabled_column() -> None:
         migrate(conn)
         migrate(conn)
         cols = {r[1] for r in conn.execute("PRAGMA table_info(tracker_configs)")}
-        assert "kp_candidates_enabled" in cols
+        assert {"kp_candidates_enabled", "kp_candidate_peak_weight", "kp_candidate_tracklet_multiplier"} <= cols
         assert get_schema_version(conn) == version
         conn.close()
 

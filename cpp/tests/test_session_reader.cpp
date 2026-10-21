@@ -226,7 +226,9 @@ static void create_fixture_db() {
             dot_seg_mask_cost_scale_at_zero_fraction REAL,
             dot_seg_mask_hard_distance_px REAL,
             active_joint_groups TEXT,
-            kp_candidates_enabled INTEGER
+            kp_candidates_enabled INTEGER,
+            kp_candidate_peak_weight REAL,
+            kp_candidate_tracklet_multiplier REAL
         );
     )");
 
@@ -427,8 +429,9 @@ static void create_fixture_db() {
              "INSERT INTO tracker_configs (id,name,created_at,tracker_fps,active_joint_groups) "
              "VALUES ('tc_main','parent main','2024-01-01',120.0,'[\"main\"]');");
     exec_sql(db,
-             "INSERT INTO tracker_configs (id,name,created_at,tracker_fps,kp_candidates_enabled) "
-             "VALUES ('tc_kp','candidates','2024-01-01',120.0,1);");
+             "INSERT INTO tracker_configs (id,name,created_at,tracker_fps,kp_candidates_enabled,"
+             "kp_candidate_peak_weight,kp_candidate_tracklet_multiplier) "
+             "VALUES ('tc_kp','candidates','2024-01-01',120.0,1,1.5,3.0);");
 
     // Pose observation sequence
     exec_sql(db,
@@ -927,6 +930,13 @@ TEST_CASE("SessionReader load_tracker_config reads kp_candidates_enabled", "[ses
 
     REQUIRE_FALSE(reader.load_tracker_config("tc1").tracker.kp_candidates_enabled);
     REQUIRE(reader.load_tracker_config("tc_kp").tracker.kp_candidates_enabled);
+    // Not set: the cost without a peak term and without continuity.
+    REQUIRE(reader.load_tracker_config("tc1").tracker.kp_candidate_peak_weight == 0.0);
+    REQUIRE(reader.load_tracker_config("tc1").tracker.kp_candidate_tracklet_multiplier == 1.0);
+    REQUIRE(reader.load_tracker_config("tc_kp").tracker.kp_candidate_peak_weight ==
+            Catch::Approx(1.5));
+    REQUIRE(reader.load_tracker_config("tc_kp").tracker.kp_candidate_tracklet_multiplier ==
+            Catch::Approx(3.0));
 }
 
 TEST_CASE("SessionReader load_sequence_info", "[session_reader]") {

@@ -1775,7 +1775,7 @@ TEST_CASE(
     candidates[0] = {
         make_keypoint_candidate(0, 101.0, 200.0, 19, 0.8),  // nearer to marker 7, but keypoint 19
         make_keypoint_candidate(0, 108.0, 200.0, 14, 0.6),  // the weaker maximum of keypoint 14
-        make_keypoint_candidate(0, 103.5, 200.0, 19, 0.7),  // marker 8's best
+        make_keypoint_candidate(0, 103.5, 200.0, 19, 0.8),  // marker 8's best
     };
 
     auto result = resolve_dot_assignment({subject}, candidates, context);
@@ -1903,4 +1903,123 @@ TEST_CASE(
     auto same = resolve_dot_assignment({subject}, candidates, no_identity);
     REQUIRE(same.at(0).resolved.size() == 1);
     CHECK(same.at(0).resolved[0].position.x() == Catch::Approx(101.0));
+}
+
+TEST_CASE("resolve_dot_assignment: at equal distance the stronger keypoint candidate wins",
+          "[dot_assignment][kp_candidates]") {
+    // Symmetric about the prediction; the weak maximum's wider detection noise gives it a wider
+    // covariance. A cost on the squared Mahalanobis distance alone prefers the weak one: its
+    // distance is divided by more.
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0, 4.0);
+    DotAssignmentContext context = make_context();
+    context.subject_marker_keypoint[0] = {{7, 14}};
+    context.calib_noise_std = 5.0;
+
+    UnlabeledCandidate strong = make_keypoint_candidate(0, 103.0, 200.0, 14, 0.9);
+    strong.tracklet_id = 1;
+    UnlabeledCandidate weak = make_keypoint_candidate(0, 97.0, 200.0, 14, 0.3);
+    weak.tracklet_id = 2;
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {weak, strong};
+
+    for (double const peak_weight : {0.0, 1.0, 3.0}) {
+        context.kp_candidate_peak_weight = peak_weight;
+        auto result = resolve_dot_assignment({subject}, candidates, context);
+        REQUIRE(result.at(0).resolved.size() == 1);
+        CHECK(result.at(0).resolved[0].tracklet_id == 1);
+    }
+}
+
+TEST_CASE("resolve_dot_assignment: the likelihood terms leave the gate on the distance alone",
+          "[dot_assignment][kp_candidates]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0, 4.0);
+    DotAssignmentContext context = make_context();
+    context.subject_marker_keypoint[0] = {{7, 14}};
+    context.calib_noise_std = 5.0;
+    context.kp_candidate_peak_weight = 5.0;  // a peak above 1 makes the term negative
+
+    // Far outside the gate, however strong; and a near one that passes.
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> far_only;
+    far_only[0] = {make_keypoint_candidate(0, 160.0, 200.0, 14, 4.0)};
+    CHECK(resolve_dot_assignment({subject}, far_only, context).count(0) == 0);
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> both;
+    both[0] = {make_keypoint_candidate(0, 160.0, 200.0, 14, 4.0),
+               make_keypoint_candidate(0, 102.0, 200.0, 14, 0.2)};
+    auto result = resolve_dot_assignment({subject}, both, context);
+    REQUIRE(result.at(0).resolved.size() == 1);
+    CHECK(result.at(0).resolved[0].position.x() == Catch::Approx(102.0));
+}
+
+TEST_CASE("resolve_dot_assignment: the keypoint cost settings do not change a dot-only assignment",
+          "[dot_assignment][kp_candidates]") {
+    SubjectDotPredictions a;
+    a.subject_id = 0;
+    a.predictions_by_camera[0][1] = make_prediction(100.0, 100.0, 5.0);
+    a.predictions_by_camera[0][2] = make_prediction(120.0, 100.0, 5.0);
+    SubjectDotPredictions b;
+    b.subject_id = 1;
+    b.predictions_by_camera[0][1] = make_prediction(103.0, 100.0, 5.0);
+
+    UnlabeledCandidate c1 = make_candidate(0, 101.0, 100.0);
+    c1.confidence = 3.0;
+    UnlabeledCandidate c2 = make_candidate(0, 121.0, 101.0);
+    c2.confidence = 0.1;
+    UnlabeledCandidate c3 = make_candidate(0, 400.0, 400.0);
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {c1, c2, c3};
+
+    auto const base = resolve_dot_assignment({a, b}, candidates, make_context());
+    DotAssignmentContext context = make_context();
+    context.kp_candidate_peak_weight = 2.0;
+    context.kp_candidate_tracklet_multiplier = 4.0;
+    auto const changed = resolve_dot_assignment({a, b}, candidates, context);
+
+    REQUIRE(changed.size() == base.size());
+    for (auto const& [subject_id, expected] : base) {
+        REQUIRE(changed.at(subject_id).resolved.size() == expected.resolved.size());
+        for (size_t i = 0; i < expected.resolved.size(); ++i) {
+            CHECK(changed.at(subject_id).resolved[i].marker_id == expected.resolved[i].marker_id);
+            CHECK(changed.at(subject_id).resolved[i].position == expected.resolved[i].position);
+        }
+    }
+    CHECK_FALSE(base.empty());
+}
+
+TEST_CASE(
+    "resolve_dot_assignment: tracklet continuity of a keypoint candidate is per slot and keypoint",
+    "[dot_assignment][kp_candidates]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0, 4.0);
+    subject.predictions_by_camera[0][8] = make_prediction(100.0, 300.0, 4.0);
+    DotAssignmentContext context = make_context();
+    context.subject_marker_keypoint[0] = {{7, 14}, {8, 19}};
+    context.calib_noise_std = 5.0;
+    context.prev_tracklet_ids[0][0][7] = 5;
+    context.prev_tracklet_ids[0][0][8] = 6;
+
+    // 24 px from the prediction: 12.3 beyond the gate unmodified, 6.1 with a factor of 2.
+    UnlabeledCandidate continues = make_keypoint_candidate(0, 124.0, 200.0, 14);
+    continues.tracklet_id = 5;
+    UnlabeledCandidate other_keypoint = make_keypoint_candidate(0, 124.0, 300.0, 19);
+    other_keypoint.tracklet_id = 5;  // not the tracklet of marker 8's previous step
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {continues, other_keypoint};
+
+    CHECK(resolve_dot_assignment({subject}, candidates, context).count(0) == 0);
+
+    context.kp_candidate_tracklet_multiplier = 2.0;
+    auto result = resolve_dot_assignment({subject}, candidates, context);
+    REQUIRE(result.at(0).resolved.size() == 1);
+    CHECK(result.at(0).resolved[0].marker_id == 7);
+
+    // The dot multiplier does not apply to a keypoint candidate.
+    context.kp_candidate_tracklet_multiplier = 1.0;
+    context.dot_tracklet_gate_multiplier = 2.0;
+    CHECK(resolve_dot_assignment({subject}, candidates, context).count(0) == 0);
 }

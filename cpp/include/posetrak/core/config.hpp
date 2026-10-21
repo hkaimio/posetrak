@@ -166,6 +166,17 @@ struct TrackerConfig {
     /// hierarchical run always keep their refined-hand observations.
     bool kp_candidates_enabled = false;
 
+    /// Weight of the peak term in the assignment cost of a keypoint candidate: the cost is the
+    /// squared Mahalanobis distance plus ln det S (S the slot covariance with the candidate's
+    /// detection noise) minus this weight times ln(peak). 0 leaves the peak out of the cost. A dot
+    /// has no peak and no extra term.
+    double kp_candidate_peak_weight = 0.0;
+
+    /// Divides the squared Mahalanobis distance of a keypoint candidate that continues the tracklet
+    /// resolved into the same (camera, marker) slot on the previous step, like
+    /// dot_tracklet_gate_multiplier does for a dot. 1.0 turns it off.
+    double kp_candidate_tracklet_multiplier = 1.0;
+
     // === Streak-derived dot velocity ===
     // See docs/roadmap/features/marker-based-mocap/streak-velocity-design.md §3/§4.
     // A motion-blur streak's own length/axis is a real, otherwise-unused frame-internal
@@ -417,7 +428,9 @@ struct TrackerAppConfig {
     /// tracklet's history (a young tracklet has none). 0 = off. Skipped for a camera
     /// whose mask does not contain the label at all.
     double dot_seg_mask_hard_distance_px = 0.0;
-    bool kp_candidates_enabled = false;  ///< See TrackerConfig's own field doc comment.
+    bool kp_candidates_enabled = false;             ///< See TrackerConfig's own field doc comment.
+    double kp_candidate_peak_weight = 0.0;          ///< See TrackerConfig's own field doc comment.
+    double kp_candidate_tracklet_multiplier = 1.0;  ///< See TrackerConfig's own field doc comment.
 
     // === Streak-derived dot velocity === (see TrackerConfig's own field doc comments)
     bool dot_streak_velocity_enabled = false;
@@ -580,6 +593,8 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.dot_seg_mask_cost_scale_at_zero_fraction = dot_seg_mask_cost_scale_at_zero_fraction;
     tc.dot_seg_mask_hard_distance_px = dot_seg_mask_hard_distance_px;
     tc.kp_candidates_enabled = kp_candidates_enabled;
+    tc.kp_candidate_peak_weight = kp_candidate_peak_weight;
+    tc.kp_candidate_tracklet_multiplier = kp_candidate_tracklet_multiplier;
     tc.dot_streak_velocity_enabled = dot_streak_velocity_enabled;
     tc.dot_streak_k_window = dot_streak_k_window;
     tc.dot_streak_k_min_samples = dot_streak_k_min_samples;

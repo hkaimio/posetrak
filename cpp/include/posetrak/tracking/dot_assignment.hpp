@@ -304,6 +304,12 @@ struct DotAssignmentContext {
     /// observation. A dot's centroid has none (its crop_scale is 0 and the slot covariance is the
     /// state's alone).
     double pose_noise_std = 0.0;
+    /// TrackerConfig::kp_candidate_peak_weight: weight of -ln(peak) in the cost of a keypoint
+    /// candidate.
+    double kp_candidate_peak_weight = 0.0;
+    /// TrackerConfig::kp_candidate_tracklet_multiplier: the TrackletContinuityModifier factor for a
+    /// keypoint candidate (dot_tracklet_gate_multiplier is the dot's). 1.0 turns it off.
+    double kp_candidate_tracklet_multiplier = 1.0;
     /// Per subject, the keypoint_idx each marker takes candidates of (KeypointClassModifier). A
     /// subject absent from the map, or a marker absent from its entry, is a dot slot. Empty: no
     /// keypoint candidates take part and the modifier is not registered.

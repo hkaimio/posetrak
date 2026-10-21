@@ -825,14 +825,26 @@ def _migrate_registry_v16_to_v17(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _add_kp_candidate_config_columns(conn: sqlite3.Connection) -> None:
+    """Add the keypoint-candidate settings to tracker_configs where they are missing."""
+    existing = _tracker_config_columns(conn)
+    for column, sql_type in (
+        ("kp_candidates_enabled", "INTEGER"),
+        ("kp_candidate_peak_weight", "REAL"),
+        ("kp_candidate_tracklet_multiplier", "REAL"),
+    ):
+        if column not in existing:
+            conn.execute(f"ALTER TABLE tracker_configs ADD COLUMN {column} {sql_type}")
+
+
 def _migrate_registry_v17_to_v18(conn: sqlite3.Connection) -> None:
     """Migrate a registry database from schema version 17 to 18.
 
-    v18 adds tracker_configs.kp_candidates_enabled, mirroring the session schema
-    v68->v69 change -- see _migrate_session_v68_to_v69.
+    v18 adds tracker_configs.kp_candidates_enabled, kp_candidate_peak_weight and
+    kp_candidate_tracklet_multiplier, mirroring the session schema v68->v69 change -- see
+    _migrate_session_v68_to_v69.
     """
-    if "kp_candidates_enabled" not in _tracker_config_columns(conn):
-        conn.execute("ALTER TABLE tracker_configs ADD COLUMN kp_candidates_enabled INTEGER")
+    _add_kp_candidate_config_columns(conn)
     _set_schema_version(conn, 18)
     conn.commit()
 
@@ -2193,10 +2205,11 @@ def _migrate_session_v68_to_v69(conn: sqlite3.Connection) -> None:
     v69 adds tracker_configs.kp_candidates_enabled: whether a tracking run takes the keypoint candidates of its
     sequence (pose_observations rows with source 'kp_candidates') instead of the fixed body observations for the
     markers bound to that pose model. NULL keeps the previous behaviour, the fixed observations. Mirrors the
-    registry schema v17->v18 change, since every session embeds a copy of tracker_configs.
+    registry schema v17->v18 change, since every session embeds a copy of tracker_configs. It also adds
+    kp_candidate_peak_weight and kp_candidate_tracklet_multiplier, the settings of the assignment cost of those
+    candidates (NULL: 0.0 and 1.0, the cost without a peak term and without tracklet continuity).
     """
-    if "kp_candidates_enabled" not in _tracker_config_columns(conn):
-        conn.execute("ALTER TABLE tracker_configs ADD COLUMN kp_candidates_enabled INTEGER")
+    _add_kp_candidate_config_columns(conn)
     _set_schema_version(conn, 69)
     conn.commit()
 

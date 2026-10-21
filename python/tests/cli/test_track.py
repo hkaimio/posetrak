@@ -1007,6 +1007,12 @@ def test_candidates_option_sets_only_the_candidate_column(tmp_path):
     assert _config_with_options(tmp_path / "off", candidates=False)["kp_candidates_enabled"] == 0
 
 
+def test_kp_cost_options_set_their_own_columns(tmp_path):
+    row = _config_with_options(tmp_path, kp_peak_weight=1.5, kp_tracklet_multiplier=3.0)
+    assert (row["kp_candidate_peak_weight"], row["kp_candidate_tracklet_multiplier"]) == (1.5, 3.0)
+    assert row["kp_candidates_enabled"] is None
+
+
 def test_no_option_leaves_the_base_configs_candidate_setting(tmp_path):
     assert _config_with_options(tmp_path, "kp_candidates_enabled = 1")["kp_candidates_enabled"] == 1
 

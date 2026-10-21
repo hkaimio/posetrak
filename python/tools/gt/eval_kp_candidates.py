@@ -14,12 +14,15 @@ its data lives outside the repository. Usage:
     python python/tools/gt/eval_kp_candidates.py tracker --runs proposal_range3
     python python/tools/gt/eval_kp_candidates.py tracker --run 1=<run id> --run 2=<run id>
     python python/tools/gt/eval_kp_candidates.py events --runs proposal
+    python python/tools/gt/eval_kp_candidates.py track-picks --range range1 --run 1=<run id> --run 3=<run id>
 
 ``picks`` reports, per range and subject, for the picks of the strongest maximum (or of a stored
 pose sequence), the within-3%-of-box-height share, the same-candidate share, the share without a
 pick and the false picks on not-visible labels, inside the hard windows and outside them.
 ``tracker`` is the label-fed comparison: body-joint distance of runs to the reference run.
 ``events`` is the failure-event comparison of two run groups.
+``track-picks`` traces the candidate each used observation of a tracking run came from and scores it against the
+labels of a range, next to the strongest maximum of the same keypoint-frames.
 """
 from __future__ import annotations
 
@@ -166,6 +169,34 @@ def cmd_tracker(args) -> int:
     return 0
 
 
+def cmd_track_picks(args) -> int:
+    """Which candidate a tracking run used per keypoint-frame, scored against the labels of a range.
+
+    Counts the share of labelled keypoint-frames, among those the run took a candidate for, where the used
+    candidate lies within ``tolerance_box_height`` of the label, next to the strongest maximum of the same
+    keypoint-frames.
+    """
+    cfg, root, conn = load_set(), eval_root(args), open_db(args)
+    es, rng = cfg["evaluation_set"], cfg["ranges"][args.range]
+    print(f"{'subject':8s} {'run':10s} {'labels':>7s} {'tracker':>8s} {'strongest':>10s} {'observations traced':>20s}")
+    for item in args.run:
+        subject, run = item.split("=", 1)
+        d = root / rng["dir"]
+        cand = kp_gt.read_candidates(d / f"candidates_subject{subject}.npz")
+        labels = kp_gt.read_labels(d / f"labels_subject{subject}.npz", d / f"units_subject{subject}.json", rng["units"])
+        tracker, strongest, counts = kp_gt.tracker_picks(conn, run, cand.cameras)
+        skip = rng["skip_cameras"].get(str(subject), [])
+        share = {}
+        for name, picks in (("tracker", tracker), ("strongest", strongest)):
+            m = kp_gt.pick_metrics(picks, labels, cand, t0=rng["t0"], t1=rng["t1"], tolerance=es["tolerance_box_height"],
+                                   same_px=es["same_candidate_px"], skip_cameras=skip)
+            n = max(m["n_visible"] * (1.0 - m["no_pick"]), 1.0)
+            share[name] = (m["within_tol"] * m["n_visible"] / n, n)
+        print(f"{subject:8s} {run:10s} {share['tracker'][1]:7.0f} {100 * share['tracker'][0]:7.1f}% "
+              f"{100 * share['strongest'][0]:9.1f}% {counts['matched']:10d} of {counts['used']}")
+    return 0
+
+
 def cmd_events(args) -> int:
     cfg, root, conn = load_set(), eval_root(args), open_db(args)
     es = cfg["evaluation_set"]
@@ -205,6 +236,10 @@ def main(argv=None) -> int:
     p.add_argument("--pick-sequence", action="append", default=[], metavar="SUBJECT=SEQUENCE",
                    help="score the picks of this pose observation sequence (person 0) for the subject instead of the "
                         "strongest maxima; give one per subject")
+    q = sub.add_parser("track-picks")
+    q.add_argument("--range", default="range1")
+    q.add_argument("--run", action="append", required=True, metavar="SUBJECT=RUN",
+                   help="tracking run (id prefix) of a subject of the range")
     for name in ("tracker", "events"):
         q = sub.add_parser(name)
         if name == "tracker":
@@ -215,7 +250,7 @@ def main(argv=None) -> int:
                        help="group of [tracker.*] runs in kp_eval_set.toml to score")
     args = ap.parse_args(argv)
     return {"verify": cmd_verify, "picks": cmd_picks, "tracker": cmd_tracker, "events": cmd_events,
-            "compare": cmd_compare}[args.cmd](args)
+            "compare": cmd_compare, "track-picks": cmd_track_picks}[args.cmd](args)
 
 
 if __name__ == "__main__":

@@ -233,6 +233,115 @@ def read_sequence_picks(conn: sqlite3.Connection, sequence_id: str, person_id: i
     return Picks(cat(cam, np.int32), cat(frame, np.int64), cat(kp, np.int32), cat(x, np.float32), cat(y, np.float32))
 
 
+def read_sequence_candidates(conn: sqlite3.Connection, sequence_id: str, person_id: int = 0) -> dict[str, list]:
+    """The ``kp_candidates`` rows of a sequence: camera instance id -> [(video_frame, timestamp_s, table)], by time.
+
+    ``table`` is the decoded candidate blob, columns :data:`KP_CANDIDATE_FIELDS`.
+    """
+    rows: dict[str, list] = {}
+    for camera_id, frame, ts, blob in conn.execute(
+            "SELECT camera_instance_id, video_frame, timestamp_s, kp_blob FROM pose_observations "
+            "WHERE sequence_id = ? AND person_id = ? AND source = 'kp_candidates'", (sequence_id, person_id)):
+        rows.setdefault(camera_id, []).append((int(frame), float(ts), decode_kp_candidates_blob(bytes(blob))))
+    for camera_rows in rows.values():
+        camera_rows.sort(key=lambda r: r[1])
+    return rows
+
+
+def _undistort(points: np.ndarray, state) -> np.ndarray:
+    """Distorted video pixels -> the undistorted pixels the tracker observes (``state`` is a CamCalibState)."""
+    import cv2
+
+    if not len(points):
+        return np.empty((0, 2), np.float32)
+    p = np.asarray(points, np.float32).reshape(-1, 1, 2)
+    undistort = cv2.fisheye.undistortPoints if state.fisheye else cv2.undistortPoints
+    return undistort(p, state.K_orig, state.dist, None, state.K).reshape(-1, 2)
+
+
+def tracker_picks(conn: sqlite3.Connection, run_prefix: str, cameras: list[str], *, person_id: int = 0,
+                  match_px: float = 4.0) -> tuple[Picks, Picks, dict[str, int]]:
+    """The candidate each used POSITION observation of a tracking run came from, and the strongest maximum there.
+
+    Returns ``(tracker, strongest, counts)``: picks per (camera, frame, keypoint) in the distorted pixels of the
+    sequence's candidates, ``cameras`` ordered as in :class:`Candidates`; ``strongest`` holds the rank-0 maximum of
+    exactly the keypoint-frames the tracker picked. An observation is traced to the candidate of its marker's
+    keypoint, in the sequence row nearest in time, whose undistorted position is nearest to the observation
+    (``match_px`` at most: a candidate merged from two crops keeps one of their positions). ``counts`` has the
+    observations used (``used``), traced (``matched``) and untraceable (``unmatched``).
+    """
+    from posetrak.calibration.session_cameras import load_camera_states
+
+    row = conn.execute("SELECT id, observation_sequence_id, active_camera_ids, marker_names FROM tracking_runs "
+                       "WHERE id LIKE ?", (run_prefix + "%",)).fetchone()
+    if row is None:
+        raise KeyError(f"no tracking run starting with {run_prefix!r}")
+    run_id, sequence_id = row["id"], row["observation_sequence_id"]
+    labels = json.loads(row["active_camera_ids"])
+    markers = json.loads(row["marker_names"])
+    camera_of = {r["label"]: r["id"] for r in conn.execute("SELECT id, label FROM camera_instances")}
+    shot_id = conn.execute("SELECT shot_id FROM pose_observation_sequences WHERE id = ?", (sequence_id,)).fetchone()[0]
+    states = load_camera_states(conn, shot_id)
+    names = {r["name"]: r["keypoint_idx"] for r in conn.execute(
+        "SELECT keypoint_idx, name FROM pose_sequence_keypoints WHERE sequence_id = ? AND obs_source = 'kp_candidates'",
+        (sequence_id,))}
+    marker_keypoint = [names.get(f"soma77:{m}", -1) for m in markers]
+    candidates = read_sequence_candidates(conn, sequence_id, person_id)
+    undistorted = {cam: [_undistort(t[:, 1:3], states[cam]) for _, _, t in rows] for cam, rows in candidates.items()}
+    times = {cam: np.array([r[1] for r in rows]) for cam, rows in candidates.items()}
+    step_time = {r[0]: r[1] for r in conn.execute(
+        "SELECT tracker_step, timestamp_s FROM tracking_results WHERE run_id = ? AND person_id = ? AND is_smoothed = 0",
+        (run_id, person_id))}
+    index = {c: i for i, c in enumerate(cameras)}
+    best: dict[tuple[int, int, int], tuple[float, float, float, float]] = {}
+    counts = {"used": 0, "matched": 0, "unmatched": 0}
+    for step, blob in conn.execute("SELECT tracker_step, obs_blob FROM tracking_obs_results WHERE run_id = ? AND "
+                                   "person_id = ?", (run_id, person_id)):
+        obs = np.frombuffer(bytes(blob), "<f4").reshape(len(labels), len(markers), 8)
+        t = step_time.get(step)
+        if t is None:
+            continue
+        for ci, cam_label in enumerate(labels):
+            cam = camera_of[cam_label]
+            if cam not in candidates or cam not in index:
+                continue
+            k = int(np.argmin(np.abs(times[cam] - t)))
+            frame, frame_time, table = candidates[cam][k]
+            for mi, kp in enumerate(marker_keypoint):
+                o = obs[ci, mi]
+                if kp < 0 or o[7] != 0 or o[5] != 1 or not np.isfinite(o[0]):
+                    continue
+                counts["used"] += 1
+                sel = np.flatnonzero(table[:, 0] == kp)
+                if not len(sel):
+                    counts["unmatched"] += 1
+                    continue
+                d = np.hypot(undistorted[cam][k][sel, 0] - o[0], undistorted[cam][k][sel, 1] - o[1])
+                j = int(np.argmin(d))
+                if d[j] > match_px:
+                    counts["unmatched"] += 1
+                    continue
+                counts["matched"] += 1
+                key = (index[cam], frame, kp)
+                gap = abs(frame_time - t)
+                if key not in best or gap < best[key][0]:
+                    best[key] = (gap, float(table[sel[j], 1]), float(table[sel[j], 2]), float(table[sel[j], 4]))
+    # strongest maximum of the same keypoint-frames
+    strongest = {}
+    for cam, camera_rows in candidates.items():
+        for frame, _, table in camera_rows:
+            for r in table[table[:, 4] == 0]:
+                key = (index.get(cam, -1), frame, int(r[0]))
+                if key in best:
+                    strongest[key] = (float(r[1]), float(r[2]))
+    def to_picks(items):
+        keys = sorted(items)
+        arr = np.array([items[k] for k in keys], np.float32).reshape(-1, 2)
+        return Picks(np.array([k[0] for k in keys], np.int32), np.array([k[1] for k in keys], np.int64),
+                     np.array([k[2] for k in keys], np.int32), arr[:, 0], arr[:, 1])
+    return to_picks({k: v[1:3] for k, v in best.items()}), to_picks(strongest), counts
+
+
 def _key(camera, frame, keypoint) -> np.ndarray:
     return (np.asarray(camera, np.int64) * 10_000_000 + np.asarray(frame, np.int64)) * 128 + np.asarray(keypoint, np.int64)
 

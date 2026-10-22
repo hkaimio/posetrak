@@ -9,6 +9,7 @@
 
 using posetrak::decode_seg_mask;
 using posetrak::DecodedSegMask;
+using posetrak::mask_label_at;
 using posetrak::mask_label_present_near;
 using posetrak::TrackletMaskAccumulator;
 
@@ -144,4 +145,23 @@ TEST_CASE("TrackletMaskAccumulator: recent history dominates a long-lived trackl
     auto f = acc.fraction(1);
     REQUIRE(f.has_value());
     REQUIRE(*f == Catch::Approx(0.0));
+}
+
+TEST_CASE("mask_label_at reads the label of the mask pixel a native position falls in",
+          "[seg_mask]") {
+    DecodedSegMask mask;
+    mask.native_w = 12;  // the 6x5 mask is stored at half the native resolution
+    mask.native_h = 10;
+    REQUIRE(decode_seg_mask(test_png_bytes(), mask));
+
+    // Label 1 at mask pixel (1, 1) is native x 2..3.99, y 2..3.99; label 2 at (4, 3) is native
+    // x 8..9.99, y 6..7.99.
+    CHECK(mask_label_at(mask, Eigen::Vector2d(2.5, 2.5)) == 1);
+    CHECK(mask_label_at(mask, Eigen::Vector2d(3.9, 3.9)) == 1);
+    CHECK(mask_label_at(mask, Eigen::Vector2d(9.0, 7.0)) == 2);
+    CHECK(mask_label_at(mask, Eigen::Vector2d(0.5, 0.5)) == 0);
+    // Outside the native frame, and with no mask at all.
+    CHECK(mask_label_at(mask, Eigen::Vector2d(-0.5, 2.5)) == -1);
+    CHECK(mask_label_at(mask, Eigen::Vector2d(2.5, 10.0)) == -1);
+    CHECK(mask_label_at(DecodedSegMask{}, Eigen::Vector2d(1, 1)) == -1);
 }

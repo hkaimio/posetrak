@@ -55,6 +55,7 @@ struct Candidate {
     float peak = 0.f;            ///< Heatmap value, 0..1.
     std::int32_t tracklet = -1;  ///< Unique per camera across keypoints; negative: not linked.
     std::int32_t frame = 0;      ///< Index into Input::frames[camera].
+    std::int32_t source = -1;    ///< The caller's index of the candidate; unused by the choice.
     std::int16_t rank = 0;       ///< 0 = strongest maximum of its keypoint in the frame.
     /// Mask label at the candidate's position: 0 background, > 0 a person, -1 outside the image,
     /// kMaskUnknown when the frame has no mask.
@@ -129,6 +130,14 @@ class WindowChoice {
     /// label are not counted; a candidate with no counted detection stays.
     FilterStats apply_strict_filter(int half_window_frames, double min_fraction);
 
+    /// Counts the keypoint-frames with a candidate, per camera, without filtering (the figures
+    /// apply_strict_filter() would report with nothing emptied). Call before run() when the filter
+    /// is off.
+    void count_keypoint_frames();
+
+    /// Per camera: the figures of the last apply_strict_filter() or count_keypoint_frames().
+    std::vector<FilterStats> const& camera_stats() const { return camera_stats_; }
+
     /// Computes the picks.
     void run();
 
@@ -157,6 +166,7 @@ class WindowChoice {
     std::vector<int> picks_;             // per cell
     std::vector<int> fixed_;             // per cell: fixed candidate or -1
     std::vector<double> radius_;
+    std::vector<FilterStats> camera_stats_;
 };
 
 }  // namespace posetrak::kpchoice

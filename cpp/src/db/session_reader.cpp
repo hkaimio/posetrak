@@ -226,7 +226,12 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
         "       active_joint_groups,"
         "       COALESCE(kp_candidates_enabled, 0) AS kp_candidates_enabled,"
         "       COALESCE(kp_candidate_peak_weight, 0.0) AS kp_candidate_peak_weight,"
-        "       COALESCE(kp_candidate_tracklet_multiplier, 1.0) AS kp_candidate_tracklet_multiplier"
+        "       COALESCE(kp_candidate_tracklet_multiplier, 1.0) AS "
+        "kp_candidate_tracklet_multiplier,"
+        "       kp_candidate_choice, kp_choice_support_window_s, kp_choice_delta, kp_choice_beta,"
+        "       kp_choice_gamma, kp_choice_rounds, kp_choice_skip_camera_ids, kp_strict_filter,"
+        "       kp_strict_filter_window_frames, kp_strict_filter_min_fraction, kp_mask_term_weight,"
+        "       kp_mask_term_window_s, kp_mask_term_classes"
         " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -268,7 +273,12 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //         67=dot_seg_mask_cost_scale_at_zero_fraction,
     //         68=dot_seg_mask_hard_distance_px, 69=active_joint_groups,
     //         70=kp_candidates_enabled, 71=kp_candidate_peak_weight,
-    //         72=kp_candidate_tracklet_multiplier
+    //         72=kp_candidate_tracklet_multiplier,
+    //         73=kp_candidate_choice, 74=kp_choice_support_window_s, 75=kp_choice_delta,
+    //         76=kp_choice_beta, 77=kp_choice_gamma, 78=kp_choice_rounds,
+    //         79=kp_choice_skip_camera_ids, 80=kp_strict_filter,
+    //         81=kp_strict_filter_window_frames, 82=kp_strict_filter_min_fraction,
+    //         83=kp_mask_term_weight, 84=kp_mask_term_window_s, 85=kp_mask_term_classes
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -492,6 +502,41 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     out.tracker.kp_candidates_enabled = sqlite3_column_int(stmt.ptr, 70) != 0;
     apply_real(71, out.tracker.kp_candidate_peak_weight);
     apply_real(72, out.tracker.kp_candidate_tracklet_multiplier);
+
+    {
+        auto& choice = out.tracker.kp_choice;
+        auto text = [&](int col) {
+            auto const* t = sqlite3_column_text(stmt.ptr, col);
+            return t != nullptr ? std::string(reinterpret_cast<char const*>(t)) : std::string();
+        };
+        if (sqlite3_column_type(stmt.ptr, 73) != SQLITE_NULL) {
+            std::string const mode = text(73);
+            if (mode != "window" && mode != "step")
+                throw std::runtime_error("tracker_configs.kp_candidate_choice is '" + mode +
+                                         "'; expected 'window' or 'step'");
+            choice.window = mode == "window";
+        }
+        apply_real(74, choice.support_window_s);
+        apply_real(75, choice.delta);
+        apply_real(76, choice.beta);
+        apply_real(77, choice.gamma);
+        apply_int(78, choice.rounds);
+        if (sqlite3_column_type(stmt.ptr, 79) != SQLITE_NULL) {
+            auto arr = nlohmann::json::parse(text(79), nullptr, /*allow_exceptions=*/false);
+            if (arr.is_array())
+                for (auto const& elem : arr)
+                    if (elem.is_number_integer())
+                        choice.skip_camera_ids.push_back(elem.get<int>());
+        }
+        if (sqlite3_column_type(stmt.ptr, 80) != SQLITE_NULL)
+            choice.strict_filter = sqlite3_column_int(stmt.ptr, 80) != 0;
+        apply_int(81, choice.strict_filter_window_frames);
+        apply_real(82, choice.strict_filter_min_fraction);
+        apply_real(83, choice.mask_term_weight);
+        apply_real(84, choice.mask_term_window_s);
+        if (sqlite3_column_type(stmt.ptr, 85) != SQLITE_NULL)
+            choice.mask_term_classes = text(85);
+    }
 
     // active_joint_groups: stored as a JSON string array, e.g. ["main"]; NULL or [] tracks the
     // whole skeleton.
@@ -1783,6 +1828,115 @@ SessionReader::load_keypoint_candidates(std::string const& sequence_id,
             cand.merge_radius_px =
                 std::max(kMergeMinPx, kMergeBoxFraction * kBoxHeightPerCropScale * crop_scale);
             result.candidates.push_back(cand);
+        }
+    }
+    return result;
+}
+
+KeypointChoiceData SessionReader::load_keypoint_choice_data(
+    std::string const& sequence_id, std::map<std::string, Camera> const& cameras,
+    Skeleton const& skeleton, int person_id, double window_start_s, double window_end_s) {
+    KeypointChoiceData result;
+
+    std::unordered_map<std::string, int> landmark_to_marker;
+    auto const& markers = skeleton.markers();
+    for (size_t i = 0; i < markers.size(); ++i) {
+        if (!markers[i].landmark.empty())
+            landmark_to_marker[markers[i].landmark] = static_cast<int>(i);
+    }
+    {
+        sqlite3_stmt* manifest_raw = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                               "SELECT keypoint_idx, name, source FROM pose_sequence_keypoints"
+                               " WHERE sequence_id = ? AND obs_source = 'kp_candidates'",
+                               -1, &manifest_raw, nullptr) != SQLITE_OK)
+            return result;
+        sqlite3_bind_text(manifest_raw, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
+        auto text = [&](int col) {
+            auto const* t = sqlite3_column_text(manifest_raw, col);
+            return t != nullptr ? std::string(reinterpret_cast<char const*>(t)) : std::string();
+        };
+        while (sqlite3_step(manifest_raw) == SQLITE_ROW) {
+            int const keypoint_idx = sqlite3_column_int(manifest_raw, 0);
+            std::string name = text(1);
+            std::string const model = text(2);
+            if (name.find(':') == std::string::npos && !model.empty())
+                name = model + ":" + name;
+            if (keypoint_idx < 0)
+                continue;
+            if (static_cast<size_t>(keypoint_idx) >= result.keypoint_landmark.size())
+                result.keypoint_landmark.resize(static_cast<size_t>(keypoint_idx) + 1);
+            result.keypoint_landmark[static_cast<size_t>(keypoint_idx)] = name;
+            auto it = landmark_to_marker.find(name);
+            if (it != landmark_to_marker.end())
+                result.marker_keypoint[it->second] = keypoint_idx;
+        }
+        sqlite3_finalize(manifest_raw);
+    }
+    if (result.keypoint_landmark.empty())
+        return result;
+
+    bool const pixels_are_undistorted = load_pixels_are_undistorted(sequence_id);
+    std::unordered_map<std::string, Camera const*> inst_to_cam =
+        load_instance_camera_map(sequence_id, cameras);
+
+    Stmt stmt(db_,
+              "SELECT po.camera_instance_id, po.video_frame, po.timestamp_s, po.kp_blob,"
+              " COALESCE(po.noise_scale, 1.0)"
+              " FROM pose_observations po"
+              " WHERE po.sequence_id = ? AND po.person_id = ? AND po.source = 'kp_candidates'"
+              " AND (? OR po.timestamp_s >= ?) AND (? OR po.timestamp_s < ?)"
+              " ORDER BY po.camera_instance_id, po.video_frame");
+    sqlite3_bind_text(stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt.ptr, 2, person_id);
+    sqlite3_bind_int(stmt.ptr, 3, std::isfinite(window_start_s) ? 0 : 1);
+    sqlite3_bind_double(stmt.ptr, 4, std::isfinite(window_start_s) ? window_start_s : 0.0);
+    sqlite3_bind_int(stmt.ptr, 5, std::isfinite(window_end_s) ? 0 : 1);
+    sqlite3_bind_double(stmt.ptr, 6, std::isfinite(window_end_s) ? window_end_s : 0.0);
+
+    std::unordered_map<std::string, int> camera_index;
+    while (stmt.step()) {
+        std::string inst_id = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 0));
+        auto cam_it = inst_to_cam.find(inst_id);
+        if (cam_it == inst_to_cam.end())
+            continue;
+        Camera const* camera = cam_it->second;
+        auto [ci_it, inserted] =
+            camera_index.try_emplace(inst_id, static_cast<int>(result.cameras.size()));
+        if (inserted) {
+            KeypointChoiceCamera entry;
+            entry.camera_id = camera->id();
+            entry.camera_instance_id = inst_id;
+            result.cameras.push_back(std::move(entry));
+        }
+        int const ci = ci_it->second;
+        auto& frames = result.cameras[static_cast<size_t>(ci)].frames;
+        KeypointChoiceFrame frame;
+        frame.video_frame = sqlite3_column_int(stmt.ptr, 1);
+        frame.timestamp = sqlite3_column_double(stmt.ptr, 2);
+        frame.crop_scale = sqlite3_column_double(stmt.ptr, 4);
+        frames.push_back(frame);
+        int const fi = static_cast<int>(frames.size()) - 1;
+        for (auto const& c : db::decode_kp_candidates(sqlite3_column_blob(stmt.ptr, 3),
+                                                      sqlite3_column_bytes(stmt.ptr, 3))) {
+            if (c.keypoint_idx < 0 ||
+                static_cast<size_t>(c.keypoint_idx) >= result.keypoint_landmark.size())
+                continue;
+            KeypointChoiceRow row;
+            row.camera = ci;
+            row.frame = fi;
+            row.keypoint = c.keypoint_idx;
+            row.rank = c.rank;
+            row.tracklet_id = c.tracklet_id;
+            row.x = c.x;
+            row.y = c.y;
+            Eigen::Vector2d const distorted(c.x, c.y);
+            Eigen::Vector2d const undistorted =
+                pixels_are_undistorted ? distorted : camera->undistort(distorted);
+            row.ux = static_cast<float>(undistorted.x());
+            row.uy = static_cast<float>(undistorted.y());
+            row.peak = c.peak;
+            result.candidates.push_back(row);
         }
     }
     return result;

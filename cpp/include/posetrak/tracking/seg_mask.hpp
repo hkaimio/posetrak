@@ -92,6 +92,12 @@ bool decode_seg_mask(std::string const& png_bytes, DecodedSegMask& out);
 bool mask_label_present_near(DecodedSegMask const& mask, Eigen::Vector2d const& native_pos,
                              int label, double dilate_px);
 
+/// @brief The label of *mask* at *native_pos* (native, distorted frame pixels): the mask pixel the
+/// position falls in, found with the same scaling as mask_label_present_near().
+/// @return The label (0 = background), or -1 when the position lies outside the native frame or
+///         the mask is not valid().
+int mask_label_at(DecodedSegMask const& mask, Eigen::Vector2d const& native_pos);
+
 /// @brief Running (frames-in-mask / frames-seen) estimate for one tracklet,
 /// windowed the same way StreakKAccumulator windows its own ratio-of-sums --
 /// so a long-lived tracklet's fraction reflects its *recent* trustworthiness,

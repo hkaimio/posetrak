@@ -51,6 +51,7 @@ posetrak_sources = files(
   'tracking/streak_k_accumulator.cpp',
   'tracking/seg_mask.cpp',
   'tracking/keypoint_window_choice.cpp',
+  'tracking/keypoint_choice_phase.cpp',
   'tracking/dot_predict_profile.cpp',
   'tracking/frame_step_profile.cpp',
 

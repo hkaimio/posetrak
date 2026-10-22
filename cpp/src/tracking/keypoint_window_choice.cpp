@@ -405,11 +405,30 @@ FilterStats WindowChoice::apply_strict_filter(int half_window_frames, double min
         if (!candidates_[i].removed)
             has[static_cast<size_t>(
                 cell(candidates_[i].camera, candidates_[i].keypoint, candidates_[i].frame))] = 1;
-    for (size_t i = 0; i < had.size(); ++i) {
-        stats.keypoint_frames += had[i];
-        stats.emptied += had[i] && !has[i];
+    camera_stats_.assign(input_.frames.size(), FilterStats{});
+    for (size_t c = 0; c < input_.frames.size(); ++c)
+        for (int i = cell_base_[c]; i < cell_base_[c + 1]; ++i) {
+            camera_stats_[c].keypoint_frames += had[static_cast<size_t>(i)];
+            camera_stats_[c].emptied += had[static_cast<size_t>(i)] && !has[static_cast<size_t>(i)];
+        }
+    for (auto const& c : candidates_)
+        camera_stats_[c.camera].candidates_removed += c.removed;
+    for (auto const& cs : camera_stats_) {
+        stats.keypoint_frames += cs.keypoint_frames;
+        stats.emptied += cs.emptied;
     }
     return stats;
+}
+
+void WindowChoice::count_keypoint_frames() {
+    camera_stats_.assign(input_.frames.size(), FilterStats{});
+    std::vector<char> had(picks_.size(), 0);
+    for (auto const& c : candidates_)
+        if (!c.removed)
+            had[static_cast<size_t>(cell(c.camera, c.keypoint, c.frame))] = 1;
+    for (size_t c = 0; c < input_.frames.size(); ++c)
+        for (int i = cell_base_[c]; i < cell_base_[c + 1]; ++i)
+            camera_stats_[c].keypoint_frames += had[static_cast<size_t>(i)];
 }
 
 // ---------------------------------------------------------------------------------------------

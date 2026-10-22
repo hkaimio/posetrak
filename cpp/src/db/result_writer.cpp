@@ -895,6 +895,42 @@ void ResultWriter::record_segmentation(std::string const& seg_run_id, int mask_l
     }
 }
 
+void ResultWriter::write_kp_picks(KeypointPicks const& picks) {
+    sqlite3_stmt* stmt = nullptr;
+    char const* sql =
+        "INSERT OR REPLACE INTO tracking_kp_picks"
+        " (run_id, person_id, camera_instance_id, n_frames, n_keypoints, video_frames,"
+        "  tracklet_ids, ranks, n_candidate_keypoint_frames, n_filter_emptied, n_picked)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        throw std::runtime_error(std::string("ResultWriter: prepare INSERT tracking_kp_picks: ") +
+                                 sqlite3_errmsg(db_));
+    }
+    sqlite3_bind_text(stmt, 1, run_id_.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, person_id_);
+    sqlite3_bind_text(stmt, 3, picks.camera_instance_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 4, picks.n_frames);
+    sqlite3_bind_int(stmt, 5, picks.n_keypoints);
+    // A zero-length blob needs a non-null pointer to be stored as a BLOB rather than NULL.
+    auto bind_blob = [&](int index, void const* data, size_t bytes) {
+        static char const empty = 0;
+        sqlite3_bind_blob(stmt, index, bytes ? data : &empty, static_cast<int>(bytes),
+                          SQLITE_STATIC);
+    };
+    bind_blob(6, picks.video_frames.data(), picks.video_frames.size() * sizeof(std::int32_t));
+    bind_blob(7, picks.tracklet_ids.data(), picks.tracklet_ids.size() * sizeof(std::int32_t));
+    bind_blob(8, picks.ranks.data(), picks.ranks.size() * sizeof(std::int8_t));
+    sqlite3_bind_int64(stmt, 9, picks.n_candidate_keypoint_frames);
+    sqlite3_bind_int64(stmt, 10, picks.n_filter_emptied);
+    sqlite3_bind_int64(stmt, 11, picks.n_picked);
+    int const rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        throw std::runtime_error(std::string("ResultWriter: INSERT tracking_kp_picks failed: ") +
+                                 sqlite3_errmsg(db_));
+    }
+}
+
 void ResultWriter::set_stage_status(std::string const& group_name, std::string const& status,
                                     bool set_started, bool set_completed) {
     std::string const now = utc_iso_timestamp();

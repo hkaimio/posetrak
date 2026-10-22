@@ -186,6 +186,10 @@ class ObservationSet {
     /// @return Map of camera_name -> sequence
     std::map<std::string, ObservationSequence> const& sequences() const { return sequences_; }
 
+    /// @brief Mutable access, for a phase that rewrites observations (the windowed choice of
+    /// keypoint candidates); each sequence must stay sorted by timestamp.
+    std::map<std::string, ObservationSequence>& sequences() { return sequences_; }
+
     /// @brief Serialize to JSON
     nlohmann::json to_json() const;
 

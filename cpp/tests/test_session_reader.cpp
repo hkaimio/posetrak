@@ -228,7 +228,12 @@ static void create_fixture_db() {
             active_joint_groups TEXT,
             kp_candidates_enabled INTEGER,
             kp_candidate_peak_weight REAL,
-            kp_candidate_tracklet_multiplier REAL
+            kp_candidate_tracklet_multiplier REAL,
+            kp_candidate_choice TEXT, kp_choice_support_window_s REAL, kp_choice_delta REAL,
+            kp_choice_beta REAL, kp_choice_gamma REAL, kp_choice_rounds INTEGER,
+            kp_choice_skip_camera_ids TEXT, kp_strict_filter INTEGER,
+            kp_strict_filter_window_frames INTEGER, kp_strict_filter_min_fraction REAL,
+            kp_mask_term_weight REAL, kp_mask_term_window_s REAL, kp_mask_term_classes TEXT
         );
     )");
 
@@ -432,6 +437,14 @@ static void create_fixture_db() {
              "INSERT INTO tracker_configs (id,name,created_at,tracker_fps,kp_candidates_enabled,"
              "kp_candidate_peak_weight,kp_candidate_tracklet_multiplier) "
              "VALUES ('tc_kp','candidates','2024-01-01',120.0,1,1.5,3.0);");
+    exec_sql(db,
+             "INSERT INTO tracker_configs (id,name,created_at,tracker_fps,kp_candidates_enabled,"
+             "kp_candidate_choice,kp_choice_support_window_s,kp_choice_delta,kp_choice_beta,"
+             "kp_choice_gamma,kp_choice_rounds,kp_choice_skip_camera_ids,kp_strict_filter,"
+             "kp_strict_filter_window_frames,kp_strict_filter_min_fraction,kp_mask_term_weight,"
+             "kp_mask_term_window_s,kp_mask_term_classes) "
+             "VALUES ('tc_win','window','2024-01-01',120.0,1,'window',1.5,0.5,0.4,0.1,2,'[3,4]',"
+             "1,8,0.6,0.3,2.5,'body,feet');");
 
     // Pose observation sequence
     exec_sql(db,
@@ -937,6 +950,43 @@ TEST_CASE("SessionReader load_tracker_config reads kp_candidates_enabled", "[ses
             Catch::Approx(1.5));
     REQUIRE(reader.load_tracker_config("tc_kp").tracker.kp_candidate_tracklet_multiplier ==
             Catch::Approx(3.0));
+}
+
+TEST_CASE("SessionReader load_tracker_config reads the windowed choice settings",
+          "[session_reader]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    // Not set: the per-step assignment, the prototype's weights, filter and mask term off.
+    auto const& off = reader.load_tracker_config("tc_kp").tracker.kp_choice;
+    REQUIRE_FALSE(off.window);
+    REQUIRE(off.support_window_s == Catch::Approx(1.0));
+    REQUIRE(off.delta == Catch::Approx(1.0));
+    REQUIRE(off.beta == Catch::Approx(0.3));
+    REQUIRE(off.gamma == Catch::Approx(0.2));
+    REQUIRE(off.rounds == 3);
+    REQUIRE(off.skip_camera_ids.empty());
+    REQUIRE_FALSE(off.strict_filter);
+    REQUIRE(off.strict_filter_window_frames == 10);
+    REQUIRE(off.strict_filter_min_fraction == Catch::Approx(0.5));
+    REQUIRE(off.mask_term_weight == 0.0);
+    REQUIRE(off.mask_term_window_s == Catch::Approx(2.0));
+    REQUIRE(off.mask_term_classes == "body");
+
+    auto const& on = reader.load_tracker_config("tc_win").tracker.kp_choice;
+    REQUIRE(on.window);
+    REQUIRE(on.support_window_s == Catch::Approx(1.5));
+    REQUIRE(on.delta == Catch::Approx(0.5));
+    REQUIRE(on.beta == Catch::Approx(0.4));
+    REQUIRE(on.gamma == Catch::Approx(0.1));
+    REQUIRE(on.rounds == 2);
+    REQUIRE(on.skip_camera_ids == std::vector<int>{3, 4});
+    REQUIRE(on.strict_filter);
+    REQUIRE(on.strict_filter_window_frames == 8);
+    REQUIRE(on.strict_filter_min_fraction == Catch::Approx(0.6));
+    REQUIRE(on.mask_term_weight == Catch::Approx(0.3));
+    REQUIRE(on.mask_term_window_s == Catch::Approx(2.5));
+    REQUIRE(on.mask_term_classes == "body,feet");
 }
 
 TEST_CASE("SessionReader load_sequence_info", "[session_reader]") {
@@ -1536,6 +1586,40 @@ TEST_CASE("load_keypoint_candidates reads the candidates of the keypoints the sk
     // A higher floor drops the weaker maximum too.
     CHECK(reader.load_keypoint_candidates("seq_kpc", cameras, skeleton, 0.5, 0).candidates.size() ==
           2);
+}
+
+TEST_CASE("load_keypoint_choice_data keeps every keypoint of the manifest and every peak",
+          "[session_reader][kp_candidates]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto skeleton = make_dual_set_skeleton();
+    auto cameras = reader.load_cameras_for_sequence("seq_kpc");
+
+    auto data = reader.load_keypoint_choice_data("seq_kpc", cameras, skeleton, 0);
+
+    CHECK(data.marker_keypoint == std::unordered_map<int, int>{{2, 14}, {3, 19}});
+    REQUIRE(data.keypoint_landmark.size() == 77);
+    CHECK(data.keypoint_landmark[14] == "soma77:LeftHand");
+    CHECK(data.keypoint_landmark[19] == "soma77:LeftHandIndex1");
+    CHECK(data.keypoint_landmark[5] == "soma77:slot5");  // named, but no marker is bound to it
+    REQUIRE(data.cameras.size() == 1);
+    REQUIRE(data.cameras[0].frames.size() == 1);
+    CHECK(data.cameras[0].frames[0].video_frame == 0);
+    CHECK(data.cameras[0].frames[0].crop_scale == Catch::Approx(2.0));
+    // All five maxima, including keypoint 5 (no marker) and the 0.05 one (under any floor).
+    REQUIRE(data.candidates.size() == 5);
+    CHECK(data.candidates[0].keypoint == 14);
+    CHECK(data.candidates[0].rank == 0);
+    CHECK(data.candidates[0].tracklet_id == 3);
+    CHECK(data.candidates[0].x == Catch::Approx(1100.0));
+    CHECK(data.candidates[0].ux == Catch::Approx(1100.0));  // the fixture's pixels are undistorted
+    CHECK(data.candidates[0].peak == Catch::Approx(0.9));
+    CHECK(data.candidates[4].peak == Catch::Approx(0.05));
+    CHECK(data.candidates[4].rank == 2);
+
+    // A window that excludes the row's timestamp (0.0 s) leaves nothing to choose from.
+    CHECK(reader.load_keypoint_choice_data("seq_kpc", cameras, skeleton, 0, 1.0, 2.0)
+              .candidates.empty());
 }
 
 TEST_CASE("load_keypoint_candidates is empty without candidates or without a bound marker",

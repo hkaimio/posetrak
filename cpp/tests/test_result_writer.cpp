@@ -904,3 +904,45 @@ TEST_CASE("ResultWriter::record_segmentation stores the masks the subject was ga
     sqlite3_close(db);
     fs::remove(path);
 }
+
+TEST_CASE("ResultWriter::write_kp_picks stores the picks of a camera and replaces them on a rerun",
+          "[result_writer]") {
+    fs::path path = fs::temp_directory_path() / "test_result_writer_kp_picks.db";
+    make_fixture_db(path, "run1", /*person_id=*/0, /*step=*/0, {1.0}, {0.1});
+    {
+        sqlite3* db = nullptr;
+        REQUIRE(sqlite3_open_v2(path.string().c_str(), &db, SQLITE_OPEN_READWRITE, nullptr) ==
+                SQLITE_OK);
+        exec_sql(db, R"(
+            CREATE TABLE tracking_kp_picks (
+                run_id TEXT NOT NULL, person_id INTEGER NOT NULL, camera_instance_id TEXT NOT NULL,
+                n_frames INTEGER NOT NULL, n_keypoints INTEGER NOT NULL, video_frames BLOB NOT NULL,
+                tracklet_ids BLOB NOT NULL, ranks BLOB NOT NULL,
+                n_candidate_keypoint_frames INTEGER NOT NULL, n_filter_emptied INTEGER NOT NULL,
+                n_picked INTEGER NOT NULL, PRIMARY KEY (run_id, person_id, camera_instance_id));
+        )");
+        sqlite3_close(db);
+    }
+    {
+        ResultWriter writer(path.string(), "run1", /*person_id=*/0);
+        KeypointPicks picks;
+        picks.camera_instance_id = "inst1";
+        picks.n_frames = 2;
+        picks.n_keypoints = 3;
+        picks.video_frames = {10, 11};
+        picks.tracklet_ids = {5, -1, -2, 6, 7, -1};
+        picks.ranks = {0, -1, 2, 1, 0, -1};
+        picks.n_candidate_keypoint_frames = 5;
+        picks.n_filter_emptied = 1;
+        picks.n_picked = 4;
+        writer.write_kp_picks(picks);
+        picks.n_picked = 3;
+        writer.write_kp_picks(picks);  // same key: replaced, not duplicated
+    }
+    CHECK(query_text(path, "SELECT COUNT(*) FROM tracking_kp_picks") == "1");
+    CHECK(query_text(path, "SELECT n_picked FROM tracking_kp_picks") == "3");
+    CHECK(query_text(path,
+                     "SELECT length(video_frames) || ',' || length(tracklet_ids) || ',' || "
+                     "length(ranks) FROM tracking_kp_picks") == "8,24,6");
+    fs::remove(path);
+}

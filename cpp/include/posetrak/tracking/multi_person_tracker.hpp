@@ -141,6 +141,9 @@ struct BuildPersonContextOptions {
 struct PersonContext {
     PersonSpec spec;
 
+    /// spec.sequence_id resolved to the full id (the spec may carry a prefix).
+    std::string full_sequence_id;
+
     // Loaded once in build_person_context().
     Skeleton skeleton;
     std::map<std::string, Camera> cameras_by_name;

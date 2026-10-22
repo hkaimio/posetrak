@@ -116,7 +116,7 @@ decision which keypoints to track is the skeleton's.
   what only a keypoint candidate has: the cost is a negative log-likelihood with a peak term
   (`kp_candidate_peak_weight`) and tracklet continuity has its own multiplier
   (`kp_candidate_tracklet_multiplier`), because the dots' is 1.0 by default (section 9.2).
-- The per-step assignment above does not reproduce the prototype's choice (section 9). Section 10 proposes
+- The per-step assignment above does not reproduce the prototype's choice (section 9). Section 10 describes
   a choice over a time window, computed in the tracking run before the filter steps.
 
 ## 6. Marker and markerless side by side
@@ -352,7 +352,9 @@ build. Scored by `eval_kp_candidates.py tracker`: mean body-joint distance (cm) 
 | productized, candidates on + multi-view agreement (`8a495422`, `dabf4fab`) | 16.5 / 18.9 | 5.8 / 7.3 |
 | productized, candidates on, cost only: `w_peak` 0, multiplier 1 (`380c2f18`, `763b375c`) | 15.3 / 17.3 | 5.7 / 7.3 |
 
-(Run ids are those of the work copy of the spike database, which holds the prototype's runs too. Target: no worse
+(Run ids are those of the work copy of the spike database, which holds the prototype's runs too. The productized rows
+were tracked with the capture's current extrinsic calibration, the prototype's runs and the reference with another: section 10.7
+repeats the comparison on the reference's calibration. Target: no worse
 than the prototype's cross-camera run plus 0.5 cm, at most 10.7 / 3.9 cm over the range: **not met**.)
 
 **Result: candidates on do not clearly beat candidates off.** The gain over the run's own strongest maxima, which
@@ -377,7 +379,7 @@ within 3% of the label: 88.2% against 86.9% for the strongest maximum on the sam
 - Multi-view agreement on top: 0.3 cm better for subject 1, 0.2 cm worse for subject 2.
 
 The prototype's gain came from a choice made per tracklet and over time, which the tracker's per-step assignment
-does not reproduce. Section 10 compares the two and proposes the windowed choice.
+does not reproduce. Section 10 describes the windowed choice that does the same inside the tracking run.
 
 ### 9.4 Like for like
 
@@ -435,162 +437,222 @@ filter empties for the persons in contact (27-34% in the hard windows, section 7
 modifier: it excludes a pairing, and only after the tracklet has a history of at least five steps. Multi-view
 agreement gave the same improvement on subject 1 (14.4 cm) and more on subject 2 (6.9 against 7.9 cm).
 
-## 10. Choice of candidates over a time window (proposal)
+## 10. Choice of candidates over a time window
 
-Section 9 shows that the tracker's per-step assignment does not reproduce the prototype's results. The two choose
-differently in more than one way. This section lists the differences, proposes a choice that works like the
-prototype's, and places it inside the tracking run.
+Section 9 shows that the tracker's per-step assignment does not reproduce the prototype's results. The prototype
+chose its candidates offline, per camera, keypoint and frame, from the candidates, the other cameras and the skeleton
+alone. This section describes that choice as it runs in the tracker, as a phase of the tracking run before the first
+filter step (`tracker_configs.kp_candidate_choice = 'window'`), and how it was measured.
 
-### 10.1 What the prototype did
+### 10.1 The choice
 
-The prototype's best runs (cross-camera choice, with or without the strict mask filter or the soft mask term)
-decided per camera, keypoint and frame, offline, over the whole range, and fed the result to the tracker as
-ordinary fixed observations. The tracker chose nothing.
+The choice is made per person. Each person's candidates come from its own crops, and an exclusive assignment of
+candidates between persons was measured as harmful and is not part of it (`WindowChoice`,
+`keypoint_window_choice.hpp`; it has no database or tracker dependency).
 
-1. **Strict mask filter, before the choice.** A candidate stays only if at least half of the detections of its
-   tracklet within +-10 frames of its frame lie on the person's own mask. The window looks backwards and forwards.
-   Removed candidates take no part in anything after it. In the hard windows the filter empties 27-34% of the
-   keypoint-frames of the persons in contact (section 7).
-2. **Starting pick per frame:** the strongest candidate that agrees with the other cameras (triangulation
-   consensus, the `consistent` flag of the prototype's linking, with a per-camera inlier radius from the
-   residuals), else the candidate continuing the previous frame's tracklet, else the first candidate.
-3. **Score of every candidate, then the best per frame, repeated three times** from the previous round's picks:
+1. **Consensus flag.** For each time bucket (a frame of the fastest camera) and keypoint, every pair of candidates
+   from two cameras is triangulated, the other cameras' candidates within an inlier radius of the projection are
+   counted, and the best set of at least three cameras is flagged `consistent`. The radius of a camera is 2.5 times
+   the 30th percentile of the residuals of a first pass over every ninth bucket with a radius of 60 px, at least 12 px
+   and at most 60 px. All cameras vote, the ones that take no part in the choice included. The flags are computed over
+   the loaded window, after tracklet decisions and before the strict filter.
+2. **Strict mask filter** (optional). A candidate stays only if at least a minimum share (0.5) of the detections of its
+   tracklet within +-10 video frames lie on the person's own mask. The window looks backwards and forwards. Detections
+   in a frame without a mask are not counted; a candidate with no counted detection stays. Removed candidates take no
+   part in anything after it. A keypoint-frame left without a candidate has no pick and gives no observation: the
+   tracker predicts that keypoint, which is better than following a wrong candidate.
+3. **Starting pick** of every keypoint-frame: the strongest candidate that is `consistent`, else the candidate
+   continuing the previous frame's tracklet, else the first (rank 0).
+4. **Score of every candidate, then the best per frame, repeated for three rounds** from the previous round's picks of
+   all cameras:
 
        score = A + delta * X + beta * consistent + gamma * peak [+ m * M]
 
-   - `A`, skeleton-neighbour support: for each neighbouring keypoint in the skeleton with a pick in that frame,
-     1 if the candidate is within the pair's distance limit of that pick (in box heights), decaying
-     exponentially beyond it (scale 0.05 box heights); the mean over the neighbours.
-   - `X`, cross-camera support: for each other camera with a pick of the same keypoint at the nearest frame
-     (within 8 ms), 1 if that pick lies within 0.04 box heights of the candidate's epipolar line, decaying beyond;
-     the mean over the cameras.
-   - `M` (the variant with the soft mask term, body keypoints without hands and feet): +1 on the person's own
-     mask, -1 on another person's.
-   - **`A`, `X` and `M` are averaged over the candidate's tracklet within a window around the frame**
-     (+-1.0 s for `A` and `X`, +-2.0 s for `M`), not over the whole tracklet. A tracklet that jumps to another
-     person's keypoint loses support around the jump only, so the choice leaves it there and keeps it elsewhere.
-     Trusting a whole tracklet, or the tracklet chosen on the previous step, does not do this.
-   - Weights of the measured runs: `delta` 1.0, `beta` 0.3, `gamma` 0.2, `m` 0.3.
-4. **No candidate, no observation.** A keypoint-frame left without candidates (by the filter, or by rejected
-   tracklets) gives no observation. The tracker then predicts that keypoint, which is better than following
-   a wrong candidate.
-5. **Per person.** Each person's candidates come from its own crops, and the choice runs per person. Exclusive
-   assignment of candidates between persons was measured as harmful and is not part of it.
-
-The pair distance limits were the 98th percentile of the 2D distances between neighbouring keypoints in the
-operator's labels outside the hard windows. A product cannot take them from labels (section 10.4).
+   - `A`, skeleton-neighbour support: for each neighbouring keypoint with a pick in that frame, 1 if the candidate is
+     within the pair's distance limit of that pick (in box heights, distorted pixels), decaying exponentially beyond it
+     (scale 0.05 box heights); the mean over the neighbours. A pair without a limit gives no support.
+   - `X`, cross-camera support: for each other camera that takes part and has a pick of the same keypoint at the
+     nearest frame (within 8 ms), 1 if that pick lies within 0.04 box heights of the candidate's epipolar line
+     (undistorted pixels), decaying beyond it; the mean over the cameras.
+   - `M`, the mask term: +1 on the person's own mask, -1 on another person's, 0 on the background, for the keypoint
+     classes the setting names (default: the body without hands and feet).
+   - `A`, `X` and `M` are averaged over the candidate's tracklet within a window around the frame (+-1.0 s for `A` and
+     `X`, +-2.0 s for `M`; prefix sums per tracklet, truncated, not padded, at the ends of the loaded window). A tracklet
+     that jumps to another person's keypoint loses support around the jump only. Where the tracklet has no value in the
+     window the average is 0.5 (0 for `M`). A candidate without a tracklet is a tracklet of its own.
+   - `peak` is the heatmap peak, the stored peak over the pose model's confidence scale (5.0 for SOMA-77).
+   - Ties go to the candidate of the lowest rank. Defaults: `delta` 1.0, `beta` 0.3, `gamma` 0.2, `m` 0.3 when on.
+5. **Decisions.** A tracklet range rejected, marked as another subject's or forbidden for the keypoint's marker is
+   removed; one assigned to the keypoint's marker is the pick of every frame of its range whatever its score. Hand-placed
+   keypoint edits stay.
 
 ### 10.2 Against the tracker's per-step assignment
 
-| | Prototype, windowed choice | Tracker, per-step assignment (section 9) |
+| | Windowed choice | Per-step assignment (section 9) |
 |---|---|---|
 | Time used | +-1 s around the frame, both directions, three rounds | the current step only |
 | Main evidence | skeleton neighbours' picks, other cameras' picks | distance to the filter's one-step prediction |
 | Tracklet | support averaged within the window | continuity with the previous step's choice, which follows a jump |
 | Other cameras | epipolar distance to their settled picks; triangulation consensus | epipolar distance to their candidates at the step (option) |
-| Mask | tracklet window in both directions, removes candidates; soft term | tracklet history of won steps only, excludes after five steps (option) |
+| Mask | point lookup of the candidate's tracklet in both directions: removes candidates; soft term | tracklet history of won steps only, a neighbourhood of the position, excludes after five steps (option) |
 | Nothing fits | no observation | the nearest candidate within the gate |
 
-The per-step assignment depends on the prediction, so it keeps an error once the prediction carries it. On fast
-limbs, the prediction is worst exactly where the choice is hardest. The windowed choice uses only 2D detections,
-the calibration and the masks, not the filter's state. That is why it can run before the filter.
+The per-step assignment depends on the prediction, so it keeps an error once the prediction carries it. The windowed
+choice uses only 2D detections, the calibration and the masks, not the filter's state, which is why it can run before
+the filter. The per-step assignment stays as the other mode of `kp_candidate_choice` (`'step'`, the default).
 
 ### 10.3 Where it runs: a phase of the tracking run
 
-The choice runs inside `posetrak-tracker track`, as a phase between loading and the first filter step:
+The choice runs inside `posetrak-tracker track` (`keypoint_choice_phase.cpp`), between loading and the first filter
+step, and writes nothing but the run's own results:
 
-1. Load the candidates of the tracked window plus the support window on both sides, with mask labels at the run's
-   pinned segmentation revision (one mask decode per camera and frame of the window, as the strict mask option
-   already does per step).
-2. Apply the tracklet decisions of `dot_assignment_edits` (reject, other, forbid: candidates removed for the
-   frame range; assign: the pick fixed, as the prototype's labeller fixed edited picks).
-3. Apply the strict mask filter if enabled, then compute the picks per person.
-4. Feed the picks to the filter as the fixed POSITION observations of the markers bound to the keypoints, in place
-   of the strongest maxima. Nothing else in the step loop changes.
+1. load the candidates of the tracked window plus a margin on both sides (the support window, or the mask window if the
+   mask term is on), every keypoint of the sequence's candidate manifest, any peak
+   (`SessionReader::load_keypoint_choice_data`);
+2. apply the tracklet decisions (`--tracklet-assignments`, exported from `dot_assignment_edits`);
+3. read the mask label at every candidate at the run's pinned segmentation revision when the strict filter or the mask
+   term is on (`mask_label_at`, with the decoder and the scaling of the per-step option; one decode per camera and
+   frame of the window);
+4. flag the consensus, apply the strict filter, compute the picks;
+5. **replace the stored body row** of every (camera, frame) of the cameras that take part by the picks
+   (`load_observations(..., row_overrides)`) and build the observations from them. The picked candidate's position and
+   confidence take the place of the stored keypoint; a keypoint without a pick has confidence 0. Replacing only the
+   positions of the bound markers is not enough: the child-minus-parent pairs of a configuration with relative
+   observations are built from the same row and would carry the strongest maxima into the filter next to the picks.
+   A camera that takes part in no choice (`kp_choice_skip_camera_ids`, a wide-lens camera, say) keeps its stored row
+   and does not support the picks of the others.
 
-This gives one command and one run record, and no stored intermediate result to keep consistent with masks,
-edits or detection. The alternative, a separate selection command that writes the picks into a new sequence
-after finalisation, was rejected for this reason. It would add a step to the workflow, a derived artifact that
-goes stale when masks or tracklet decisions change, and a choice of which picks a given run used. Inside the run,
-the picks follow the current masks and decisions automatically, and re-tracking after an edit is the same command.
+This gives one command and one run record, and no stored intermediate result to keep consistent with masks, edits or
+detection. Re-tracking after an edit is the same command. `run-persons` runs the phase for each person without masks.
 
-The picks are the editor's main view (stage 10: the chain of picks per keypoint, tracklet lanes). The run
-records them with its results: per person, camera, keypoint and frame, the candidate's tracklet id and rank. The
-editor then shows what the run used without recomputing it. The storage, a blob per (run, person, camera) or
-columns of the existing assignment trace, is decided with the editor.
+**Stored picks.** The run records its picks in `tracking_kp_picks`, one row per (run, person, camera): little-endian
+blobs for the video frames, `int32[frame, keypoint]` tracklet ids (-1 no pick, -2 picked without a tracklet) and
+`int8[frame, keypoint]` ranks, with the keypoint-frames that had a candidate, the ones the strict filter emptied and
+the ones picked. The editor of tracklet decisions reads what the run used from this table without recomputing it. A
+blob per camera (about 400 bytes per frame and camera for 77 keypoints) is read whole and needs no join for the
+editor's view, a chain of picks per keypoint over time; `tracking_assignment_trace` has a row per candidate and slot
+for a requested range of steps only, is opt-in, and would need a row per keypoint-frame and camera for every run. The share of keypoint-frames the filter emptied is printed per person in the
+run's log and sums from the rows.
 
-Tracklet editing is what makes the phase worth having in the tracker. Every edit of stage 10 (reject a
-tracklet over a range, assign a tracklet, mark a keypoint not visible) is a constraint of this choice. It is
-exactly how the prototype's labeller worked, and the choice recomputes around the constraint, so the neighbouring
-keypoints and the other cameras follow. With the per-step assignment, an edit only removes or forces one pairing
-at a time.
-
-The per-step assignment of section 9 stays as a second mode for comparison. The run's configuration names the
-mode: `tracker_configs.kp_candidate_choice` `'window'` (default when candidates are enabled) or `'step'`.
+`track run --kp-choice-dump FILE` writes every candidate with its consensus flag, whether it was removed and whether it
+was picked, for comparing the choice with another implementation.
 
 ### 10.4 Neighbour distance limits without labels
 
-The limit of a pair of neighbouring keypoints is a property of the keypoint layout and of the box, not of a
-person. Two sources:
+The limit of a pair of neighbouring keypoints is a property of the keypoint layout and of the box, not of a person.
 
-- **A table shipped with the pose model:** the 98th percentile per SOMA-77 pair, in box heights, from labelled
-  data. To keep the acceptance honest, the table is derived from the labels of range 1 only and evaluated on
-  range 3.
-- **Estimated in the run:** the same percentile from the picks that agree across cameras (`consistent`)
-  over the sequence.
-
-The build measures both on range 3 and keeps the table unless the estimate is clearly better. The estimate
-depends on the agreement, which fails where the limits matter most.
+- **A table shipped with the pose model** (`posetrak/detection/soma77_neighbour_limits.py`, written into a choice model
+  file for the tracker by `kp_choice_model.py`): 1.15 times the 98th percentile of the labelled distance between the
+  keypoints of the pair in box heights, pooled over the persons and cameras of a labelled range, for the pairs with more
+  than 50 samples. `python/tools/gt/derive_neighbour_limits.py` derives it. The shipped table comes from range 1 of the
+  evaluation set only (28 pairs, 9,300-10,200 samples each: the labelled units cover the body, not the fingers; limits
+  0.06-0.58 box heights, median 0.30) and is evaluated on range 3. A pair outside the table gives no support.
+- **Estimated in the run** (`estimate_neighbour_limits.py`): the same percentile over the candidates the consensus
+  flagged. Over range 3 it covers all 76 pairs, but it is looser than the table where picks agree on the wrong
+  candidate: on the 28 pairs of the table the estimate is 0.96-5.3 times the table (median 1.60) for subject 1 and
+  0.48-2.1 times (median 0.95) for subject 2, with the largest ratios on the jaw, neck, toes and head. The tracker
+  results with it are not better (section 10.7), so the table stays. `track run --kp-choice-model FILE` takes another
+  file.
 
 ### 10.5 Settings
 
-The new settings go into `tracker_configs`, each recorded with the run:
+In `tracker_configs`, each recorded with the run and set by a `track run` option; the defaults are the prototype's
+values. A NULL column means the default.
 
-- the mode;
-- the strict mask filter (on/off, window +-10 frames, minimum fraction 0.5);
-- the soft mask term (weight `m`, window, the keypoint classes it applies to);
-- the support window (+-1.0 s);
-- `delta`, `beta` and `gamma`;
-- the number of rounds (3).
+| Column | Option | Default |
+|---|---|---|
+| `kp_candidate_choice` (`'window'` \| `'step'`) | `--kp-choice` | `'step'` |
+| `kp_choice_support_window_s` | `--kp-support-window` | 1.0 |
+| `kp_choice_delta`, `kp_choice_beta`, `kp_choice_gamma` | `--kp-delta`, `--kp-beta`, `--kp-gamma` | 1.0, 0.3, 0.2 |
+| `kp_choice_rounds` | `--kp-rounds` | 3 |
+| `kp_choice_skip_camera_ids` (JSON array of camera indices) | `--kp-skip-camera LABEL` (repeatable) | none |
+| `kp_strict_filter`, `kp_strict_filter_window_frames`, `kp_strict_filter_min_fraction` | `--kp-strict-filter`, `--kp-strict-window`, `--kp-strict-min-fraction` | off, 10, 0.5 |
+| `kp_mask_term_weight`, `kp_mask_term_window_s`, `kp_mask_term_classes` | `--kp-mask-weight`, `--kp-mask-window`, `--kp-mask-classes` | 0 (off), 2.0, `body` |
 
-Defaults are the prototype's values. Whether the strict filter and the soft mask term are on by default is decided
-by the acceptance figures.
-
-The strict filter needs reviewed masks around the contact windows: the measured gain comes from masks reviewed
-there. On unreviewed masks it removes correct candidates of hidden keypoints. The user guide says so, and the
-tracking run reports the share of keypoint-frames the filter emptied, per person.
+The mask options need `--seg-run` (the label of the person is read from the subject registry, or given with
+`--seg-label`). The strict filter needs reviewed masks around the contact windows: on unreviewed masks it removes
+correct candidates of hidden keypoints. The run reports the share of keypoint-frames the filter emptied, per person.
+The choice is used only with `--candidates`.
 
 ### 10.6 Cost
 
-- **Time.** Per round, every candidate is scored against up to about four neighbours and four other cameras. The
-  window averages are prefix sums per tracklet. An 85 s five-camera trial at 120 Hz has about 50,000
-  camera-frames per person and about 90 candidates per camera-frame, i.e. about 4.6 million candidates, each scored
-  against up to eight picks per round: about 10^8 simple operations over three rounds, seconds in C++ against
-  minutes of filtering.
-- **Mask labels.** One decode per camera and frame of the window, the cost the strict mask option already has
-  (+20-30% of tracking time).
-- **Memory.** The candidates of the window: 21 MB of candidate rows per 5 s range of three persons
-  (section 9.5), about 350 MB for an 85 s trial, more as loaded structures; to be measured.
+Optimized build, range 3 (51.7-56.8 s), five cameras, one person (332,000 candidates, 176,000 keypoint-frames of the
+four cameras that take part), the whole run about 107 s:
 
-### 10.7 Acceptance
+| | Measured, 5 s | Extrapolated to an 85 s trial |
+|---|---|---|
+| Phase wall time | 2.5 s: load 0.1, consensus 1.7, choice 0.1, the rest (conversion of the candidates, reload of the observations) 0.6 | about 43 s (linear in the candidates; the consensus is the largest part) |
+| With the strict filter or the mask term | + 14.6 s of mask decoding (3,013 camera-frames, 4.9 ms each) | + about 250 s per person |
+| Peak memory of the phase | 331 MB at the end of the phase, 216 MB before it (+115 MB) | + about 2 GB if it grows linearly; the filter run peaks at about 4.7 GB for 5 s and 14-20 GB for an 85 s trial |
+| Whole run | 98 s with candidates off, 107-115 s with the choice (the spread between runs is about 10 s); the process peaks at 4.72 GB either way | |
 
-The tracker's own runs, scored by the harness as in section 9.3 (range 3, both subjects), on the boxes of
-`fcb6b961`:
+The consensus triangulates every pair of candidates of two cameras for each keypoint and bucket, which the first
+estimate of this section left out; the scoring itself is about 0.1 s.
 
-- **The windowed choice** with the neighbour table from range 1: within 0.5 cm of the prototype's cross-camera run
-  (10.2 / 3.4 cm).
-- **With the strict filter:** against the prototype's filter with the cross-camera choice (8.8 / 4.7).
-- **With the soft mask term:** against the prototype's 10.0 / 3.3.
+### 10.7 Acceptance results
 
-Also required:
+Range 3 (51.7-56.8 s), subjects 1 and 2, boxes of `fcb6b961`, detection run `b56f18cd` finalised over the whole span of
+every track (sequences `9bfda1ba`, `40fd1be1`), tracker configuration and skeletons of the label-fed reference runs,
+optimized build, scored by `eval_kp_candidates.py tracker` (mean body-joint distance in cm to the label-fed reference
+run from 52.0 s, over the range / inside the hard windows). The tracking runs use the extrinsic calibration of the
+reference and of the prototype's runs (`5351f35e`); the productized rows of section 9.3 used the capture's current
+one (`b416cd21`).
 
-- **Picks equal to the prototype's.** On the frames whose crops are the same, the windowed choice's picks equal
-  the prototype's picks for the same settings: the same candidate on at least 99% of the keypoint-frames. This
-  check is independent of the tracker. It separates a wrong port from the effect of the box and limit
-  differences.
-- **Edits.** Unit tests: a rejected tracklet range is never picked, an assigned one always is, and the
-  neighbouring keypoints' picks change only through the support terms.
-- **Cost:** the phase's wall time and memory reported separately from the filter's.
+| Run | Subject 1 range / hard | Subject 2 range / hard |
+|---|---|---|
+| prototype, cross-camera (`db888f74`, `c30c6322`) | 10.2 / 10.9 | 3.4 / 4.2 |
+| prototype, cross-camera + body mask term (`47613f1f`, `01aa291b`) | 10.0 / 10.2 | 3.3 / 4.0 |
+| prototype, strict mask filter + cross-camera (`bea2b0fd`, `150da557`) | 8.8 / 12.0 | 4.7 / 5.9 |
+| the prototype's input sequences of the cross-camera runs, productized tracker (`5304c2ae`, `d7df80f0`) | 10.9 / 11.4 | 3.3 / 4.2 |
+| candidates off (`573a2819`, `73a54589`) | 17.8 / 20.9 | 5.2 / 6.9 |
+| `'step'`, `w_peak` 2, multiplier 4 (`9c448a29`, `cfc0ddc1`) | 17.1 / 19.4 | 5.3 / 7.1 |
+| **`'window'`** (`03ff3389`, `29d9acf6`) | **16.0 / 18.2** | **4.6 / 6.1** |
+| `'window'` + strict filter (`880a9cc3`, `04cb6255`) | 15.9 / 18.4 | 4.5 / 5.6 |
+| `'window'` + body mask term (`f0b28f4f`, `ce11dbe2`) | 15.7 / 17.8 | 4.6 / 6.0 |
+| `'window'` with the limits estimated in the run (`c8af56d7`, `e71e292f`) | 16.2 / 18.3 | 4.7 / 6.3 |
 
-If the windowed choice reaches the prototype's figures, it becomes the mode used by default when candidates are
-enabled. Candidates themselves stay an option of the detection run.
+(Target for `'window'`: within 0.5 cm of the prototype's cross-camera run, at most 10.7 / 3.9 over the range:
+**not met**. Run ids are those of the work copy of the session database.) The strict filter emptied 37,129 of 176,113
+keypoint-frames (21.1%) of subject 1 and 51,744 of 184,523 (28.0%) of subject 2.
+
+The windowed choice is better than both candidates off and the per-step assignment for both subjects (range: 1.8 and
+0.6 cm better than off, 1.1 and 0.7 cm better than `'step'`), and neither option changes that by more than 0.5 cm. It
+does not reach the prototype's figures. What was checked, in order:
+
+- **The choice itself is the prototype's.** Given the same candidates, the same tracklets and the consensus flags of the
+  prototype's own code, the tracker's choice and `xcam.XAssign.run` pick the same candidate for 176,112 of 176,113
+  keypoint-frames of subject 1 and 184,520 of 184,523 of subject 2 (`eval_kp_candidates.py window-picks` against the
+  prototype's picks of the run's own candidates). The consensus flags equal those of the prototype's code on the same
+  candidates in 99.994% of the candidates. The prototype's result does not depend on which of two tracklet partitions
+  of the same candidates it uses.
+- **The tracker is the prototype's.** The prototype's own input sequence of the cross-camera run, tracked by the
+  productized tracker, gives 10.9 / 11.4 and 3.3 / 4.2 cm.
+- **The difference is in the keypoints the filter is fed.** Against the picks the prototype made on its frozen
+  candidate file, on the frames whose crop is the same in both (2,466 and 2,522 frames), the run picks the same
+  candidate for 92.9% (subject 1) and 94.0% (subject 2) of the keypoint-frames with a pick, 99.0% and 98.6% outside the
+  hard windows and 88.5% and 90.6% inside them. The mismatches are all keypoint-frames both candidate sets contain
+  (a prototype candidate is missing from the run's in 1 and 13 of them); the choices differ. The frozen file's consensus flags
+  differ from what the prototype's code computes on the same candidates (45.7% of the candidates flagged against
+  40.6%, different in 29% of them; the file's positions carry a half-cell offset that a geometric consensus is
+  sensitive to). With the frozen file's flags on the run's own candidates the agreement with its picks is 97.3% (95.5%
+  in the hard windows), its tracklets change nothing.
+- **The remaining difference is split between the two kinds of frame.** Subject 1, the prototype's input sequence with
+  the run's picks on the frames whose crop is the same: 13.1 / 15.0 cm; with the run's picks on the other frames
+  (18% of the frames, 60% of them in the hard windows, where the productized boxes differ from the prototype's crops,
+  which no productized run reproduces, section 9.4): 15.0 / 16.7 cm; the run's picks everywhere 16.0 / 18.2 cm.
+
+So the prototype's figures depend on candidates, on the frames in contact, that the productized extraction does not
+reproduce, and about 60% of the disagreement in picks on equal crops comes from the consensus flags of its file. The
+windowed choice is therefore not made the default, and the strict filter and the mask term stay off: with the
+productized candidates they change the tracker figures by 0.5 cm or less.
+
+### 10.8 What the first description got wrong
+
+- The phase needs the consensus (section 10.1, item 1), which is the largest part of its cost, and the picks have to
+  replace the stored keypoint row, not only the fixed observations of the bound markers (section 10.3).
+- The pair limits are 1.15 times the 98th percentile and need more than 50 samples; the labelled units cover the body
+  only, so the table covers 28 of the 76 pairs.
+- The peak weight applies to the heatmap peak, not to the stored confidence.
+- The prototype's runs, and the reference they are scored against, were tracked with another extrinsic calibration than
+  the capture's current one.
+- The estimate of the cost (section 10.6) left out the consensus and the mask decoding.

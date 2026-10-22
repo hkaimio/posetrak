@@ -1214,6 +1214,45 @@ def test_migrate_adds_the_kp_candidates_enabled_column() -> None:
         conn.close()
 
 
+def test_migrate_adds_the_window_choice_settings_and_the_picks_table() -> None:
+    """Registry v18->v19 and session v69->v70 add the windowed-choice settings, repeatably; the session adds the picks table."""
+    import sqlite3
+
+    from posetrak.db.db import _migrate_registry_v18_to_v19, _migrate_session_v69_to_v70
+
+    expected = {
+        "kp_candidate_choice", "kp_choice_support_window_s", "kp_choice_delta", "kp_choice_beta", "kp_choice_gamma",
+        "kp_choice_rounds", "kp_choice_skip_camera_ids", "kp_strict_filter", "kp_strict_filter_window_frames",
+        "kp_strict_filter_min_fraction", "kp_mask_term_weight", "kp_mask_term_window_s", "kp_mask_term_classes",
+    }
+    for migrate, version in ((_migrate_registry_v18_to_v19, 19), (_migrate_session_v69_to_v70, 70)):
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE tracker_configs (id TEXT PRIMARY KEY)")
+        migrate(conn)
+        migrate(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tracker_configs)")}
+        assert expected <= cols
+        assert get_schema_version(conn) == version
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert ("tracking_kp_picks" in tables) == (version == 70)
+        conn.close()
+
+
+def test_fresh_databases_hold_the_window_choice_columns(tmp_path: Path) -> None:
+    """A new registry has the settings in tracker_configs; a new session has the picks table with the migration's columns."""
+    registry = create_registry(tmp_path / "reg.db")
+    cols = {r[1] for r in registry.execute("PRAGMA table_info(tracker_configs)")}
+    assert {"kp_candidate_choice", "kp_strict_filter", "kp_mask_term_classes"} <= cols
+    registry.close()
+    session = create_session(tmp_path / "ses.db")
+    picks = [r[1] for r in session.execute("PRAGMA table_info(tracking_kp_picks)")]
+    assert picks == [
+        "run_id", "person_id", "camera_instance_id", "n_frames", "n_keypoints", "video_frames", "tracklet_ids",
+        "ranks", "n_candidate_keypoint_frames", "n_filter_emptied", "n_picked",
+    ]
+    session.close()
+
+
 # ---------------------------------------------------------------------------
 # PRAGMA foreign_keys
 # ---------------------------------------------------------------------------

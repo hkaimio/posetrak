@@ -508,6 +508,40 @@ CREATE TABLE IF NOT EXISTS tracking_assignment_trace (
 CREATE INDEX IF NOT EXISTS idx_tracking_assignment_trace_lookup
     ON tracking_assignment_trace (run_id, person_id, tracker_step);
 
+-- The heatmap maximum a tracking run took for each keypoint of each frame when it chose keypoint candidates
+-- over a time window (tracker_configs.kp_candidate_choice = 'window'): the picks the run's filter used as its
+-- fixed observations, so an editor shows them without recomputing the choice. One row per (run, person,
+-- camera), written by posetrak-tracker when the choice phase has finished. A run with the per-step assignment
+-- or without candidates writes none.
+CREATE TABLE IF NOT EXISTS tracking_kp_picks (
+    -- the tracking run
+    run_id                      TEXT    NOT NULL REFERENCES tracking_runs(id),
+    -- subject index within the run (as in tracking_results)
+    person_id                   INTEGER NOT NULL,
+    -- the camera of the picks; references registry: camera_instances(id)
+    camera_instance_id          TEXT    NOT NULL,
+    -- number of frames of the camera the person has candidates for, within the loaded window
+    n_frames                    INTEGER NOT NULL,
+    -- width of the picks arrays: the highest keypoint index of the sequence's candidate manifest plus one
+    n_keypoints                 INTEGER NOT NULL,
+    -- little-endian int32[n_frames]: video frame (capture_videos frame index) of each row, ascending
+    video_frames                BLOB    NOT NULL,
+    -- little-endian int32[n_frames, n_keypoints], row-major: detection tracklet id of the candidate picked
+    -- for the keypoint in that frame; -1 = no pick (no candidate left, or the keypoint is not bound to a
+    -- marker of the skeleton); -2 = picked but the candidate has no tracklet
+    tracklet_ids                BLOB    NOT NULL,
+    -- int8[n_frames, n_keypoints], row-major: heatmap rank of the picked candidate (0 = the strongest
+    -- maximum of its keypoint in that frame); -1 = no pick
+    ranks                       BLOB    NOT NULL,
+    -- keypoint-frames of this camera with at least one candidate before the strict mask filter
+    n_candidate_keypoint_frames INTEGER NOT NULL,
+    -- of those, the keypoint-frames the strict mask filter left without a candidate; 0 when the filter is off
+    n_filter_emptied            INTEGER NOT NULL,
+    -- keypoint-frames with a pick
+    n_picked                    INTEGER NOT NULL,
+    PRIMARY KEY (run_id, person_id, camera_instance_id)
+);
+
 -- Automatic proposals of which marker slot each dot tracklet is, made without the
 -- tracker from the stored poses of a tracking run (posetrak.markers.autolabel).
 -- One row per tracklet lying on the subject, assigned or not. Written

@@ -27,12 +27,12 @@ _log = logging.getLogger(__name__)
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 18
+REGISTRY_SCHEMA_VERSION: Final[int] = 19
 
 #: Seconds a connection waits for another writer's lock before failing. The C++
 #: tracker's connections use the same value.
 BUSY_TIMEOUT_S: Final[float] = 60.0
-SESSION_SCHEMA_VERSION: Final[int] = 69
+SESSION_SCHEMA_VERSION: Final[int] = 70
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -349,6 +349,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 17
     if actual == 17:
         _migrate_registry_v17_to_v18(conn)
+        actual = 18
+    if actual == 18:
+        _migrate_registry_v18_to_v19(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -846,6 +849,43 @@ def _migrate_registry_v17_to_v18(conn: sqlite3.Connection) -> None:
     """
     _add_kp_candidate_config_columns(conn)
     _set_schema_version(conn, 18)
+    conn.commit()
+
+
+_KP_CHOICE_CONFIG_COLUMNS = (
+    ("kp_candidate_choice", "TEXT"),
+    ("kp_choice_support_window_s", "REAL"),
+    ("kp_choice_delta", "REAL"),
+    ("kp_choice_beta", "REAL"),
+    ("kp_choice_gamma", "REAL"),
+    ("kp_choice_rounds", "INTEGER"),
+    ("kp_choice_skip_camera_ids", "TEXT"),
+    ("kp_strict_filter", "INTEGER"),
+    ("kp_strict_filter_window_frames", "INTEGER"),
+    ("kp_strict_filter_min_fraction", "REAL"),
+    ("kp_mask_term_weight", "REAL"),
+    ("kp_mask_term_window_s", "REAL"),
+    ("kp_mask_term_classes", "TEXT"),
+)
+
+
+def _add_kp_choice_config_columns(conn: sqlite3.Connection) -> None:
+    """Add the settings of the windowed choice of keypoint candidates to tracker_configs where they are missing."""
+    existing = _tracker_config_columns(conn)
+    for column, sql_type in _KP_CHOICE_CONFIG_COLUMNS:
+        if column not in existing:
+            conn.execute(f"ALTER TABLE tracker_configs ADD COLUMN {column} {sql_type}")
+
+
+def _migrate_registry_v18_to_v19(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 18 to 19.
+
+    v19 adds the tracker_configs columns of the windowed choice of keypoint candidates (kp_candidate_choice and
+    the kp_choice_*, kp_strict_filter* and kp_mask_term_* settings), mirroring the session schema v69->v70
+    change -- see _migrate_session_v69_to_v70.
+    """
+    _add_kp_choice_config_columns(conn)
+    _set_schema_version(conn, 19)
     conn.commit()
 
 
@@ -2214,6 +2254,37 @@ def _migrate_session_v68_to_v69(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v69_to_v70(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 69 to 70.
+
+    v70 adds the tracker_configs settings of the windowed choice of keypoint candidates (mirroring registry
+    v18->v19) and the tracking_kp_picks table, in which a run that chose candidates over a time window records
+    the candidate it picked for each keypoint of each frame. A configuration from before keeps NULL in the new
+    columns, which means the per-step assignment ('step').
+    """
+    _add_kp_choice_config_columns(conn)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tracking_kp_picks (
+            run_id                      TEXT    NOT NULL REFERENCES tracking_runs(id),
+            person_id                   INTEGER NOT NULL,
+            camera_instance_id          TEXT    NOT NULL,
+            n_frames                    INTEGER NOT NULL,
+            n_keypoints                 INTEGER NOT NULL,
+            video_frames                BLOB    NOT NULL,
+            tracklet_ids                BLOB    NOT NULL,
+            ranks                       BLOB    NOT NULL,
+            n_candidate_keypoint_frames INTEGER NOT NULL,
+            n_filter_emptied            INTEGER NOT NULL,
+            n_picked                    INTEGER NOT NULL,
+            PRIMARY KEY (run_id, person_id, camera_instance_id)
+        )
+        """
+    )
+    _set_schema_version(conn, 70)
+    conn.commit()
+
+
 def _split_statements(sql: str) -> list[str]:
     """Split a migration script into complete statements (triggers keep their ``;`` inside BEGIN..END)."""
     out, buf = [], ""
@@ -2593,6 +2664,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 68
     if actual == 68:
         _migrate_session_v68_to_v69(conn)
+        actual = 69
+    if actual == 69:
+        _migrate_session_v69_to_v70(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

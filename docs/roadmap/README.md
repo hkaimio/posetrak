@@ -52,6 +52,16 @@ Documents:
 
 ### data-model
 
+#### Segmentation Mask Versioning
+
+**Status:** 🚧 In progress (95%) · **Categories:** `data-model`, `segmentation` · **Last updated:** 2026-10-20
+
+Append-only mask revisions per segmentation run, the revision recorded with every detection and tracking run that used masks, a latest-revision view for current readers, staleness check and incremental refresh of mask-sourced detection runs.
+
+Documents:
+- [status.md](features/segmentation-versioning/status.md)
+- [segmentation-versioning-design.md](features/segmentation-versioning/segmentation-versioning-design.md)
+
 #### Session DB Concurrency and Run Status
 
 **Status:** 🚧 In progress (90%) · **Categories:** `data-model`, `tracker-core`, `ui` · **Last updated:** 2026-10-17
@@ -61,16 +71,6 @@ Busy timeouts and short transactions for every session database writer, a status
 Documents:
 - [status.md](features/session-db-concurrency/status.md)
 - [session-db-concurrency-design.md](features/session-db-concurrency/session-db-concurrency-design.md)
-
-#### Segmentation Mask Versioning
-
-**Status:** 📝 Proposal · **Categories:** `data-model`, `segmentation` · **Last updated:** 2026-10-17
-
-Append-only mask revisions per segmentation run, the revision recorded with every detection and tracking run that used masks, a latest-revision view for current readers, staleness check and incremental refresh of mask-sourced detection runs.
-
-Documents:
-- [status.md](features/segmentation-versioning/status.md)
-- [segmentation-versioning-design.md](features/segmentation-versioning/segmentation-versioning-design.md)
 
 ### detection-pipeline
 
@@ -96,6 +96,16 @@ Documents:
 - [hand-detection-refinement-design.md](features/hand-detection-refinement/hand-detection-refinement-design.md)
 - [hand-refinement-without-segmentation-design.md](features/hand-detection-refinement/hand-refinement-without-segmentation-design.md)
 
+#### Keypoint Candidates
+
+**Status:** 🚧 In progress (85%) · **Categories:** `detection-pipeline`, `tracker-core`, `data-model` · **Last updated:** 2026-10-21
+
+Several heatmap maxima per keypoint stored per detection run, linked into tracklets at detection time, and assigned to skeleton markers by the tracker's shared dot-assignment phase with a keypoint-class restriction; strict mask adherence and multi-view agreement as tracking options.
+
+Documents:
+- [status.md](features/keypoint-candidates/status.md)
+- [keypoint-candidates-design.md](features/keypoint-candidates/keypoint-candidates-design.md)
+
 #### Pose Model and Skeleton Binding
 
 **Status:** 🚧 In progress (95%) · **Categories:** `detection-pipeline`, `tracker-core`, `data-model` · **Last updated:** 2026-10-18
@@ -108,7 +118,7 @@ Documents:
 
 #### SOMA/GEM-X Productization
 
-**Status:** 🚧 In progress (60%) · **Categories:** `detection-pipeline`, `tracker-core`, `data-model` · **Last updated:** 2026-10-20
+**Status:** 🚧 In progress (70%) · **Categories:** `detection-pipeline`, `tracker-core`, `data-model` · **Last updated:** 2026-10-22
 
 SOMA-77 (GEM-X) as the recommended pose model in the main code line, in three releases: SOMA recommended with the detection pipeline, person assignment, skeleton binding, tracker cost and calibration items; keypoint candidates and mask versioning; tracklet editing.
 
@@ -132,16 +142,6 @@ Makes a Cutie segmentation a time-range-scoped, reusable bbox source independent
 Documents:
 - [status.md](features/segmentation-reuse/status.md)
 - [segmentation-reuse-design.md](features/segmentation-reuse/segmentation-reuse-design.md)
-
-#### Keypoint Candidates
-
-**Status:** 📝 Proposal · **Categories:** `detection-pipeline`, `tracker-core`, `data-model` · **Last updated:** 2026-10-17
-
-Several heatmap maxima per keypoint stored per detection run, linked into tracklets at detection time, and assigned to skeleton markers by the tracker's shared dot-assignment phase with a keypoint-class restriction; strict mask adherence and multi-view agreement as tracking options.
-
-Documents:
-- [status.md](features/keypoint-candidates/status.md)
-- [keypoint-candidates-design.md](features/keypoint-candidates/keypoint-candidates-design.md)
 
 #### Pose Detection Improvements (Aikido Capture)
 

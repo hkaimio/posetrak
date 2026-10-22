@@ -1,7 +1,7 @@
 ```toml
 name = "SOMA/GEM-X Productization"
 status = "in_progress"
-progress_pct = 60
+progress_pct = 70
 description = """
 SOMA-77 (GEM-X) as the recommended pose model in the main code line, in three releases: SOMA \
 recommended with the detection pipeline, person assignment, skeleton binding, tracker cost and \
@@ -9,7 +9,7 @@ calibration items; keypoint candidates and mask versioning; tracklet editing.
 """
 categories = ["detection-pipeline", "tracker-core", "data-model"]
 target_release = "TBD"
-last_updated = 2026-10-20
+last_updated = 2026-10-22
 ```
 
 # SOMA/GEM-X Productization — Implementation Status
@@ -50,8 +50,11 @@ tracking. Main compared with `v0.1.0-proto2`:
 | 6 Tracker cost | Done; per-person threads not kept; [status](../tracker-performance/status.md) |
 | 7 Calibration items | Done, with box-video run time cut from about 12 min to 73 s on a 41 s range; [status](../extrinsics-improvements/status.md) |
 | 8 Mask versioning | Done (session schema 68); [status](../segmentation-versioning/status.md) |
-| 9 Keypoint candidates | Next |
-| 10-12 | Not started |
+| 9 Keypoint candidates | Done (session schema 69), off by default; accuracy bar not met; [status](../keypoint-candidates/status.md) |
+| 10-12 | Not started; testing of the merged stages comes first |
+
+**Next: testing on real captures** before stage 10 (tracklet editing, the first UI on candidate tracklets):
+the first release end to end, and mask versioning and keypoint candidates on a new capture.
 
 ## Known issues
 
@@ -66,3 +69,7 @@ The plan's "Known limits of the first release" lists them. The ones to settle by
 - **Existing persons' skeletons** have no SOMA markers; `skeleton compose --base` upgrades them.
 - **Box-video reference camera.** On one capture the same range fails with one reference camera and
   passes with another; not investigated.
+- **Keypoint candidates do not reach the prototype's accuracy.** On the evaluation range the tracker's per-step
+  choice among candidates is about as good as the strongest maxima (16.8 / 5.6 cm against 17.3 / 5.4 off), where
+  the prototype's offline per-tracklet cross-camera choice reached 10.2 / 3.4. The `suggest` rule from an automatic
+  grouped choice is the candidate next step; not decided. Candidates are off by default.

@@ -567,7 +567,7 @@ values. A NULL column means the default.
 | `kp_choice_delta`, `kp_choice_beta`, `kp_choice_gamma` | `--kp-delta`, `--kp-beta`, `--kp-gamma` | 1.0, 0.3, 0.2 |
 | `kp_choice_rounds` | `--kp-rounds` | 3 |
 | `kp_choice_skip_camera_ids` (JSON array of camera indices) | `--kp-skip-camera LABEL` (repeatable) | none |
-| `kp_strict_filter`, `kp_strict_filter_window_frames`, `kp_strict_filter_min_fraction` | `--kp-strict-filter`, `--kp-strict-window`, `--kp-strict-min-fraction` | off, 10, 0.5 |
+| `kp_strict_filter`, `kp_strict_filter_window_frames`, `kp_strict_filter_min_fraction`, `kp_strict_filter_classes` | `--kp-strict-filter`, `--kp-strict-window`, `--kp-strict-min-fraction`, `--kp-strict-classes` | off, 10, 0.5, `body` |
 | `kp_mask_term_weight`, `kp_mask_term_window_s`, `kp_mask_term_classes` | `--kp-mask-weight`, `--kp-mask-window`, `--kp-mask-classes` | 0 (off), 2.0, `body` |
 
 The mask options need `--seg-run` (the label of the person is read from the subject registry, or given with
@@ -626,8 +626,13 @@ mask term read the same masks.
 | **`'window'`** (`131e538e`, `f75ec6dc`) | **13.5 / 15.4** | **4.0 / 5.1** |
 | `'window'` + strict filter (`a7e8bbf3`, `4d9029c2`) | 9.4 / 11.6 | 6.0 / 7.5 |
 | `'window'` + body mask term (`007da5e4`, `93dfe252`) | 12.9 / 14.7 | 3.9 / 4.9 |
+| **`'window'` + strict filter on the body keypoints** (`03ddcd74`, `63e2a2c1`) | **9.4 / 10.7** | **3.7 / 4.6** |
+| `'window'` + strict filter, tracklets of 100 or more detections spared (`i-strict-x100`) | 13.3 / 15.5 | 3.3 / 4.1 |
+| `'window'` + strict filter on the body, tracklets of 100 or more spared | 12.9 / 14.7 | 3.5 / 4.3 |
+| `'window'` + tracklet-length term, weight 1 and 3 | 13.3 / 15.0 and 13.6 / 15.8 | 4.0 / 4.9 and 4.0 / 5.0 |
 
-(Target for `'window'`: at most 10.7 / 3.9 over the range: **not met**, by 2.8 cm for subject 1 and 0.1 cm for subject 2.)
+(Target at most 10.7 / 3.9 over the range: `'window'` alone **does not meet it**, by 2.8 cm for subject 1 and 0.1 cm for
+subject 2; `'window'` with the strict filter restricted to the body keypoints meets it for both: 9.4 and 3.7.)
 The strict filter emptied 39,123 of 177,483 keypoint-frames (22.0%) of subject 1 and 49,792 of 183,110 (27.2%) of
 subject 2. On the boxes of `fcb6b961`, which hold 82% of the prototype's crops, the same runs gave 17.8 / 5.2, 17.1 / 5.3,
 16.0 / 4.6, 15.9 / 4.5 and 15.7 / 4.6 cm (subjects 1 and 2, range) for candidates off, `'step'`, `'window'`, `'window'` +
@@ -639,6 +644,21 @@ On the corrected boxes the windowed choice is better than candidates off and the
 subject 2). The strict filter changes subject 1 by 4.1 cm (13.5 to 9.4, as the prototype's filter did) and makes
 subject 2 worse by 2.0 cm: it removes the correct candidates of keypoints hidden under the other person's mask, which
 section 10.5 warns about. The mask term gains 0.6 and 0.1 cm.
+
+**Why the filter is restricted to the body keypoints.** Against the labels of range 3, the accuracy of the picks
+(within 3% of the box height) is 83% when the pick lies on another person's mask in its own frame and 94% on the
+person's own mask, but 81% when the pick's tracklet is never on the person's own mask within +-10 frames and 94.5% when
+it always is: the window separates far better than the frame. The filter's rule (own share below 0.5) removes 58% of
+the wrong body picks and loses 14% of the correct ones, 47% and 29% for the feet, 47% and 46% for the hands: the masks
+of the hands and feet are thin and wrong in contact, so there the rule discards as many correct picks as wrong ones. With
+the body keypoints alone the filter empties 6.3% and 4.8% of the keypoint-frames instead of 22.0% and 27.2% and
+keeps the gain of subject 1 without the loss of subject 2. The tracklet length is the strongest single signal of a
+wrong pick (body keypoints, tracklets of at most 10 detections: 73-76% correct on or off the person's mask; of more
+than 100: 99.5% on and 93% off it), but a score term for it did not help (weights 1 and 3), and sparing the long
+tracklets from the filter gave back the filter's gain in subject 1 (12.9 against 9.4): the wrong picks of subject 1 sit
+on long tracklets of the other person's keypoints. The class restriction was chosen after seeing the range 3 figures
+of six variants; the pick accuracy of range 1 (43.5-47.5 s, subjects 1 and 3, strict filter over all classes against
+none: 92.9 to 93.5 and 96.5 to 97.5%) cannot separate them, because it leaves out the keypoint-frames a filter empties.
 
 What was checked:
 
@@ -681,7 +701,8 @@ on the same input, so there is no bug to correct. The consensus does depend on t
 wide-lens camera's residuals are about 24 px and its inlier radius becomes 60 px, against the 12 px floor under
 `b416cd21`, which has that camera's corrected intrinsics.
 
-The windowed choice is not made the default, and the strict filter and the mask term stay off.
+The windowed choice is not made the default, and the strict filter and the mask term stay off; whether
+`'window'` with `--kp-strict-filter` becomes the default for runs with reviewed masks is for the operator to decide.
 
 **Review material** for the keypoint-frames where the run's picks still differ from the prototype's: contact sheets
 outside the repository (`D:/mocap/stage9w-work/review/`, an `index.html` and a folder per subject and camera).

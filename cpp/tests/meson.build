@@ -75,6 +75,9 @@ test_sources = files(
   'test_tracklet_assignment.cpp',
   'test_streak_k_accumulator.cpp',
   'test_seg_mask.cpp',
+
+  # Keypoint candidates chosen over a time window
+  'test_keypoint_window_choice.cpp',
 )
 
 test_exe = executable('test_posetrak',

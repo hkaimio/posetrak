@@ -297,6 +297,23 @@ struct DotAssignmentContext {
     double dot_assigned_factor = 1000.0;
     /// Cost divisor for a pair a SUGGEST rule (an automatic proposal) names.
     double dot_suggested_factor = 3.0;
+
+    /// Pose estimation error (TrackerConfig::pose_noise_std) of a keypoint candidate; with
+    /// calib_noise_std it gives the measurement noise added to the slot's prediction covariance for
+    /// such a candidate, the way the filter's innovation covariance adds it for a fixed
+    /// observation. A dot's centroid has none (its crop_scale is 0 and the slot covariance is the
+    /// state's alone).
+    double pose_noise_std = 0.0;
+    /// TrackerConfig::kp_candidate_peak_weight: weight of -ln(peak) in the cost of a keypoint
+    /// candidate.
+    double kp_candidate_peak_weight = 0.0;
+    /// TrackerConfig::kp_candidate_tracklet_multiplier: the TrackletContinuityModifier factor for a
+    /// keypoint candidate (dot_tracklet_gate_multiplier is the dot's). 1.0 turns it off.
+    double kp_candidate_tracklet_multiplier = 1.0;
+    /// Per subject, the keypoint_idx each marker takes candidates of (KeypointClassModifier). A
+    /// subject absent from the map, or a marker absent from its entry, is a dot slot. Empty: no
+    /// keypoint candidates take part and the modifier is not registered.
+    std::unordered_map<int, std::unordered_map<int, int>> subject_marker_keypoint;
 };
 
 /// @brief One (subject, camera, marker) slot as a cost modifier sees it.
@@ -357,6 +374,21 @@ class TrackletContinuityModifier final : public CostModifier {
     CostSupport apply(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
                       DotAssignmentContext const& context) const override;
     const char* name() const override { return "tracklet_continuity"; }
+};
+
+/// @brief Lets a keypoint candidate pair only with the marker bound to its keypoint, and a dot only
+/// with a dot slot.
+///
+/// A dot can belong to any marker; a heatmap maximum belongs to one keypoint of the pose model. The
+/// pair is excluded unless the slot's keypoint (DotAssignmentContext::subject_marker_keypoint, -1
+/// for a dot slot) equals the candidate's UnlabeledCandidate::keypoint_idx (-1 for a dot). Left and
+/// right limbs are separate keypoints, so a swap is not offered here; the flip test's averaging is
+/// where those are decided.
+class KeypointClassModifier final : public CostModifier {
+   public:
+    CostSupport apply(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
+                      DotAssignmentContext const& context) const override;
+    const char* name() const override { return "keypoint_class"; }
 };
 
 /// @brief Excludes a pair when the candidate is not in the subject's own sequence
@@ -497,9 +529,9 @@ class TrackletAssignmentModifier final : public CostModifier {
     const char* name() const override { return "tracklet_assignment"; }
 };
 
-/// @brief The modifiers a context asks for, in the order they apply: tracklet
-/// continuity (only when its multiplier is above 1 and there are previous
-/// tracklet ids), then candidate ownership, then cross-view corroboration
+/// @brief The modifiers a context asks for, in the order they apply: the keypoint class (only when
+/// some marker takes keypoint candidates), tracklet continuity (only when its multiplier is above 1
+/// and there are previous tracklet ids), then candidate ownership, then cross-view corroboration
 /// (only when dot_cross_view_corroboration_px and dot_corroboration_gate_
 /// multiplier are both set to have an effect and camera_fundamentals is not
 /// empty), then the reacquisition gate (only when dot_reacquire_gap_frames is
@@ -609,9 +641,17 @@ struct DotAssignmentSubject {
     /// default-constructed (mask_label=0) means segmentation masking is
     /// disabled for this subject regardless of config.dot_seg_mask_enabled.
     SegMaskSubjectConfig seg_mask;
+    /// The markers of this subject that take keypoint candidates, marker index -> keypoint_idx
+    /// (KeypointCandidates::marker_keypoint). Empty for a subject that tracks dots only.
+    std::unordered_map<int, int> marker_keypoint;
 };
 
 /// @brief Merges one subject's candidates into the shared pool of a camera.
+///
+/// Keypoint candidates of the same keypoint, camera and frame are one candidate when they lie
+/// within the smaller of the two candidates' merge_radius_px of each other (the same image point
+/// seen through two persons' overlapping crops); the existing candidate keeps its position, and its
+/// subject_mask gains the owner. The rest of this comment is about dots.
 ///
 /// Several subjects' sequences may each hold a copy of the same detection
 /// run's dot rows. Merged naively, one physical dot becomes several

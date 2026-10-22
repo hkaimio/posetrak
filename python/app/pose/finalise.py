@@ -38,6 +38,16 @@ def _scale_kp_confidence(kp_blob: bytes, scale: float) -> bytes:
     return arr.tobytes()
 
 
+def _scale_candidate_peaks(blob: bytes, scale: float) -> bytes:
+    """Multiply the peak column of a ``kp_candidates`` blob by *scale* (the confidence scale of the body row)."""
+    from posetrak.detection.kp_candidates import decode_kp_candidates_blob
+
+    n, n_fields = np.frombuffer(blob, "<i4", 2)
+    table = decode_kp_candidates_blob(blob).copy()
+    table[:, 3] *= scale
+    return np.array([n, n_fields], "<i4").tobytes() + table.astype("<f4").tobytes()
+
+
 #: SOMA-77 outputs heatmap peaks (0-1), like ViTPose, and takes ViTPose's scale into the tracker's noise range.
 SOMA77_CONF_SCALE = 5.0
 
@@ -71,6 +81,8 @@ def _write_manifest(
     layout stays the implied one) and each refined-hand source the hand21 names of its side.
     """
     rows = [(sequence_id, "body", idx, name, source) for idx, name, source in body_manifest(pose_model)]
+    if "kp_candidates" in obs_sources:      # the candidates index the same keypoints as the body row
+        rows += [(sequence_id, "kp_candidates", idx, name, source) for idx, name, source in body_manifest(pose_model)]
     for obs_source in sorted(obs_sources & {"hand_l", "hand_r"}):
         rows += [(sequence_id, obs_source, idx, name, source) for idx, name, source in hand_manifest(obs_source)]
     session.executemany(
@@ -234,7 +246,7 @@ def finalise_to_db(
                 "FROM detection_keypoints "
                 "WHERE detection_run_id=? AND shot_video_id=? AND track_id=? "
                 "AND video_frame BETWEEN ? AND ? "
-                "AND region_type IN ('full_body','hand_l','hand_r') "
+                "AND region_type IN ('full_body','hand_l','hand_r','kp_candidates') "
                 "ORDER BY video_frame",
                 (detection_run_id, asgn.shot_video_id, asgn.track_id,
                  asgn.first_frame, asgn.last_frame),
@@ -246,7 +258,7 @@ def finalise_to_db(
                 if timestamp_s is None:
                     continue
                 # detection_keypoints.region_type='full_body' becomes
-                # pose_observations.source='body'; hand_l/hand_r pass through
+                # pose_observations.source='body'; hand_l/hand_r and kp_candidates pass through
                 # unchanged (same spelling, both enums already agree).
                 source = "body" if kp_row["region_type"] == "full_body" else kp_row["region_type"]
                 kp_blob = bytes(kp_row["keypoints"])
@@ -255,6 +267,10 @@ def finalise_to_db(
                 # carry a hand-model-appropriate scale from hand_refinement.py.
                 if source == "body" and confidence_scale != 1.0:
                     kp_blob = _scale_kp_confidence(kp_blob, confidence_scale)
+                elif source == "kp_candidates" and confidence_scale != 1.0:
+                    # The peak of a candidate is its confidence: same scale as the body row's, so a
+                    # candidate has the measurement noise the fixed observation of that keypoint has.
+                    kp_blob = _scale_candidate_peaks(kp_blob, confidence_scale)
                 obs_by_key[(camera_instance_id, frame_idx, source)] = (
                     seq_id, camera_instance_id, frame_idx,
                     timestamp_s, 0,  # person_id=0, single person per sequence

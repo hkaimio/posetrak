@@ -111,6 +111,28 @@ struct UnlabeledCandidate {
     /// major_axis/minor_axis are -- an existing fixture/call site built
     /// before this field existed should not silently start matching.
     int tracklet_id = -1;
+
+    /// Slot of the pose model's keypoint list this candidate is a maximum of, for a keypoint
+    /// candidate (pose_observations source 'kp_candidates'); -1 for a dot, which can belong to any
+    /// marker. KeypointClassModifier lets a keypoint candidate pair only with the marker bound to
+    /// the same keypoint.
+    int keypoint_idx = -1;
+    /// Model input pixels to frame pixels of the crop the candidate came from (the observation's
+    /// noise_scale); the measurement noise of a keypoint candidate scales with it. 0 for a dot.
+    double crop_scale = 0.0;
+    /// Radius in distorted pixels within which another subject's candidate of the same keypoint,
+    /// camera and frame is the same image point seen through its own crop (see
+    /// append_unique_candidates()). 0 for a dot, which merges only when byte-identical.
+    double merge_radius_px = 0.0;
+};
+
+/// @brief The keypoint candidates of one sequence and how the skeleton's markers bind to them.
+struct KeypointCandidates {
+    /// Sorted by camera then frame, like load_unlabeled_candidates().
+    std::vector<UnlabeledCandidate> candidates;
+    /// Skeleton marker index -> keypoint_idx of the candidates it takes; the markers of the body
+    /// pose model that have candidates in the sequence.
+    std::unordered_map<int, int> marker_keypoint;
 };
 
 /// @brief Reads tracking data from a per-session SQLite database
@@ -286,6 +308,25 @@ class SessionReader {
     std::vector<UnlabeledCandidate>
     load_unlabeled_candidates(std::string const& sequence_id,
                               std::map<std::string, Camera> const& cameras);
+
+    /// @brief Load the keypoint candidates of a sequence (pose_observations rows with
+    /// `source='kp_candidates'`), for the markers of *skeleton* bound to the same pose model.
+    ///
+    /// The sequence's manifest rows with obs_source 'kp_candidates' name each keypoint_idx; a
+    /// candidate of a keypoint no marker's landmark matches is dropped. Candidates with a peak
+    /// below @p min_confidence are dropped, as the body keypoints are. Positions are undistorted
+    /// like the dot candidates'.
+    ///
+    /// @param person_id Person index within the sequence (0 for a one-person sequence).
+    /// @param window_start_s, window_end_s Load only rows with timestamp in [start, end).
+    /// @return The candidates and the marker-to-keypoint binding; empty when the sequence holds
+    ///         no candidates or the skeleton binds none of their keypoints.
+    KeypointCandidates
+    load_keypoint_candidates(std::string const& sequence_id,
+                             std::map<std::string, Camera> const& cameras, Skeleton const& skeleton,
+                             double min_confidence = 0.1, int person_id = 0,
+                             double window_start_s = -std::numeric_limits<double>::infinity(),
+                             double window_end_s = std::numeric_limits<double>::infinity());
 
    private:
     /// @brief Read pose_observation_sequences.pixels_are_undistorted for sequence_id.

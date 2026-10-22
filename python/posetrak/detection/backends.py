@@ -34,6 +34,9 @@ class PoseResult:
     # Measurement noise scale written with the keypoints (distorted px per model input px). None: the writer
     # uses the detection's box width over the model input width.
     noise_scale: float | None = None
+    # Heatmap maxima of the person, float32[n, 5]: keypoint_idx, x, y, peak, rank (distorted px), for estimators run
+    # with candidate extraction; None otherwise.
+    candidates: np.ndarray | None = None
 
 
 @runtime_checkable

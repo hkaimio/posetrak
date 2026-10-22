@@ -130,3 +130,24 @@ def test_refresh_copies_unchanged_frames_and_reruns_the_stale_ones(session, seg_
     # The old run is untouched and is now stale; the new one is current.
     assert session.execute("SELECT COUNT(*) FROM person_detections WHERE detection_run_id = ?", (run_id,)).fetchone()[0] == 5
     assert stale_frames(session, new_id) == []
+
+
+def test_refresh_copies_candidate_rows_and_links_the_rerun_frames_after_them(session, seg_run, monkeypatch):
+    from .test_kp_candidates import CandidateEstimator, candidate_rows
+
+    monkeypatch.setattr("posetrak.detection.frame_readers.get_reader", lambda mode: fake_reader)
+    run_id = detect(session, CandidateEstimator())
+    old = candidate_rows(session, run_id, VID)
+    assert sorted(old) == [0, 1, 2, 3, 4]
+    edit(session, {2: png(10, 10, 52, 29)})
+
+    new_id = refresh_run(session, run_id, stale_frames(session, run_id), estimator=CandidateEstimator())
+    new = candidate_rows(session, new_id, VID)
+    assert sorted(new) == [0, 1, 2, 3, 4]
+    for frame in (0, 1, 3, 4):                                    # unchanged frames keep their rows and ids
+        np.testing.assert_array_equal(new[frame], old[frame])
+    used = {int(t) for f in (0, 1, 3, 4) for t in new[f][:, 5]}
+    assert used.isdisjoint({int(t) for t in new[2][:, 5]})        # the re-run frame starts tracklets of its own
+    import json
+    assert "candidates" in json.loads(session.execute(
+        "SELECT config_json FROM detection_runs WHERE id = ?", (new_id,)).fetchone()[0])

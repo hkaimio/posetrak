@@ -5,6 +5,7 @@
 #include "posetrak/tracking/dot_assignment.hpp"
 
 #include "posetrak/tracking/assignment.hpp"
+#include <algorithm>
 #include <cmath>
 #include <utility>
 
@@ -74,12 +75,27 @@ bool corroborated(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
 }
 }  // namespace
 
+CostSupport KeypointClassModifier::apply(DotSlotRef const& slot,
+                                         UnlabeledCandidate const& candidate,
+                                         DotAssignmentContext const& context) const {
+    int slot_keypoint = -1;
+    if (auto const subject_it = context.subject_marker_keypoint.find(slot.subject_id);
+        subject_it != context.subject_marker_keypoint.end()) {
+        if (auto const marker_it = subject_it->second.find(slot.marker_id);
+            marker_it != subject_it->second.end())
+            slot_keypoint = marker_it->second;
+    }
+    return {1.0, candidate.keypoint_idx != slot_keypoint};
+}
+
 CostSupport TrackletContinuityModifier::apply(DotSlotRef const& slot,
                                               UnlabeledCandidate const& candidate,
                                               DotAssignmentContext const& context) const {
     if (!tracklet_continues(slot, candidate, context.prev_tracklet_ids))
         return {};
-    return {context.dot_tracklet_gate_multiplier, false};
+    return {candidate.keypoint_idx >= 0 ? context.kp_candidate_tracklet_multiplier
+                                        : context.dot_tracklet_gate_multiplier,
+            false};
 }
 
 CostSupport CandidateOwnershipModifier::apply(DotSlotRef const& slot,
@@ -218,7 +234,12 @@ CostSupport SegmentationMaskModifier::apply(DotSlotRef const& slot,
 std::vector<std::unique_ptr<CostModifier>>
 default_cost_modifiers(DotAssignmentContext const& context) {
     std::vector<std::unique_ptr<CostModifier>> modifiers;
-    if (context.dot_tracklet_gate_multiplier > 1.0 && !context.prev_tracklet_ids.empty())
+    if (!context.subject_marker_keypoint.empty())
+        modifiers.push_back(std::make_unique<KeypointClassModifier>());
+    if ((context.dot_tracklet_gate_multiplier > 1.0 ||
+         (context.kp_candidate_tracklet_multiplier > 1.0 &&
+          !context.subject_marker_keypoint.empty())) &&
+        !context.prev_tracklet_ids.empty())
         modifiers.push_back(std::make_unique<TrackletContinuityModifier>());
     modifiers.push_back(std::make_unique<CandidateOwnershipModifier>());
     if (context.dot_cross_view_corroboration_px > 0.0 &&
@@ -365,6 +386,11 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
         int const n_rows = static_cast<int>(candidates.size());
         int const n_cols = static_cast<int>(columns.size());
         std::vector<double> cost(static_cast<size_t>(n_rows) * static_cast<size_t>(n_cols));
+        // Likelihood terms of keypoint candidates (ln det S and the peak), added to the cost of the
+        // pairs that pass the gate after the matrix is complete; zero for a dot.
+        std::vector<double> extra(cost.size(), 0.0);
+        double min_extra = 0.0;
+        double max_extra = 0.0;
         size_t const trace_start = tracing ? trace->entries.size() : 0;
         for (int r = 0; r < n_rows; ++r) {
             UnlabeledCandidate const& row_cand = candidates[static_cast<size_t>(r)];
@@ -373,7 +399,22 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
                 Column const& col = columns[static_cast<size_t>(c)];
                 MarkerPrediction const& pred = *col.prediction;
                 Eigen::Vector2d const diff = cand_pos - pred.position;
-                double const raw_mahal_sq = diff.transpose() * pred.covariance.inverse() * diff;
+                Eigen::Matrix2d covariance = pred.covariance;
+                double nll_extra = 0.0;
+                if (row_cand.keypoint_idx >= 0) {
+                    // A keypoint's detection error is not part of the state's uncertainty: add it
+                    // the way the filter's innovation covariance does for a fixed observation.
+                    double const noise =
+                        (context.pose_noise_std * row_cand.crop_scale + context.calib_noise_std) /
+                        std::max(row_cand.confidence, 0.1);
+                    covariance += Eigen::Matrix2d::Identity() * (noise * noise);
+                    // The negative log-likelihood of the detection: a wider covariance (a weak
+                    // maximum) pays for its width, a higher peak is rewarded.
+                    nll_extra = std::log(covariance.determinant()) -
+                                context.kp_candidate_peak_weight *
+                                    std::log(std::max(row_cand.confidence, 0.01));
+                }
+                double const raw_mahal_sq = diff.transpose() * covariance.inverse() * diff;
                 double mahal_sq = raw_mahal_sq;
                 char const* excluded_by = "";
 
@@ -426,8 +467,29 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
                 if (mahal_sq > gate_mahalanobis && mahal_sq < kExcludedCost) {
                     mahal_sq = gate_mahalanobis + 1.0;
                 }
-                cost[static_cast<size_t>(r) * static_cast<size_t>(n_cols) +
-                     static_cast<size_t>(c)] = mahal_sq;
+                size_t const cell =
+                    static_cast<size_t>(r) * static_cast<size_t>(n_cols) + static_cast<size_t>(c);
+                cost[cell] = mahal_sq;
+                if (nll_extra != 0.0 && mahal_sq <= gate_mahalanobis) {
+                    extra[cell] = nll_extra;
+                    min_extra = std::min(min_extra, nll_extra);
+                    max_extra = std::max(max_extra, nll_extra);
+                }
+            }
+        }
+
+        // The gate above tested the distance alone. The extra terms can be negative, and the solver
+        // takes non-negative costs below one gate: shift every pair that passed by the smallest
+        // extra and widen the gate by the spread, so the pairs that passed stay below the gate and
+        // the hopeless and excluded ones above it. Without keypoint candidates both are zero and
+        // the matrix is untouched.
+        double const solver_gate = gate_mahalanobis + (max_extra - min_extra);
+        if (solver_gate != gate_mahalanobis) {
+            for (size_t i = 0; i < cost.size(); ++i) {
+                if (cost[i] <= gate_mahalanobis)
+                    cost[i] += extra[i] - min_extra;
+                else if (cost[i] < kExcludedCost)
+                    cost[i] = solver_gate + 1.0;
             }
         }
 
@@ -438,7 +500,7 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
             return it != context.dot_camera_noise_scale.end() ? it->second : 1.0;
         }();
 
-        auto pairs = solve_assignment(cost, n_rows, n_cols, gate_mahalanobis);
+        auto pairs = solve_assignment(cost, n_rows, n_cols, solver_gate);
         if (tracing) {
             // Entries for this camera sit at [trace_start, trace_start + n_rows*n_cols)
             // in the same row-major (r, c) order the loop above pushed them in, so a
@@ -463,6 +525,9 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
             obs.position_distorted = cand.position_distorted;
             obs.confidence = cand.confidence;
             obs.tracklet_id = cand.tracklet_id;
+            // A keypoint candidate is a heatmap maximum of its crop: its noise scales with the crop
+            // like the fixed observation of the same keypoint (set again below for a dot).
+            obs.crop_scale = cand.keypoint_idx >= 0 ? cand.crop_scale : 0.0;
 
             // Segmentation-mask trust bookkeeping (segmentation-mask-dot-assignment-
             // design.md §3): record whether the candidate that actually won this
@@ -492,8 +557,8 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
             // from thresholding the full-resolution frame directly, not a
             // fixed-input-resolution network, so there is no crop-scaled
             // detection-algorithm error to describe -- calibration error (ec)
-            // alone should dominate Observation::measurement_noise_std().
-            obs.crop_scale = 0.0;
+            // alone should dominate Observation::measurement_noise_std(). (A keypoint candidate
+            // keeps the crop scale set above.)
 
             // Motion-blur streak (dot_blob_detector.py's elongated-blob
             // acceptance path): its centroid is genuinely less precise than
@@ -598,6 +663,13 @@ void append_unique_candidates(std::vector<UnlabeledCandidate>& dest,
         UnlabeledCandidate* duplicate_of = nullptr;
         for (size_t i = 0; i < n_existing && duplicate_of == nullptr; ++i) {
             auto& d = dest[i];
+            if (c.keypoint_idx >= 0 || d.keypoint_idx >= 0) {
+                if (d.keypoint_idx == c.keypoint_idx && d.frame_idx == c.frame_idx &&
+                    (d.position_distorted - c.position_distorted).norm() <=
+                        std::min(d.merge_radius_px, c.merge_radius_px))
+                    duplicate_of = &d;
+                continue;
+            }
             if (d.frame_idx == c.frame_idx && d.timestamp == c.timestamp &&
                 d.tracklet_id == c.tracklet_id &&
                 d.position_distorted.x() == c.position_distorted.x() &&
@@ -643,6 +715,9 @@ std::string find_dot_config_disagreement(std::vector<TrackerConfig const*> const
         POSETRAK_CHECK_DOT_FIELD(dot_seg_mask_min_tracklet_fraction)
         POSETRAK_CHECK_DOT_FIELD(dot_seg_mask_cost_scale_at_zero_fraction)
         POSETRAK_CHECK_DOT_FIELD(dot_seg_mask_hard_distance_px)
+        POSETRAK_CHECK_DOT_FIELD(pose_noise_std)
+        POSETRAK_CHECK_DOT_FIELD(kp_candidate_peak_weight)
+        POSETRAK_CHECK_DOT_FIELD(kp_candidate_tracklet_multiplier)
 #undef POSETRAK_CHECK_DOT_FIELD
     }
     return {};
@@ -708,10 +783,17 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     context.frame_idx = frame_idx;
     context.timestamp = timestamp;
     context.calib_noise_std = config.calib_noise_std;
+    context.pose_noise_std = config.pose_noise_std;
+    for (auto const& subject : subjects) {
+        if (!subject.marker_keypoint.empty())
+            context.subject_marker_keypoint[subject.subject_id] = subject.marker_keypoint;
+    }
     context.streak_config = streak_config;
     context.prev_positions = std::move(prev_positions);
     context.streak_k_state = streak_k_state;
     context.dot_tracklet_gate_multiplier = config.dot_tracklet_gate_multiplier;
+    context.kp_candidate_peak_weight = config.kp_candidate_peak_weight;
+    context.kp_candidate_tracklet_multiplier = config.kp_candidate_tracklet_multiplier;
     context.prev_tracklet_ids = std::move(prev_tracklet_ids);
     context.dot_reacquire_gap_frames = config.dot_reacquire_gap_frames;
     context.dot_reacquire_max_px = config.dot_reacquire_max_px;

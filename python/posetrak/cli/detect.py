@@ -23,6 +23,7 @@ from posetrak.db.db import open_session, resolve_id_prefix
 from posetrak.db.manage_capture_object import list_capture_objects
 from posetrak.detection.backends_rtmdet import YOLOXDetector
 from posetrak.detection.pipeline import DetectionPipeline
+from posetrak.detection.kp_candidates import CandidateOptions
 from posetrak.detection.pose_model_choice import POSE_MODELS, create_estimator, resolve_pose_model
 
 
@@ -45,7 +46,7 @@ def detect_group() -> None:
 # rather than ignoring them silently. --trial is shared by pose and marker runs, so it is not
 # in either tuple.
 _POSE_OPTIONS = ("detector", "pose_model", "conf", "segmentation", "from_run", "refine_hands", "accept_licences",
-                 "decode")
+                 "decode", "candidates")
 _MARKER_OPTIONS = ("object_ref", "frame_step", "min_marker_perimeter_rate", "parallel", "max_workers")
 _CODED_OPTIONS = ("marker_ids", "dictionary")
 _DOT_OPTIONS = (
@@ -93,6 +94,10 @@ _DOT_OPTIONS = (
               help="Re-detect each tracked wrist's hand in a tight crop on the frame already decoded and add "
                    "refined finger keypoints, for every pose model that names a wrist and an elbow. "
                    "Default: on for SOMA-77 runs and for COCO-133 runs with --segmentation, off otherwise.")
+@click.option("--candidates", "candidates", is_flag=True, default=False,
+              help="Also store up to six heatmap maxima per keypoint, linked into tracklets, so that a tracking run "
+                   "can choose among them (SOMA-77 runs only; about four times the keypoint data of the run; see "
+                   "docs/roadmap/features/keypoint-candidates/keypoint-candidates-design.md).")
 @click.option("--accept-licences", "accept_licences", is_flag=True, default=False,
               help="Accept the NVIDIA Open Model License and the DINOv3 License for the SOMA-77 weights without "
                    "being asked (their texts are still named). Needed to download the weights without a terminal.")
@@ -156,6 +161,7 @@ def cmd_run(
     segmentation: str | None,
     from_run: str | None,
     refine_hands: bool | None,
+    candidates: bool,
     accept_licences: bool,
     decode: str | None,
     marker_ids: str | None,
@@ -252,7 +258,7 @@ def cmd_run(
         _run_pose_detection(
             session, capture_id, sync_id, start, end, detector, pose_model, conf,
             trial_id=trial_id, segmentation=segmentation, from_run=from_run, refine_hands=refine_hands,
-            accept_licences=accept_licences, decode=decode,
+            accept_licences=accept_licences, decode=decode, candidates=candidates,
         )
         return
 
@@ -358,7 +364,7 @@ def _run_pose_detection(
     session, capture_id: str, sync_id: str, start: float, end: float,
     detector: str, pose_model: str, conf: float,
     trial_id: str | None, segmentation: str | None, from_run: str | None, refine_hands: bool | None,
-    accept_licences: bool, decode: str | None,
+    accept_licences: bool, decode: str | None, candidates: bool = False,
 ) -> None:
     """Run person detection and pose estimation; print the run ID to stdout."""
     click.echo(f"Capture:     {capture_id}", err=True)
@@ -398,7 +404,10 @@ def _run_pose_detection(
         fail(str(exc))
     click.echo("", err=True)
 
-    estimator = create_estimator(model, device=None)
+    try:
+        estimator = create_estimator(model, device=None, candidates=CandidateOptions() if candidates else None)
+    except ValueError as exc:
+        fail(str(exc))
     if refine_hands is None:
         # The default skeletons track no SOMA-77 finger keypoints, so SOMA-77 runs need the pass for any
         # finger pose (docs/roadmap/features/hand-detection-refinement/hand-refinement-without-segmentation-design.md).

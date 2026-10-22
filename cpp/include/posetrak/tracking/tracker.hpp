@@ -350,6 +350,16 @@ class Tracker {
     }
 
     /**
+     * @brief Markers whose slot predictions predict_dot_slot_predictions*() also return, besides
+     * the markers of unlabeled_points tracks: the markers that take keypoint candidates
+     * (KeypointCandidates::marker_keypoint). Ignored for a rigid-body skeleton, which has no
+     * keypoints.
+     */
+    void set_candidate_slot_markers(std::vector<int> marker_ids) {
+        candidate_slot_markers_ = std::move(marker_ids);
+    }
+
+    /**
      * @brief Update-only half of the track_frame() cycle -- consumes the
      * prediction stashed by the most recent predict_step() call and finishes
      * the frame: observation annotation, sufficiency check, UKF update, NIS
@@ -639,6 +649,7 @@ class Tracker {
     // dot velocity mechanism (streak-velocity-design.md §3/§4) -- see
     // streak_k_accumulators() above.
     std::unordered_map<int, StreakKAccumulator> streak_k_accumulators_;
+    std::vector<int> candidate_slot_markers_;  ///< See set_candidate_slot_markers().
 
     // RTS smoother
     bool smoothing_enabled_ = false;

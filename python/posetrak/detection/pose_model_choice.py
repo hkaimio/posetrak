@@ -57,7 +57,14 @@ def resolve_pose_model(
 
 
 def create_estimator(pose_model: str, device: str | None = None, **options) -> PoseEstimator:
-    """The estimator for a resolved *pose_model*; *options* go to its constructor."""
+    """The estimator for a resolved *pose_model*; *options* go to its constructor.
+
+    ``candidates`` (a :class:`~posetrak.detection.kp_candidates.CandidateOptions`) is accepted for SOMA-77 only.
+    """
+    if options.get("candidates") is None:
+        options.pop("candidates", None)
+    elif not is_soma(pose_model):
+        raise ValueError(f"Keypoint candidates are available for SOMA-77 runs only, not for {pose_model}.")
     if is_soma(pose_model):
         from posetrak.detection.backends_soma77 import Soma77Estimator
 

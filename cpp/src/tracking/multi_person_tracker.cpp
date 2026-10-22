@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
@@ -349,6 +350,44 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
         }
     }
 
+    // Keypoint candidates (keypoint-candidates-design.md): for the markers bound to the pose model
+    // of the sequence's candidates they take the place of the fixed body observations from the
+    // first step after initialisation, which still uses the fixed observations.
+    if (ctx->tracker_config.kp_candidates_enabled) {
+        auto kp = reader.load_keypoint_candidates(full_sequence_id, ctx->cameras_by_name,
+                                                  ctx->skeleton, opts.min_confidence,
+                                                  spec.person_id, window_start, window_end);
+        if (kp.candidates.empty()) {
+            throw std::runtime_error(
+                "The tracker config asks for keypoint candidates, but sequence '" +
+                full_sequence_id +
+                "' holds none for this skeleton's markers. Run detection with --candidates and "
+                "finalise it, or track without candidates.");
+        }
+        if (!quiet) {
+            fmt::print("  Loaded {} keypoint candidates for {} markers\n", kp.candidates.size(),
+                       kp.marker_keypoint.size());
+        }
+        ctx->kp_marker_keypoint = std::move(kp.marker_keypoint);
+        // bucket_candidates_by_camera() binary-searches each camera's list by timestamp. The dots,
+        // when there are any, and the keypoint candidates were each loaded in order, so merge them
+        // (std::merge: stable_sort would need a temporary buffer of an over-aligned type).
+        std::unordered_map<int, std::vector<UnlabeledCandidate>> kp_by_camera;
+        for (auto& c : kp.candidates)
+            kp_by_camera[c.camera_id].push_back(std::move(c));
+        for (auto& [camera_id, kp_list] : kp_by_camera) {
+            auto& pool = ctx->unlabeled_candidates_by_camera[camera_id];
+            std::vector<UnlabeledCandidate> merged;
+            merged.reserve(pool.size() + kp_list.size());
+            std::merge(pool.begin(), pool.end(), kp_list.begin(), kp_list.end(),
+                       std::back_inserter(merged),
+                       [](UnlabeledCandidate const& a, UnlabeledCandidate const& b) {
+                           return a.timestamp < b.timestamp;
+                       });
+            pool = std::move(merged);
+        }
+    }
+
     // Determine effective end time
     double end_time =
         std::isnan(opts.override_end_time) ? seq_info.time_end_s : opts.override_end_time;
@@ -438,6 +477,13 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
     }
     auto skeleton_ptr = std::make_shared<const Skeleton>(ctx->skeleton);
     ctx->tracker = std::make_unique<Tracker>(skeleton_ptr, ctx->cameras_by_id, ctx->tracker_config);
+    if (!ctx->kp_marker_keypoint.empty()) {
+        std::vector<int> candidate_markers;
+        for (auto const& [marker_id, keypoint_idx] : ctx->kp_marker_keypoint)
+            candidate_markers.push_back(marker_id);
+        std::sort(candidate_markers.begin(), candidate_markers.end());
+        ctx->tracker->set_candidate_slot_markers(std::move(candidate_markers));
+    }
 
     if (opts.smooth_output) {
         ctx->tracker->enable_smoothing(true);
@@ -772,6 +818,12 @@ void step_person_context_update(PersonContext& ctx, int step, bool verbose, bool
     auto const t_obs0 = Clock::now();
     auto frame_obs = ctx.observations.get_all_in_range(t_start, t_end);
     frame_step_profile::add_get_observations_ms(Ms(Clock::now() - t_obs0).count());
+    if (!ctx.kp_marker_keypoint.empty()) {
+        std::erase_if(frame_obs, [&](Observation const& o) {
+            return o.mode == MeasurementMode::POSITION &&
+                   ctx.kp_marker_keypoint.count(o.marker_id) > 0;
+        });
+    }
     frame_obs.insert(frame_obs.end(), extra_observations.begin(), extra_observations.end());
 
     double t_effective = t_start + ctx.dt / 2.0;
@@ -1259,7 +1311,7 @@ MultiPersonTracker::MultiPersonTracker(std::vector<PersonSpec> const& specs,
     {
         std::vector<TrackerConfig const*> dot_configs;
         for (auto const& ctx : persons_) {
-            if (ctx->has_dot_track)
+            if (ctx->uses_candidate_assignment())
                 dot_configs.push_back(&ctx->tracker_config);
         }
         std::string const field = find_dot_config_disagreement(dot_configs);
@@ -1418,7 +1470,7 @@ void MultiPersonTracker::run() {
             candidates_by_idx;
         for (int idx : order) {
             auto& ctx = *persons_[static_cast<size_t>(idx)];
-            if (step >= ctx.num_steps || !ctx.has_dot_track)
+            if (step >= ctx.num_steps || !ctx.uses_candidate_assignment())
                 continue;
             auto [t_start, t_end] = person_context_step_window(ctx, step);
             auto candidates =
@@ -1447,8 +1499,12 @@ void MultiPersonTracker::run() {
                 auto it = candidates_by_idx.find(idx);
                 if (it == candidates_by_idx.end())
                     continue;
-                subjects.push_back(
-                    DotAssignmentSubject{idx, persons_[static_cast<size_t>(idx)]->tracker.get()});
+                {
+                    auto& subject_ctx = *persons_[static_cast<size_t>(idx)];
+                    DotAssignmentSubject subject{idx, subject_ctx.tracker.get()};
+                    subject.marker_keypoint = subject_ctx.kp_marker_keypoint;
+                    subjects.push_back(std::move(subject));
+                }
                 for (auto const& [cam_id, cands] : it->second) {
                     append_unique_candidates(combined_candidates[cam_id], cands,
                                              std::uint64_t{1} << idx);

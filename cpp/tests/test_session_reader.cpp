@@ -225,7 +225,10 @@ static void create_fixture_db() {
             dot_seg_mask_min_tracklet_fraction REAL,
             dot_seg_mask_cost_scale_at_zero_fraction REAL,
             dot_seg_mask_hard_distance_px REAL,
-            active_joint_groups TEXT
+            active_joint_groups TEXT,
+            kp_candidates_enabled INTEGER,
+            kp_candidate_peak_weight REAL,
+            kp_candidate_tracklet_multiplier REAL
         );
     )");
 
@@ -425,6 +428,10 @@ static void create_fixture_db() {
     exec_sql(db,
              "INSERT INTO tracker_configs (id,name,created_at,tracker_fps,active_joint_groups) "
              "VALUES ('tc_main','parent main','2024-01-01',120.0,'[\"main\"]');");
+    exec_sql(db,
+             "INSERT INTO tracker_configs (id,name,created_at,tracker_fps,kp_candidates_enabled,"
+             "kp_candidate_peak_weight,kp_candidate_tracklet_multiplier) "
+             "VALUES ('tc_kp','candidates','2024-01-01',120.0,1,1.5,3.0);");
 
     // Pose observation sequence
     exec_sql(db,
@@ -737,7 +744,8 @@ static void create_fixture_db() {
                          "', '" + model + "')");
         }
     };
-    for (char const* id : {"seq_soma", "seq_soma_bare", "seq_coco_manifest", "seq_unbound"})
+    for (char const* id :
+         {"seq_soma", "seq_soma_bare", "seq_coco_manifest", "seq_unbound", "seq_kpc"})
         exec_sql(db, std::string("INSERT INTO pose_observation_sequences "
                                  "(id,shot_id,sync_config_id,time_start_s,time_end_s) "
                                  "VALUES ('") +
@@ -758,6 +766,36 @@ static void create_fixture_db() {
         exec_sql(db,
                  "UPDATE pose_sequence_keypoints SET name = substr(name, 8) "
                  "WHERE sequence_id = 'seq_soma_bare' AND name LIKE 'soma77:%'");
+    }
+    // A SOMA body row plus keypoint candidates: keypoint 14 (LeftHand) has a strong and a weaker
+    // maximum, keypoint 19 (LeftHandIndex1) one, keypoint 5 (no marker) one, keypoint 14 a last one
+    // below the confidence floor. Blob layout: int32 n, int32 n_fields = 6, float32[n, 6]
+    // keypoint_idx, x, y, peak, rank, tracklet_id.
+    insert_blob_row("seq_kpc", "body", 77, 1000.f, 500.f);
+    insert_manifest("seq_kpc", "body", 77, "soma77",
+                    {{14, "soma77:LeftHand"}, {19, "soma77:LeftHandIndex1"}});
+    insert_manifest("seq_kpc", "kp_candidates", 77, "soma77",
+                    {{14, "soma77:LeftHand"}, {19, "soma77:LeftHandIndex1"}});
+    {
+        std::vector<std::array<float, 6>> const rows = {{14.f, 1100.f, 500.f, 0.9f, 0.f, 3.f},
+                                                        {14.f, 1130.f, 520.f, 0.3f, 1.f, 4.f},
+                                                        {19.f, 1200.f, 600.f, 0.8f, 0.f, -1.f},
+                                                        {5.f, 900.f, 900.f, 0.7f, 0.f, 8.f},
+                                                        {14.f, 1300.f, 700.f, 0.05f, 2.f, 9.f}};
+        std::vector<uint8_t> blob(8 + rows.size() * 6 * 4);
+        int32_t const header[2] = {static_cast<int32_t>(rows.size()), 6};
+        std::memcpy(blob.data(), header, 8);
+        std::memcpy(blob.data() + 8, rows.data(), rows.size() * 6 * 4);
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(
+            db,
+            "INSERT INTO pose_observations (sequence_id, camera_instance_id, video_frame, "
+            "timestamp_s, person_id, source, kp_blob, noise_scale) "
+            "VALUES ('seq_kpc', 'inst1', 0, 0.0, 0, 'kp_candidates', ?, 2.0)",
+            -1, &stmt, nullptr);
+        sqlite3_bind_blob(stmt, 1, blob.data(), static_cast<int>(blob.size()), SQLITE_STATIC);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
     }
     // A COCO-133 body blob with a manifest of coco133 landmarks.
     insert_blob_row("seq_coco_manifest", "body", 133, 1000.f, 500.f);
@@ -884,6 +922,21 @@ TEST_CASE("SessionReader load_tracker_config reads the parent stage's joint grou
     REQUIRE(reader.load_tracker_config("tc1").tracker.active_joint_groups.empty());
     REQUIRE(reader.load_tracker_config("tc_main").tracker.active_joint_groups ==
             std::vector<std::string>{"main"});
+}
+
+TEST_CASE("SessionReader load_tracker_config reads kp_candidates_enabled", "[session_reader]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    REQUIRE_FALSE(reader.load_tracker_config("tc1").tracker.kp_candidates_enabled);
+    REQUIRE(reader.load_tracker_config("tc_kp").tracker.kp_candidates_enabled);
+    // Not set: the cost without a peak term and without continuity.
+    REQUIRE(reader.load_tracker_config("tc1").tracker.kp_candidate_peak_weight == 0.0);
+    REQUIRE(reader.load_tracker_config("tc1").tracker.kp_candidate_tracklet_multiplier == 1.0);
+    REQUIRE(reader.load_tracker_config("tc_kp").tracker.kp_candidate_peak_weight ==
+            Catch::Approx(1.5));
+    REQUIRE(reader.load_tracker_config("tc_kp").tracker.kp_candidate_tracklet_multiplier ==
+            Catch::Approx(3.0));
 }
 
 TEST_CASE("SessionReader load_sequence_info", "[session_reader]") {
@@ -1445,6 +1498,73 @@ TEST_CASE("A skeleton that binds no marker of the manifest names the pose model"
 
     CHECK_THROWS_WITH(reader.load_observations("seq_unbound", cameras, skeleton, 0.1, 0),
                       Catch::Matchers::ContainsSubstring("soma77"));
+}
+
+// ---------------------------------------------------------------------------
+// Keypoint candidates
+// ---------------------------------------------------------------------------
+
+TEST_CASE("load_keypoint_candidates reads the candidates of the keypoints the skeleton binds",
+          "[session_reader][kp_candidates]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto skeleton = make_dual_set_skeleton();
+    auto cameras = reader.load_cameras_for_sequence("seq_kpc");
+
+    auto kp = reader.load_keypoint_candidates("seq_kpc", cameras, skeleton, 0.1, 0);
+
+    // Markers by index in make_dual_set_skeleton(): LeftHand 2, LeftHandIndex1 3.
+    CHECK(kp.marker_keypoint == std::unordered_map<int, int>{{2, 14}, {3, 19}});
+    // Keypoint 5 has no marker and the 0.05 maximum is under the confidence floor.
+    REQUIRE(kp.candidates.size() == 3);
+    auto const& strong = kp.candidates[0];
+    CHECK(strong.keypoint_idx == 14);
+    CHECK(strong.position_distorted.x() == Catch::Approx(1100.0));
+    CHECK(strong.position.isApprox(
+        strong.position_distorted));  // the fixture's pixels are undistorted
+    CHECK(strong.confidence == Catch::Approx(0.9));
+    CHECK(strong.tracklet_id == 3);
+    CHECK(strong.crop_scale == Catch::Approx(2.0));
+    CHECK(strong.merge_radius_px ==
+          Catch::Approx(3.0));  // 0.5% of the 320 px box is 1.6 px, under the floor
+    CHECK(strong.subject_mask == ~std::uint64_t{0});
+    CHECK(kp.candidates[1].keypoint_idx == 14);
+    CHECK(kp.candidates[1].tracklet_id == 4);
+    CHECK(kp.candidates[2].keypoint_idx == 19);
+    CHECK(kp.candidates[2].tracklet_id == -1);
+
+    // A higher floor drops the weaker maximum too.
+    CHECK(reader.load_keypoint_candidates("seq_kpc", cameras, skeleton, 0.5, 0).candidates.size() ==
+          2);
+}
+
+TEST_CASE("load_keypoint_candidates is empty without candidates or without a bound marker",
+          "[session_reader][kp_candidates]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto cameras = reader.load_cameras_for_sequence("seq_soma");
+    auto skeleton = make_dual_set_skeleton();
+    auto none = reader.load_keypoint_candidates("seq_soma", cameras, skeleton);
+    CHECK(none.candidates.empty());
+    CHECK(none.marker_keypoint.empty());
+
+    auto coco_only = make_test_skeleton();
+    CHECK(reader
+              .load_keypoint_candidates("seq_kpc", reader.load_cameras_for_sequence("seq_kpc"),
+                                        coco_only)
+              .candidates.empty());
+}
+
+TEST_CASE("load_observations leaves the candidate rows and their manifest out",
+          "[session_reader][kp_candidates]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto skeleton = make_dual_set_skeleton();
+    auto cameras = reader.load_cameras_for_sequence("seq_kpc");
+
+    auto xs = x_by_marker(reader.load_observations("seq_kpc", cameras, skeleton, 0.1, 0), skeleton);
+    CHECK(xs.at("LeftHand") == Catch::Approx(1014.0));  // the body row, not a candidate
+    CHECK(xs.at("LeftHandIndex1") == Catch::Approx(1019.0));
 }
 
 // ---------------------------------------------------------------------------

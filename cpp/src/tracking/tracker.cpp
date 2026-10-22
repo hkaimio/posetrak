@@ -998,6 +998,8 @@ Tracker::predict_dot_slot_predictions(int camera_id) const {
                 continue;
             dot_marker_ids.push_back(static_cast<int>(i));
         }
+        dot_marker_ids.insert(dot_marker_ids.end(), candidate_slot_markers_.begin(),
+                              candidate_slot_markers_.end());
         result = ukf_->predict_marker_slots(dot_marker_ids, camera_id, *pending_prior_state_,
                                             pending_prior_cov_, cameras_, *fk_);
     }
@@ -1046,6 +1048,8 @@ Tracker::predict_dot_slot_predictions_all_cameras(std::vector<int> const& camera
             continue;
         dot_marker_ids.push_back(static_cast<int>(i));
     }
+    dot_marker_ids.insert(dot_marker_ids.end(), candidate_slot_markers_.begin(),
+                          candidate_slot_markers_.end());
     return ukf_->predict_marker_slots_all_cameras(dot_marker_ids, camera_ids, *pending_prior_state_,
                                                   pending_prior_cov_, cameras_, *fk_);
 }

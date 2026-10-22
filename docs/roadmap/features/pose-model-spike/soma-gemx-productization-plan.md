@@ -290,6 +290,17 @@ Stage 0 is measurement only and comes first because several later scopes depend 
 - **Risks:** per-step cost of the shared assignment with about 150 candidates per person and camera
   (the dot phase was tuned for a few dozen); measured in the acceptance run, with the class
   restriction pruning the cost matrix per keypoint.
+- **Outcome:** built (session schema 69, registry 18): `detect run --candidates`, finalisation, loader, merge,
+  `KeypointClassModifier`, a likelihood cost for keypoint candidates (squared distance plus ln det S minus a peak
+  term) and a tracklet-continuity setting of their own, `track run --candidates / --strict-mask /
+  --multi-view-agreement`. Candidates off give a result identical to a sequence without candidates, and the
+  extracted candidates equal the prototype's on the same crops. **The accuracy bar is not met**: on range 3, boxes
+  holding 82-83% of the prototype's crops, candidates on give 16.8 / 5.6 cm against 17.3 / 5.4 with them off and
+  10.2 / 3.4 for the prototype's offline cross-camera choice (bar 10.7 / 3.9). The per-step choice picks the right
+  candidate slightly more often than the strongest maximum but gains little in joint error, where the prototype's
+  per-tracklet choice gained 4.5 / 2.7 cm. Cost: +5-7% tracking time, +16% detection time, +26% stored detection
+  rows. Candidates and both new settings are off by default. Carrying the prototype's gain into the tracker needs
+  the `suggest` rule from an automatic grouped choice; figures and the like-for-like check in the design §9.
 
 ### Stage 10 — Tracklet editing, first stage
 

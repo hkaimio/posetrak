@@ -177,6 +177,16 @@ struct PersonContext {
     /// ObservationSequence::get_in_range() uses for *observations*).
     std::unordered_map<int, std::vector<UnlabeledCandidate>> unlabeled_candidates_by_camera;
 
+    /// The markers that take keypoint candidates instead of the fixed body observations, marker
+    /// index -> keypoint_idx (TrackerConfig::kp_candidates_enabled and a sequence that holds
+    /// candidates; empty otherwise). The candidates themselves are in
+    /// unlabeled_candidates_by_camera alongside any dots.
+    std::unordered_map<int, int> kp_marker_keypoint;
+
+    /// Whether this person takes part in the shared assignment phase on the steps that have
+    /// candidates.
+    bool uses_candidate_assignment() const { return has_dot_track || !kp_marker_keypoint.empty(); }
+
     std::shared_ptr<const SkeletonLayout> layout;
 
     /// Full-skeleton-width layout, built only when this person's tracker_config

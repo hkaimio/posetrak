@@ -57,7 +57,20 @@ fed with them, on a frozen evaluation set of operator labels. Its parts:
   runs and the scoring script, named in one place. The data (labels, candidate files, events, SHA-256 of
   each) is capture data and lives outside the repository: pass `--root` or set `POSETRAK_KP_EVAL_ROOT`; the
   tracking runs are in the session database of `--db` / `POSETRAK_KP_EVAL_DB`, opened read-only.
-- `eval_kp_candidates.py` — `verify` (checksums), `picks`, `tracker`, `events`.
+- `eval_kp_candidates.py` — `verify` (checksums), `picks`, `tracker`, `events`, `compare`, `track-picks`. `tracker --runs GROUP` scores
+  a group of `[tracker.*]` runs of `kp_eval_set.toml` (the prototype's `cross_camera` and `cross_camera_mask` runs of range 3
+  and its strict mask filter runs `mask_filter_proposal` and `mask_filter_cross_camera` among them); `tracker --run
+  SUBJECT=RUN ...` scores runs of a work copy that the set does not name. `compare --detection-run RUN --subject N`
+  reports how much of the prototype's candidate file of that subject a detection run with candidates reproduces within
+  0.5 px, and the reverse, overall and for the frames whose crop is the same. The frozen file stores the heatmap cell
+  index at the cell's left edge and the decoder now uses the cell centre: `--cell-shift` (default 0.5 cell) moves
+  the file's positions to the same convention before comparing.
+
+`track-picks --range RANGE --run SUBJECT=RUN ...` traces the candidate each used observation of a tracking run
+  came from (`kp_gt.tracker_picks`: the keypoint of the marker, the sequence row nearest in time, the candidate whose
+  undistorted position is nearest to the observation) and reports the share of labelled keypoint-frames, among those
+  the run took a candidate for, within the tolerance of the label, next to the strongest maximum's share on the same
+  keypoint-frames. It needs no label-fed tracker run, so it scores ranges that have only labels.
 
 Picks come from the strongest maximum of the candidates, or from a pose observation sequence
 (`picks --pick-sequence SUBJECT=SEQUENCE`), so a productized pipeline is scored without changing the harness.

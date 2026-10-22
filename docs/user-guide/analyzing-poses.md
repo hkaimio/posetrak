@@ -42,6 +42,23 @@ than almost any other single decision in the pipeline.
   initialization, Queue Forward/Backward, reviewing and correcting a
   propagated mask, and when a redetect is needed.)*
 
+## Keeping several candidates per keypoint (SOMA-77)
+
+A heatmap model such as SOMA-77 has more than one maximum per keypoint, and in crowded footage the
+strongest one is the wrong one for about one keypoint in twenty. A detection run made with
+**Keypoint candidates** keeps up to six maxima per keypoint, linked into short tracks (tracklets) per
+camera, next to the ordinary strongest-maximum keypoints. Nothing that reads the ordinary keypoints
+changes. A tracking run can then choose among the candidates with its own prediction, the other cameras
+and the person masks (see [Tracking & troubleshooting](tracking-troubleshooting.md)).
+
+- Switch it on with `posetrak detect run ... --candidates`, or the **Keypoint candidates** box of the pose
+  extraction panel before queuing. It is off by default and available for SOMA-77 runs only; a run holds
+  candidates for all its cameras or for none, so start a new run to change it.
+- **Cost.** On a five-camera, three-person range the keypoint data of the run grows by about a quarter (91
+  maxima, 2.4 kB per person, camera and frame, against 0.9 kB for the ordinary keypoints; the same amount again in
+  each person's sequence once the run is finalised) and detection took about 16% longer.
+- Finalise the run as usual; the candidates travel with each person's sequence.
+
 ## Which to use
 
 *(TBD: concrete guidance — "start with direct detection, only reach for

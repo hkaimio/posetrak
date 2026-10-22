@@ -575,6 +575,13 @@ The mask options need `--seg-run` (the label of the person is read from the subj
 correct candidates of hidden keypoints. The run reports the share of keypoint-frames the filter emptied, per person.
 The choice is used only with `--candidates`.
 
+Two settings outside `tracker_configs` decide what the choice starts from. `detect run --segmentation` multiplies the
+SOMA heatmaps with the person's mask grown by `--mask-gate-margin` pixels (default 40; 0 turns the gate off). The
+candidates are the maxima of the heatmap before the gate; the stored keypoint row, which `'step'`, candidates off and
+the cameras outside the choice use, is the strongest maximum after it. `--kp-skip-camera` takes a camera out of the
+choice while its stored row stays an observation: a camera whose lens model fits only part of the image (the ace2 pro in
+its wide mode) is better left out of the choice (section 10.7).
+
 ### 10.6 Cost
 
 Optimized build, range 3 (51.7-56.8 s), five cameras, one person (332,000 candidates, 176,000 keypoint-frames of the
@@ -608,8 +615,8 @@ equal those of the second on all of them. The masks of the segmentation run were
 revision, so neither the box run nor a tracking run records which version of the masks it used (the box run's
 `config_json` names the run, not a revision).
 
-The figures below are on boxes rebuilt from the second state with the script that built `fcb6b961`
-(`make_boxes_run.py`, a prototype script, not the product's `MaskBoxSource`; run `1defb4f3`): the prototype's crop is
+The figures of the next table are on boxes rebuilt from the second state with the script that built `fcb6b961`, on candidates detected without the mask gate (the product's path with the gate is below)
+(`make_boxes_run.py`, a prototype script; run `1defb4f3`): the prototype's crop is
 reproduced on all 3,013 and 3,051 frames, and 99.8% and 99.2% of its candidates within 0.5 px (the rest are strong
 maxima, 73% of them on fingers and hands, that moved by 1-2 px, which GPU non-determinism and the sub-cell refinement
 explain). Detection run `cf7b5581`, sequences `4d68198d` (subject 1) and `401c8527` (subject 2). The strict filter and the
@@ -632,7 +639,8 @@ mask term read the same masks.
 | `'window'` + tracklet-length term, weight 1 and 3 | 13.3 / 15.0 and 13.6 / 15.8 | 4.0 / 4.9 and 4.0 / 5.0 |
 
 (Target at most 10.7 / 3.9 over the range: `'window'` alone **does not meet it**, by 2.8 cm for subject 1 and 0.1 cm for
-subject 2; `'window'` with the strict filter restricted to the body keypoints meets it for both: 9.4 and 3.7.)
+subject 2; `'window'` with the strict filter restricted to the body keypoints met it on these ungated candidates, 9.4 and
+3.7, but not on the product path below, 10.73 and 3.48.)
 The strict filter emptied 39,123 of 177,483 keypoint-frames (22.0%) of subject 1 and 49,792 of 183,110 (27.2%) of
 subject 2. On the boxes of `fcb6b961`, which hold 82% of the prototype's crops, the same runs gave 17.8 / 5.2, 17.1 / 5.3,
 16.0 / 4.6, 15.9 / 4.5 and 15.7 / 4.6 cm (subjects 1 and 2, range) for candidates off, `'step'`, `'window'`, `'window'` +
@@ -659,6 +667,60 @@ tracklets from the filter gave back the filter's gain in subject 1 (12.9 against
 on long tracklets of the other person's keypoints. The class restriction was chosen after seeing the range 3 figures
 of six variants; the pick accuracy of range 1 (43.5-47.5 s, subjects 1 and 3, strict filter over all classes against
 none: 92.9 to 93.5 and 96.5 to 97.5%) cannot separate them, because it leaves out the keypoint-frames a filter empties.
+
+**Product path: the mask box source and the gate.** `detect run --segmentation` on the same masks (run `78b3486c`, sequences
+`2bfa4f66`, `94447f4d`, `eab70a9f`; the work copy holds exactly the mask state of the prototype's crops) gives person boxes
+identical to run `1defb4f3` on all 9,122 boxes of range 3 (largest difference 0.0 px) and reproduces the prototype's
+crops on all frames and its candidates in 99.8% and 99.2%, as the run on the script's boxes does: the box path
+contributes nothing. The gate leaves the candidates alone and changes the stored keypoint row. Same variants on it
+(calibration `5351f35e`, ace2 pro outside the choice, subjects 1 and 2, range / hard windows; the ungated figures are those
+of the table above):
+
+| Variant | Gated (product): subject 1 | subject 2 | Ungated: subject 1 | subject 2 |
+|---|---|---|---|---|
+| candidates off | 11.4 / 12.3 | 4.6 / 6.0 | 14.3 / 16.7 | 4.7 / 6.1 |
+| `'step'` | 11.9 / 13.0 | 4.6 / 6.0 | 13.9 / 16.0 | 5.4 / 7.2 |
+| `'window'` | 13.1 / 15.0 | 3.8 / 4.9 | 13.5 / 15.4 | 4.0 / 5.1 |
+| `'window'` + strict filter on the body | 10.7 / 11.9 | 3.5 / 4.5 | 9.4 / 10.7 | 3.7 / 4.6 |
+| `'window'` + body mask term | 12.9 / 14.6 | 3.7 / 4.8 | 12.9 / 14.7 | 3.9 / 4.9 |
+| prototype, cross-camera | 10.2 / 10.9 | 3.4 / 4.2 | | |
+
+(gated runs `e20d9f1a`/`0d4d997f`, `8742539f`/`388d0909`, `ad73c888`/`b79acc74`, `2bccac80`/`1e5c2c8e`,
+`adcbd2ea`/`e23aafe3`.) The gate lowers candidates off by 2.9 cm for subject 1 and the per-step assignment by 2.0 cm,
+because it removes the maxima on the other person from the stored row; the windowed choice replaces that row and gains
+nothing from it (0.4 cm), and the filter's result for subject 1 is 1.3 cm worse than without the gate (10.73 against the
+bar of 10.7; subject 2 3.48 against 3.9). With the gate the windowed choice without the filter is worse than candidates
+off for subject 1 (13.1 against 11.4) and better for subject 2 (3.8 against 4.6).
+
+**The ace2 pro camera.** The ace2 pro's wide mode leaves the centre of the image almost undistorted and the edge
+strongly distorted, which the radial-tangential model fits only inside the area where the people move. The capture's
+refined extrinsics `b416cd21` with the camera's intrinsics fitted to that area (`2a5ad9cf`: pinhole with k1 and k2, 3840 x
+2160) and the tracker configuration with the camera as a position camera give a reference and runs on a far better
+basis than `5351f35e`. The product reads those intrinsics as the prototype did (the original camera matrix, the five
+radial-tangential coefficients, the image size of the row, the undistorted matrix equal to the original); its inversion of
+the distortion differs from an exact one by at most 0.02 px up to a distorted radius of 1.25 focal lengths, beyond which
+the fitted model, whose forward map stops being monotone at a radius of 1.36, has no inverse (10% of the image area, the
+corners). Tracker distance to the label-fed reference on the same calibration with the camera as a position camera
+(`855e1e19`, `bc3886f9`), product-path sequences, range / hard windows:
+
+| Variant | Subject 1 | Subject 2 |
+|---|---|---|
+| candidates off (`085f3fb8`, `c94125e0`) | 8.1 / 11.2 | 4.0 / 5.3 |
+| `'step'` (`f0f0ef8b`, `73d44276`) | 6.6 / 8.9 | 4.0 / 5.3 |
+| `'window'`, ace2 in the choice (`d6aaefd0`, `e6b7fd32`) | 6.5 / 8.7 | 3.6 / 4.7 |
+| `'window'`, ace2 outside the choice (`7ab6edba`, `d96476fc`) | 6.0 / 8.0 | 3.6 / 4.6 |
+| `'window'` + strict filter on the body, ace2 in (`34920a1a`, `bd60e04c`) | 7.5 / 10.4 | 3.8 / 4.8 |
+| `'window'` + strict filter on the body, ace2 outside (`36afbdaf`, `de1e686b`) | 6.8 / 9.2 | 3.5 / 4.5 |
+| `'window'` + body mask term, ace2 in (`46f90c67`, `67e06422`) | 6.5 / 8.6 | 3.6 / 4.7 |
+| `'window'` + body mask term, ace2 outside (`ab889359`, `b8b95c4e`) | 6.0 / 8.0 | 3.5 / 4.5 |
+| prototype, cross-camera + mask term, ace2 position (`841ec44f`, `0a61936d`) | 5.5 / 7.3 | 2.5 / 3.5 |
+| prototype, ace2 velocity-only (`ae5a7bd4`, `55314e45`) | 12.4 / 15.5 | 5.0 / 6.3 |
+
+The best product setting here is `'window'` with the ace2 outside the choice, 0.5 and 1.1 cm behind the prototype. The
+strict filter on the body keypoints no longer helps: it makes subject 1 worse by 0.8 cm and improves subject 2 by 0.1
+cm. Under `b416cd21` the consensus inlier radius of the ace2 pro is 12 px, the floor and the same as the other cameras
+(12-13 px), against 60 px under `5351f35e`; 41.6% of its candidates and 62.4% of its picks are in a consistent set,
+against 31-46% and 46-65% for the other four.
 
 What was checked:
 
@@ -701,8 +763,7 @@ on the same input, so there is no bug to correct. The consensus does depend on t
 wide-lens camera's residuals are about 24 px and its inlier radius becomes 60 px, against the 12 px floor under
 `b416cd21`, which has that camera's corrected intrinsics.
 
-The windowed choice is not made the default, and the strict filter and the mask term stay off; whether
-`'window'` with `--kp-strict-filter` becomes the default for runs with reviewed masks is for the operator to decide.
+The windowed choice is not made the default, and the strict filter and the mask term stay off.
 
 **Review material** for the keypoint-frames where the run's picks still differ from the prototype's: contact sheets
 outside the repository (`D:/mocap/stage9w-work/review/`, an `index.html` and a folder per subject and camera).
@@ -725,3 +786,10 @@ outside the repository (`D:/mocap/stage9w-work/review/`, an `index.html` and a f
 - The prototype's results were not reproducible from the productized candidates mainly because of the box masks, not
   because of the choice: on boxes from the same masks the windowed choice is within 0.1 cm of the bar for subject 2 and
   2.8 cm from it for subject 1.
+- The figures with the filter on the body keypoints were measured on candidates without the mask gate, which the product
+  applies by default; they were also selected among six variants on the one range. With the gate the filter's result for
+  subject 1 is 10.73 cm (bar 10.7), and on the better basis (fitted ace2 intrinsics, `b416cd21`) the filter makes subject 1
+  worse. The restriction to the body keypoints stands as the less harmful form of the filter; that the filter helps at all
+  is not established outside range 3.
+- The mask box source reproduces the boxes of the prototype's script exactly; the difference between the product's figures
+  and the earlier ones is the gate, which changes the stored keypoint row.

@@ -1651,6 +1651,38 @@ TEST_CASE("load_observations leaves the candidate rows and their manifest out",
     CHECK(xs.at("LeftHandIndex1") == Catch::Approx(1019.0));
 }
 
+TEST_CASE("load_observations builds the observations of a frame from overriding rows",
+          "[session_reader][kp_candidates]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto skeleton = make_dual_set_skeleton();
+    auto cameras = reader.load_cameras_for_sequence("seq_kpc");
+
+    // The picks of a windowed choice: keypoint 14 moved to another candidate, keypoint 19 without a
+    // pick, every other keypoint without one as well.
+    KeypointRowOverrides overrides;
+    std::vector<db::Keypoint> row(77);
+    row[14] = {2000.f, 700.f, 0.9f};
+    overrides.rows["inst1"][0] = row;
+    auto xs = x_by_marker(
+        reader.load_observations("seq_kpc", cameras, skeleton, 0.1, 0, false, 0.5, 0.0, 0.0, 10,
+                                 0.0, {}, 0.0, -std::numeric_limits<double>::infinity(),
+                                 std::numeric_limits<double>::infinity(), &overrides),
+        skeleton);
+    CHECK(xs.at("LeftHand") == Catch::Approx(2000.0));
+    CHECK(xs.count("LeftHandIndex1") == 0);  // confidence 0: no observation
+
+    // A frame the overrides do not name keeps its stored row.
+    KeypointRowOverrides elsewhere;
+    elsewhere.rows["inst1"][7] = row;
+    auto kept = x_by_marker(
+        reader.load_observations("seq_kpc", cameras, skeleton, 0.1, 0, false, 0.5, 0.0, 0.0, 10,
+                                 0.0, {}, 0.0, -std::numeric_limits<double>::infinity(),
+                                 std::numeric_limits<double>::infinity(), &elsewhere),
+        skeleton);
+    CHECK(kept.at("LeftHand") == Catch::Approx(1014.0));
+}
+
 // ---------------------------------------------------------------------------
 // Segmentation mask revisions: a job reads every mask at one closed revision.
 // ---------------------------------------------------------------------------

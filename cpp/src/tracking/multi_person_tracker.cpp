@@ -309,6 +309,9 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
     double const window_end = std::isnan(opts.override_end_time)
                                   ? inf
                                   : opts.override_end_time + kObservationWindowMarginS;
+    ctx->observation_min_confidence = opts.min_confidence;
+    ctx->observation_window_start = window_start;
+    ctx->observation_window_end = window_end;
     ctx->observations = reader.load_observations(
         full_sequence_id, ctx->cameras_by_name, ctx->skeleton, opts.min_confidence, spec.person_id,
         ctx->tracker_config.use_relative_observations, ctx->tracker_config.relative_min_confidence,

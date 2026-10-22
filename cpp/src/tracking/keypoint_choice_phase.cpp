@@ -98,6 +98,7 @@ KeypointChoiceModel load_keypoint_choice_model(std::string const& path) {
 KeypointChoiceReport run_keypoint_choice_phase(PersonContext& ctx, KeypointChoiceInputs const& in) {
     auto const t_phase = Clock::now();
     KeypointChoiceReport report;
+    report.peak_memory_before_mb = peak_memory_mb();
     auto const& cfg = ctx.tracker_config.kp_choice;
     bool const needs_masks = cfg.strict_filter || cfg.mask_term_weight != 0.0;
     if (needs_masks && (in.seg_run_id.empty() || in.seg_mask_label <= 0)) {
@@ -280,22 +281,29 @@ KeypointChoiceReport run_keypoint_choice_phase(PersonContext& ctx, KeypointChoic
     choice.run();
     report.choice_s = seconds_since(t0);
 
-    // ---- 5. observations and stored picks ------------------------------------------------
-    std::unordered_map<int, std::string> camera_name;
-    for (auto const& [name, camera] : ctx.cameras_by_name)
-        camera_name[camera.id()] = name;
+    if (!in.dump_path.empty()) {
+        std::ofstream dump(in.dump_path);
+        dump << "camera_instance_id,video_frame,keypoint,rank,tracklet,consistent,removed,picked\n";
+        for (size_t r = 0; r < choice.candidates().size(); ++r) {
+            auto const& c = choice.candidates()[r];
+            auto const& cam = data.cameras[c.camera];
+            bool const picked = choice.input().active[c.camera] &&
+                                choice.pick(c.camera, c.keypoint, c.frame) == static_cast<int>(r);
+            dump << cam.camera_instance_id << ','
+                 << cam.frames[static_cast<size_t>(c.frame)].video_frame << ','
+                 << static_cast<int>(c.keypoint) << ',' << c.rank << ',' << c.tracklet << ','
+                 << c.consistent << ',' << c.removed << ',' << picked << '\n';
+        }
+    }
 
-    // Hand-placed keypoint edits stay: they are fixed observations the picks must not replace.
-    std::set<std::tuple<int, int, int>> edited;
-    std::set<int> bound_markers;
-    for (auto const& [marker, keypoint] : data.marker_keypoint)
-        bound_markers.insert(marker);
-    for (auto const& [name, sequence] : ctx.observations.sequences())
-        for (auto const& o : sequence.observations)
-            if (o.force_inlier && o.mode == MeasurementMode::POSITION)
-                edited.emplace(o.camera_id, o.marker_id, o.frame_idx);
-
+    // ---- 5. stored picks and the observations built from them ----------------------------
+    // The picks take the place of the stored body row of every camera that took part, so that
+    // everything the loader builds from the row follows them: the positions, the
+    // child-minus-parent pairs and the edits applied on top.
+    KeypointRowOverrides overrides;
     for (int c = 0; c < n_cameras; ++c) {
+        if (!choice.input().active[static_cast<size_t>(c)])
+            continue;
         auto const& cam = data.cameras[static_cast<size_t>(c)];
         int const n_frames = static_cast<int>(cam.frames.size());
         KeypointPicks picks;
@@ -307,79 +315,41 @@ KeypointChoiceReport run_keypoint_choice_phase(PersonContext& ctx, KeypointChoic
             picks.video_frames.push_back(f.video_frame);
         picks.tracklet_ids.assign(static_cast<size_t>(n_frames) * n_keypoints, -1);
         picks.ranks.assign(static_cast<size_t>(n_frames) * n_keypoints, -1);
-        std::vector<Observation> fresh;
-        if (!choice.input().active[static_cast<size_t>(c)])
-            continue;
+        auto& rows = overrides.rows[cam.camera_instance_id];
         for (int f = 0; f < n_frames; ++f) {
+            std::vector<db::Keypoint> row(static_cast<size_t>(n_keypoints));
             for (int k = 0; k < n_keypoints; ++k) {
                 int const r = choice.pick(c, k, f);
                 if (r < 0)
                     continue;
                 auto const& cand = choice.candidates()[static_cast<size_t>(r)];
+                auto const& source = data.candidates[static_cast<size_t>(cand.source)];
                 size_t const at = static_cast<size_t>(f) * n_keypoints + k;
                 picks.tracklet_ids[at] = cand.tracklet >= 0 ? cand.tracklet : -2;
                 picks.ranks[at] = static_cast<std::int8_t>(std::min<int>(cand.rank, 127));
                 ++picks.n_picked;
-                int const marker = keypoint_marker[static_cast<size_t>(k)];
-                if (marker < 0)
-                    continue;
-                auto const& row = data.candidates[static_cast<size_t>(cand.source)];
-                if (row.peak < in.min_confidence)
-                    continue;
-                auto const& frame = cam.frames[static_cast<size_t>(f)];
-                if (edited.count({cam.camera_id, marker, frame.video_frame}))
-                    continue;
-                Observation obs;
-                obs.camera_id = cam.camera_id;
-                obs.marker_id = marker;
-                obs.frame_idx = frame.video_frame;
-                obs.timestamp = frame.timestamp;
-                obs.position_distorted = Eigen::Vector2d(row.x, row.y);
-                obs.position = Eigen::Vector2d(row.ux, row.uy);
-                obs.confidence = row.peak;
-                obs.crop_scale = frame.crop_scale;
-                fresh.push_back(obs);
+                row[static_cast<size_t>(k)] = {source.x, source.y, source.peak};
+                report.observations += keypoint_marker[static_cast<size_t>(k)] >= 0 &&
+                                       source.peak >= ctx.observation_min_confidence;
             }
+            rows[cam.frames[static_cast<size_t>(f)].video_frame] = std::move(row);
         }
-        // The camera's candidate-bearing statistics.
         auto const& stats = choice.camera_stats()[static_cast<size_t>(c)];
         picks.n_candidate_keypoint_frames = stats.keypoint_frames;
         picks.n_filter_emptied = stats.emptied;
         report.keypoint_frames += stats.keypoint_frames;
         report.emptied_by_filter += stats.emptied;
         report.picked += picks.n_picked;
-        report.observations += static_cast<long>(fresh.size());
         if (ctx.result_writer)
             ctx.result_writer->write_kp_picks(picks);
-
-        // Replace the camera's fixed POSITION observations of the bound markers.
-        auto name_it = camera_name.find(cam.camera_id);
-        if (name_it == camera_name.end())
-            continue;
-        auto& sequences = ctx.observations.sequences();
-        auto seq_it = sequences.find(name_it->second);
-        if (seq_it == sequences.end()) {
-            ObservationSequence created;
-            created.camera_id = cam.camera_id;
-            created.camera_name = name_it->second;
-            seq_it = sequences.emplace(name_it->second, std::move(created)).first;
-        }
-        auto& existing = seq_it->second.observations;
-        existing.erase(std::remove_if(existing.begin(), existing.end(),
-                                      [&](Observation const& o) {
-                                          return o.mode == MeasurementMode::POSITION &&
-                                                 !o.force_inlier &&
-                                                 bound_markers.count(o.marker_id);
-                                      }),
-                       existing.end());
-        std::vector<Observation> merged;
-        merged.reserve(existing.size() + fresh.size());
-        std::merge(existing.begin(), existing.end(), fresh.begin(), fresh.end(),
-                   std::back_inserter(merged), [](Observation const& a, Observation const& b) {
-                       return a.timestamp < b.timestamp;
-                   });
-        existing = std::move(merged);
     }
+    auto const& tc = ctx.tracker_config;
+    ctx.observations = reader.load_observations(
+        in.sequence_id, ctx.cameras_by_name, ctx.skeleton, ctx.observation_min_confidence,
+        in.person_id, tc.use_relative_observations, tc.relative_min_confidence, tc.pose_noise_std,
+        tc.cross_pair_max_px, tc.cross_pair_max_n, tc.edited_kp_noise_std,
+        tc.confidence_threshold_marker_names, tc.confidence_threshold_override,
+        ctx.observation_window_start, ctx.observation_window_end, &overrides);
 
     report.total_s = seconds_since(t_phase);
     report.peak_memory_mb = peak_memory_mb();
@@ -399,9 +369,9 @@ KeypointChoiceReport run_keypoint_choice_phase(PersonContext& ctx, KeypointChoic
         }
         fmt::print(
             "  Phase time {:.1f}s (load {:.1f}, masks {:.1f}, consensus {:.1f}, choice {:.1f}); "
-            "peak memory {:.0f} MB\n",
+            "peak memory {:.0f} MB ({:.0f} MB before the phase)\n",
             report.total_s, report.load_s, report.masks_s, report.consensus_s, report.choice_s,
-            report.peak_memory_mb);
+            report.peak_memory_mb, report.peak_memory_before_mb);
     }
     return report;
 }

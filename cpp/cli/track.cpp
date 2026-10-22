@@ -985,7 +985,8 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                              std::string const& seg_run_id = "", int seg_mask_label = 0,
                              std::string const& tracklet_assignments_path = "",
                              int seg_revision = -1, std::string const& kp_choice_model_path = "",
-                             double kp_confidence_scale = 5.0) {
+                             double kp_confidence_scale = 5.0,
+                             std::string const& kp_choice_dump_path = "") {
     std::vector<std::string> run_ids;  // runs to mark failed when tracking throws
     try {
         // The mask gate reads every mask at one revision, fixed here before anything else so a
@@ -1076,7 +1077,6 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
             choice.db_path = db_path;
             choice.sequence_id = ctx->full_sequence_id;
             choice.person_id = person_id;
-            choice.min_confidence = min_confidence;
             choice.confidence_scale = kp_confidence_scale;
             if (!kp_choice_model_path.empty())
                 choice.model = load_keypoint_choice_model(kp_choice_model_path);
@@ -1087,6 +1087,7 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
             choice.seg_revision = seg_revision;
             choice.camera_shot_video_ids = camera_shot_video_ids;
             choice.rules = &tracklet_assignments.assignments;
+            choice.dump_path = kp_choice_dump_path;
             choice.quiet = quiet;
             run_keypoint_choice_phase(*ctx, choice);
         }
@@ -1250,7 +1251,6 @@ static int run_multi_person_track_from_db(
             choice.db_path = db_path;
             choice.sequence_id = person_ctx->full_sequence_id;
             choice.person_id = person_ctx->spec.person_id;
-            choice.min_confidence = min_confidence;
             choice.confidence_scale = kp_confidence_scale;
             if (!kp_choice_model_path.empty())
                 choice.model = load_keypoint_choice_model(kp_choice_model_path);
@@ -1320,6 +1320,7 @@ int main(int argc, char* argv[]) {
     int db_seg_revision = -1;
     std::string db_tracklet_assignments;
     std::string db_kp_choice_model;
+    std::string db_kp_choice_dump;
     double db_kp_confidence_scale = 5.0;
     // Per-subject seeds for --person mode: repeated 4-value groups (person index, x, y, z).
     std::vector<double> db_subject_seeds;
@@ -1405,6 +1406,10 @@ int main(int argc, char* argv[]) {
         "(lines 'pair,<landmark>,<landmark>,<limit in box heights>' and 'class,<landmark>,"
         "<class>') for the windowed choice of keypoint candidates. Without it the choice has no "
         "neighbour support.");
+    track_cmd->add_option("--kp-choice-dump", db_kp_choice_dump,
+                          "Diagnostics: write every keypoint candidate of the windowed choice with "
+                          "its consensus flag, "
+                          "whether it was removed and whether it was picked to this CSV file.");
     track_cmd->add_option(
         "--kp-confidence-scale", db_kp_confidence_scale,
         "The pose model's confidence scale: stored candidate peaks are heatmap peaks times this "
@@ -1518,7 +1523,7 @@ int main(int argc, char* argv[]) {
                 db_active_joint_groups, db_start_time, db_end_time, seed_position,
                 db_trace_assignment_start, db_trace_assignment_end, db_seg_run_id,
                 db_seg_mask_label, db_tracklet_assignments, db_seg_revision, db_kp_choice_model,
-                db_kp_confidence_scale);
+                db_kp_confidence_scale, db_kp_choice_dump);
         } else {
             if (track_config.empty()) {
                 fmt::print(stderr, "Error: config file required when not using --session-db\n");

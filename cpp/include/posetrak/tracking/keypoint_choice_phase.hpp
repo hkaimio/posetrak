@@ -52,7 +52,6 @@ struct KeypointChoiceInputs {
     std::string db_path;
     std::string sequence_id;  ///< Full sequence id.
     int person_id = 0;
-    double min_confidence = 0.1;  ///< A pick below it gives no observation, as for any keypoint.
     /// The pose model's confidence scale: the stored peak is the heatmap peak times this (5.0 for
     /// SOMA-77). The peak weight gamma applies to the heatmap peak.
     double confidence_scale = 5.0;
@@ -63,6 +62,9 @@ struct KeypointChoiceInputs {
     int seg_revision = -1;
     std::unordered_map<int, std::string> camera_shot_video_ids;  ///< camera id -> shot video id
     TrackletAssignments const* rules = nullptr;
+    /// Write every candidate with its consensus flag, whether it was removed and whether it was
+    /// picked to this CSV file (diagnostics); empty: none.
+    std::string dump_path;
     bool quiet = false;
 };
 
@@ -72,12 +74,14 @@ struct KeypointChoiceReport {
     long keypoint_frames = 0;  ///< With a candidate, before the strict filter.
     long emptied_by_filter = 0;
     long picked = 0;
-    long observations = 0;  ///< Fixed observations the picks replaced the strongest maxima with.
+    long observations =
+        0;  ///< Picks of bound markers above the confidence floor: the observations they give.
     double load_s = 0.0;
     double masks_s = 0.0;
     double consensus_s = 0.0;
     double choice_s = 0.0;
     double total_s = 0.0;
+    double peak_memory_before_mb = 0.0;  ///< Peak working set of the process when the phase starts.
     double peak_memory_mb = 0.0;  ///< Peak working set of the process at the end of the phase.
 };
 

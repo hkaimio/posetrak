@@ -930,7 +930,8 @@ ObservationSet SessionReader::load_observations(
     Skeleton const& skeleton, double min_confidence, int person_id, bool use_relative_obs,
     double relative_min_conf, double pose_noise_std, double cross_pair_max_px, int cross_pair_max_n,
     double edited_kp_noise_std, std::vector<std::string> const& confidence_threshold_marker_names,
-    double confidence_threshold_override, double window_start_s, double window_end_s) {
+    double confidence_threshold_override, double window_start_s, double window_end_s,
+    KeypointRowOverrides const* row_overrides) {
     bool const windowed = std::isfinite(window_start_s) || std::isfinite(window_end_s);
     std::unordered_set<std::string> confidence_override_set(
         confidence_threshold_marker_names.begin(), confidence_threshold_marker_names.end());
@@ -1330,6 +1331,17 @@ ObservationSet SessionReader::load_observations(
             merged.assign(manifest_width > 0 ? manifest_width : kFullBodyNKp, db::Keypoint{});
             base_crop_scale = group_rows.front().crop_scale;
             base_timestamp_s = group_rows.front().timestamp_s;
+        }
+        // The windowed choice of keypoint candidates replaces the stored keypoints by its picks.
+        if (row_overrides != nullptr) {
+            if (auto cam_rows = row_overrides->rows.find(group_inst_id);
+                cam_rows != row_overrides->rows.end()) {
+                if (auto frame_row = cam_rows->second.find(group_frame);
+                    frame_row != cam_rows->second.end()) {
+                    for (size_t k = 0; k < merged.size() && k < frame_row->second.size(); ++k)
+                        merged[k] = frame_row->second[k];
+                }
+            }
         }
         std::vector<double> merged_crop_scale(merged.size(), base_crop_scale);
         // Marker bound to each slot of the merged array; the primary row's slots first, the slots

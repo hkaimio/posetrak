@@ -8,6 +8,7 @@
 #include <posetrak/core/config.hpp>
 #include <posetrak/core/observation.hpp>
 #include <posetrak/core/skeleton.hpp>
+#include <posetrak/db/blob_codec.hpp>
 
 #include <sqlite3.h>
 
@@ -133,6 +134,16 @@ struct KeypointCandidates {
     /// Skeleton marker index -> keypoint_idx of the candidates it takes; the markers of the body
     /// pose model that have candidates in the sequence.
     std::unordered_map<int, int> marker_keypoint;
+};
+
+/// @brief Keypoint rows that take the place of the stored body row of a (camera, frame) when
+/// load_observations() builds the frame's observations: the windowed choice of keypoint candidates
+/// hands over the candidate it picked for each keypoint, so that everything built from the row
+/// (the positions, the child-minus-parent pairs, the hand overlays' base) comes from the picks.
+struct KeypointRowOverrides {
+    /// camera_instance_id -> video_frame -> one entry per keypoint of the primary row: distorted
+    /// pixels and confidence (0 = no pick, the keypoint gives no observation).
+    std::unordered_map<std::string, std::unordered_map<int, std::vector<db::Keypoint>>> rows;
 };
 
 /// @brief One frame of a camera that holds keypoint candidates of the person.
@@ -311,6 +322,8 @@ class SessionReader {
     /// @param window_end_s Load only observations with timestamp < this (default: all). A caller
     ///   that tracks a time range passes the range plus a margin: the observations of a long
     ///   sequence are the largest part of the tracker's memory otherwise.
+    /// @param row_overrides Rows that replace the stored primary row of a (camera, frame) before
+    ///   the observations are built; null: the stored rows.
     /// @return ObservationSet ready for the tracker
     ObservationSet
     load_observations(std::string const& sequence_id, std::map<std::string, Camera> const& cameras,
@@ -321,7 +334,8 @@ class SessionReader {
                       std::vector<std::string> const& confidence_threshold_marker_names = {},
                       double confidence_threshold_override = 0.0,
                       double window_start_s = -std::numeric_limits<double>::infinity(),
-                      double window_end_s = std::numeric_limits<double>::infinity());
+                      double window_end_s = std::numeric_limits<double>::infinity(),
+                      KeypointRowOverrides const* row_overrides = nullptr);
 
     /// @brief Load anonymous reflective-dot candidates for a sequence.
     ///

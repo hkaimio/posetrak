@@ -262,16 +262,16 @@ decision which keypoints to track is the skeleton's.
 
 ### 9.2 Cost and continuity of the assignment
 
-The first build costed a keypoint candidate by the squared Mahalanobis distance alone and left tracklet continuity
-off (the `dot_tracklet_gate_multiplier` of the acceptance config is 1.0, and the modifier is registered only above
-1.0). Two things in that follow from the detection noise a candidate adds to the slot covariance
-(section 9.1, divided by the peak):
+The dots' cost, the squared Mahalanobis distance alone, does not suit keypoint candidates, and the dots' tracklet
+continuity is off by default (`dot_tracklet_gate_multiplier` 1.0; the modifier is registered only above 1.0):
 
-- At equal distance a weak maximum has the wider covariance and so the **lower** cost; nothing rewarded peak height.
-  Dots all have one noise, so this never showed for them. With that cost the tracker followed the strongest maxima
-  worse than the strongest maxima themselves (subject 1: 18.7 against 18.0 cm, subject 2: 7.6 against 5.3, first
-  measurement).
-- The tracklets linked at detection took no part in the choice, which is where the prototype's gain came from.
+- A candidate's detection noise is added to the slot covariance and grows as the peak falls (section 9.1). With the
+  distance alone, at equal distance a weak maximum has the wider covariance and so the **lower** cost, and nothing
+  rewards peak height. Dots all have one noise, so this does not show for them. Measured with that cost (boxes
+  `69c1d770`), the tracker following the candidates was worse than following the strongest maxima (subject 1: 18.7
+  against 18.0 cm, subject 2: 7.6 against 5.3).
+- Without continuity the tracklets linked at detection take no part in the choice, which is where the prototype's
+  gain came from.
 
 As built, the cost of a keypoint candidate is a negative log-likelihood of the detection under the slot's
 distribution:
@@ -357,8 +357,8 @@ strongest-peak run; with the cost alone 2.0 and -0.3 cm. The correct candidate i
 within 3% of the label: 88.2% against 86.9% for the strongest maximum on the same keypoint-frames for subject 1,
 93.2 against 92.5 for subject 2), but the joint error does not follow:
 
-- The cost change turns the first build's loss into a small gain (subject 2: 7.6 to 5.6 cm; the two measurements
-  are on different boxes, `69c1d770` and `fcb6b961`). Subject 2 is still not better than candidates off.
+- The likelihood cost turns the loss of the distance-only cost into a small gain (subject 2: 7.6 to 5.6 cm; the two
+  measurements are on different boxes, `69c1d770` and `fcb6b961`). Subject 2 is still not better than candidates off.
 - The continuity multiplier and the peak weight, as chosen on range 1, do not add to the cost term here: the cost
   alone is 1.5 cm better for subject 1 and equal for subject 2. This is reported, not used: range 3 is not for choosing.
 - By joint (subject 1, cm, inside / outside the hard windows, off / chosen / cost only / prototype): the chosen setting
@@ -371,9 +371,9 @@ within 3% of the label: 88.2% against 86.9% for the strongest maximum on the sam
   nearly every joint.
 - Multi-view agreement on top: 0.3 cm better for subject 1, 0.2 cm worse for subject 2.
 
-Next step, not taken here: the prototype's gain came from a choice made per tracklet and over time. The `suggest`
-rule from an automatic grouped choice (section 5) is what would carry it into the tracker; its decision, like any
-change of the `dot_*` defaults, is the operator's.
+The prototype's gain came from a choice made per tracklet and over time, which the tracker's per-step assignment
+does not reproduce. The `suggest` rule from an automatic grouped choice (section 5) is what would carry it into the
+tracker.
 
 ### 9.4 Like for like
 
@@ -395,8 +395,8 @@ change of the `dot_*` defaults, is the operator's.
   own (subject 1: 17.3 cm against 14.7 and 18.5; subject 2: 5.4 against 6.1 and 10.2, for its range-3 and
   whole-trial strongest-peak runs).
 - **Identity with candidates off.** A tracking run with `--no-candidates` of a sequence that holds the candidate
-  rows, a run of a copy without the rows and a repeat are bit-identical (first measurement, before the cost
-  change; a run without candidates does not reach the changed code). Two detection runs over the same frames are not bit-identical (105 of 3,007
+  rows, a run of a copy without the rows and a repeat are bit-identical (measured with the distance-only cost; a
+  run without candidates does not reach the cost code). Two detection runs over the same frames are not bit-identical (105 of 3,007
   body rows differ, median 0.03 px, maximum 4 px, from the GPU), so comparing runs on sequences of two detection
   runs compares different data.
 
@@ -406,21 +406,21 @@ Optimized build, the acceptance runs one after the other, one machine, other wor
 
 | | Candidates off | Candidates on (`w_peak` 2, multiplier 4) |
 |---|---|---|
-| Detection, 51.7-56.8 s, 5 cameras, 3 persons, boxes from a run (wall) | 6 min 23 s | 7 min 24 s (+16%; first measurement) and 8 min 11 s with `fcb6b961` as box source |
+| Detection, 51.7-56.8 s, 5 cameras, 3 persons, boxes from a run (wall) | 6 min 23 s | 7 min 24 s (+16%; boxes `69c1d770`) and 8 min 11 s with `fcb6b961` as box source |
 | Detection rows of the run | `full_body` 8.15 MB, hands 2.9 MB, previews 48 MB | + `kp_candidates` 21.0 MB: 2.4 kB per person, camera and frame (91 maxima), 2.6 times the ordinary row, +26% of the run's rows |
 | Sequence rows after finalisation | | the same 21.0 MB again in `pose_observations` |
 | Tracking, subject 1 (wall, peak memory of the process tree) | 97.4 s, 4,867 MB | 103.9 s (+6.7%), 4,915 MB (+1.0%); with multi-view agreement 107.3 s |
 | Tracking, subject 2 | 105.6 s, 4,882 MB | 111.2 s (+5.3%), 4,927 MB (+0.9%); with multi-view agreement 112.1 s |
-| Shared assignment per step with candidates (about 90 per camera and person) | | 13.8 ms (subject 1), 13.3 ms (subject 2), of 181 ms and 187 ms per step (first measurement) |
-| Strict mask option | | 130.8 s and 139.8 s (+30% and +22% over the plain candidate run in the first pass: one mask decode per camera and step) |
+| Shared assignment per step with candidates (about 90 per camera and person) | | 13.8 ms (subject 1), 13.3 ms (subject 2), of 181 ms and 187 ms per step (distance-only cost, boxes `69c1d770`) |
+| Strict mask option | | 130.8 s and 139.8 s (+30% and +22% over the plain candidate run with the distance-only cost: one mask decode per camera and step) |
 
 The cost term adds one logarithm per pair and the continuity test one lookup. The +6.7% and +5.3% of tracking
-time are of the size of the +10% and +4% of the first measurement.
+time are of the size of the +10% and +4% measured with the distance-only cost.
 
 ### 9.6 Strict mask option
 
-Measured with the first build (cost on the distance alone, no continuity, boxes `69c1d770`), not repeated with the
-likelihood cost; the modifier itself is unchanged. Compared with the prototype's strict person-mask filter (a candidate kept only if at least half the detections of
+Measured with the distance-only cost, no continuity and boxes `69c1d770`, not with the likelihood cost; the
+modifier is the same in both. Compared with the prototype's strict person-mask filter (a candidate kept only if at least half the detections of
 its tracklet within +-10 frames lie on the person's mask; masks reviewed for 52.5-57 s only), scored by the harness:
 the filter with the proposal gave 8.7 / 11.9 and 4.8 / 6.2 cm, with the cross-camera choice 8.8 / 12.0 and 4.7 / 5.9
 (range / hard windows, subject 1 and 2); the tracker's mask modifier with candidates gives 14.6 / 16.0 and

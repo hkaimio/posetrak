@@ -1,6 +1,6 @@
 ```toml
 name = "Keypoint Candidates"
-status = "in-progress"
+status = "in_progress"
 progress_pct = 85
 description = """
 Several heatmap maxima per keypoint stored per detection run, linked into tracklets at detection \

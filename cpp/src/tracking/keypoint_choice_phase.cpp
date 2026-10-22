@@ -379,6 +379,37 @@ KeypointChoiceReport run_keypoint_choice_phase(PersonContext& ctx, KeypointChoic
             fmt::print("  Strict mask filter emptied {} of {} keypoint-frames ({:.1f}%)\n",
                        report.emptied_by_filter, report.keypoint_frames, share);
         }
+        // Per camera: the inlier radius of the multi-camera consensus and how often a candidate,
+        // and a pick, takes part in a consistent set.
+        std::vector<long> n_candidates(static_cast<size_t>(n_cameras), 0),
+            n_consistent(static_cast<size_t>(n_cameras), 0),
+            n_picks(static_cast<size_t>(n_cameras), 0),
+            n_picks_consistent(static_cast<size_t>(n_cameras), 0);
+        for (size_t r = 0; r < choice.candidates().size(); ++r) {
+            auto const& c = choice.candidates()[r];
+            if (c.removed)
+                continue;
+            ++n_candidates[c.camera];
+            n_consistent[c.camera] += c.consistent;
+            if (choice.input().active[c.camera] &&
+                choice.pick(c.camera, c.keypoint, c.frame) == static_cast<int>(r)) {
+                ++n_picks[c.camera];
+                n_picks_consistent[c.camera] += c.consistent;
+            }
+        }
+        for (int c = 0; c < n_cameras; ++c) {
+            auto const& cam = data.cameras[static_cast<size_t>(c)];
+            auto const pct = [](long a, long b) {
+                return b ? 100.0 * static_cast<double>(a) / static_cast<double>(b) : 0.0;
+            };
+            fmt::print(
+                "  Consensus {}: inlier radius {:.0f} px, {:.1f}% of candidates and {:.1f}% of "
+                "picks in a consistent set\n",
+                ctx.cameras_by_id.at(cam.camera_id).name(),
+                choice.consensus_radius()[static_cast<size_t>(c)],
+                pct(n_consistent[static_cast<size_t>(c)], n_candidates[static_cast<size_t>(c)]),
+                pct(n_picks_consistent[static_cast<size_t>(c)], n_picks[static_cast<size_t>(c)]));
+        }
         fmt::print(
             "  Phase time {:.1f}s (load {:.1f}, masks {:.1f}, consensus {:.1f}, choice {:.1f}); "
             "peak memory {:.0f} MB ({:.0f} MB before the phase)\n",

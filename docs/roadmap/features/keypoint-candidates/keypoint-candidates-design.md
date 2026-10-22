@@ -390,13 +390,14 @@ does not reproduce. Section 10 describes the windowed choice that does the same 
   cell's left edge, the decoder places a position at the cell centre (4 px at a crop of 513 px, 1.3% of the
   person's height), and nothing else differs. Over all common frames 82.2% of the prototype's candidates are
   reproduced (subject 1; 83.0% the other way) and 84.7% (subject 2; 83.0%). On the other frames (the crops differ
-  by more than 1 px; 547 and 529 frames, which belong to no existing run: the prototype re-extracted them with boxes
-  from the masks as edited later) 4-6% are reproduced. The earlier box run `69c1d770` held the crop on 73-74%.
+  by more than 1 px; 547 and 529 frames) 4-6% are reproduced; those frames lie on masks that differ between the state the
+  box run was built from and the one the prototype's crops come from (section 10.7), and boxes rebuilt from the latter
+  reproduce all the crops. The earlier box run `69c1d770` held the crop on 73-74%.
 - **Frames.** The run's sequences cover 3,013 and 3,051 frames of the 5 cameras x 612 (the prototype's candidate
   file: 3,017 and 3,051 in the range); a frame without a box is absent in both.
 - **Other differences of the pipeline.** The prototype's tracker sequences were built from the candidate file's
-  picks (positions in the left-edge convention, so a systematic half-cell offset in the label-fed reference too, one
-  camera left on the strongest maxima), with keypoints it judged invisible removed; the productized sequence holds
+  picks (positions in the centre convention, like the label-fed reference's input; the frozen evaluation files are the
+  left-edge export; one camera left on the strongest maxima), with keypoints it judged invisible removed; the productized sequence holds
   every strongest maximum. The strongest-maxima run of the productized pipeline is at the level of the prototype's
   own (subject 1: 17.3 cm against 14.7 and 18.5; subject 2: 5.4 against 6.1 and 10.2, for its range-3 and
   whole-trial strongest-peak runs).
@@ -591,12 +592,28 @@ estimate of this section left out; the scoring itself is about 0.1 s.
 
 ### 10.7 Acceptance results
 
-Range 3 (51.7-56.8 s), subjects 1 and 2, boxes of `fcb6b961`, detection run `b56f18cd` finalised over the whole span of
-every track (sequences `9bfda1ba`, `40fd1be1`), tracker configuration and skeletons of the label-fed reference runs,
-optimized build, scored by `eval_kp_candidates.py tracker` (mean body-joint distance in cm to the label-fed reference
-run from 52.0 s, over the range / inside the hard windows). The tracking runs use the extrinsic calibration of the
-reference and of the prototype's runs (`5351f35e`); the productized rows of section 9.3 used the capture's current
-one (`b416cd21`).
+Range 3 (51.7-56.8 s), subjects 1 and 2, scored by `eval_kp_candidates.py tracker` (mean body-joint distance in cm to the
+label-fed reference run from 52.0 s, over the range / inside the hard windows), optimized build, tracker configuration
+and skeletons of the label-fed reference runs, extrinsic calibration `5351f35e` of the reference and of the
+prototype's runs (the productized rows of section 9.3 used the capture's current one, `b416cd21`).
+
+**Boxes and masks.** The box run `fcb6b961` was built from the masks of segmentation `e862c9af` as the operator's
+database held them; the prototype's crops, and so its candidate files (`gt6`, `gt6m`), come from the masks of a later
+state (the prototype's snapshot of 10 October). The two differ in 1,132 masks, and the work copy's own masks, which
+equal the prototype's current database, are a third state. All 547 and 529 frames whose crop differs from the prototype's
+lie on frames where the person's mask differs between the first two states (576 frames, all in two cameras, `pixel9`
+and `gopro-11_mini_02`); 29 and 47 frames with a different mask have the same tight box. The stored boxes of
+`fcb6b961` equal the tight boxes of the first state on all 3,017 and 3,055 range-3 frames, and the prototype's crops
+equal those of the second on all of them. The masks of the segmentation run were edited in place without a new
+revision, so neither the box run nor a tracking run records which version of the masks it used (the box run's
+`config_json` names the run, not a revision).
+
+The figures below are on boxes rebuilt from the second state with the script that built `fcb6b961`
+(`make_boxes_run.py`, a prototype script, not the product's `MaskBoxSource`; run `1defb4f3`): the prototype's crop is
+reproduced on all 3,013 and 3,051 frames, and 99.8% and 99.2% of its candidates within 0.5 px (the rest are strong
+maxima, 73% of them on fingers and hands, that moved by 1-2 px, which GPU non-determinism and the sub-cell refinement
+explain). Detection run `cf7b5581`, sequences `4d68198d` (subject 1) and `401c8527` (subject 2). The strict filter and the
+mask term read the same masks.
 
 | Run | Subject 1 range / hard | Subject 2 range / hard |
 |---|---|---|
@@ -604,47 +621,70 @@ one (`b416cd21`).
 | prototype, cross-camera + body mask term (`47613f1f`, `01aa291b`) | 10.0 / 10.2 | 3.3 / 4.0 |
 | prototype, strict mask filter + cross-camera (`bea2b0fd`, `150da557`) | 8.8 / 12.0 | 4.7 / 5.9 |
 | the prototype's input sequences of the cross-camera runs, productized tracker (`5304c2ae`, `d7df80f0`) | 10.9 / 11.4 | 3.3 / 4.2 |
-| candidates off (`573a2819`, `73a54589`) | 17.8 / 20.9 | 5.2 / 6.9 |
-| `'step'`, `w_peak` 2, multiplier 4 (`9c448a29`, `cfc0ddc1`) | 17.1 / 19.4 | 5.3 / 7.1 |
-| **`'window'`** (`03ff3389`, `29d9acf6`) | **16.0 / 18.2** | **4.6 / 6.1** |
-| `'window'` + strict filter (`880a9cc3`, `04cb6255`) | 15.9 / 18.4 | 4.5 / 5.6 |
-| `'window'` + body mask term (`f0b28f4f`, `ce11dbe2`) | 15.7 / 17.8 | 4.6 / 6.0 |
-| `'window'` with the limits estimated in the run (`c8af56d7`, `e71e292f`) | 16.2 / 18.3 | 4.7 / 6.3 |
+| candidates off (`66819882`, `1f9e3d05`) | 14.3 / 16.7 | 4.7 / 6.1 |
+| `'step'`, `w_peak` 2, multiplier 4 (`730814f7`, `89c175e8`) | 13.9 / 16.0 | 5.4 / 7.2 |
+| **`'window'`** (`131e538e`, `f75ec6dc`) | **13.5 / 15.4** | **4.0 / 5.1** |
+| `'window'` + strict filter (`a7e8bbf3`, `4d9029c2`) | 9.4 / 11.6 | 6.0 / 7.5 |
+| `'window'` + body mask term (`007da5e4`, `93dfe252`) | 12.9 / 14.7 | 3.9 / 4.9 |
 
-(Target for `'window'`: within 0.5 cm of the prototype's cross-camera run, at most 10.7 / 3.9 over the range:
-**not met**. Run ids are those of the work copy of the session database.) The strict filter emptied 37,129 of 176,113
-keypoint-frames (21.1%) of subject 1 and 51,744 of 184,523 (28.0%) of subject 2.
+(Target for `'window'`: at most 10.7 / 3.9 over the range: **not met**, by 2.8 cm for subject 1 and 0.1 cm for subject 2.)
+The strict filter emptied 39,123 of 177,483 keypoint-frames (22.0%) of subject 1 and 49,792 of 183,110 (27.2%) of
+subject 2. On the boxes of `fcb6b961`, which hold 82% of the prototype's crops, the same runs gave 17.8 / 5.2, 17.1 / 5.3,
+16.0 / 4.6, 15.9 / 4.5 and 15.7 / 4.6 cm (subjects 1 and 2, range) for candidates off, `'step'`, `'window'`, `'window'` +
+strict filter and `'window'` + mask term; the corrected boxes lower the candidates-off figure of subject 1 by 3.5 cm and
+the windowed one by 2.5 cm.
 
-The windowed choice is better than both candidates off and the per-step assignment for both subjects (range: 1.8 and
-0.6 cm better than off, 1.1 and 0.7 cm better than `'step'`), and neither option changes that by more than 0.5 cm. It
-does not reach the prototype's figures. What was checked, in order:
+On the corrected boxes the windowed choice is better than candidates off and the per-step assignment for subject 1
+(0.8 and 0.4 cm) and for subject 2 (0.7 cm better than off, 1.4 cm better than `'step'`, which is worse than off for
+subject 2). The strict filter changes subject 1 by 4.1 cm (13.5 to 9.4, as the prototype's filter did) and makes
+subject 2 worse by 2.0 cm: it removes the correct candidates of keypoints hidden under the other person's mask, which
+section 10.5 warns about. The mask term gains 0.6 and 0.1 cm.
+
+What was checked:
 
 - **The choice itself is the prototype's.** Given the same candidates, the same tracklets and the consensus flags of the
   prototype's own code, the tracker's choice and `xcam.XAssign.run` pick the same candidate for 176,112 of 176,113
   keypoint-frames of subject 1 and 184,520 of 184,523 of subject 2 (`eval_kp_candidates.py window-picks` against the
   prototype's picks of the run's own candidates). The consensus flags equal those of the prototype's code on the same
-  candidates in 99.994% of the candidates. The prototype's result does not depend on which of two tracklet partitions
-  of the same candidates it uses.
+  candidates in 99.994% of the candidates.
 - **The tracker is the prototype's.** The prototype's own input sequence of the cross-camera run, tracked by the
   productized tracker, gives 10.9 / 11.4 and 3.3 / 4.2 cm.
-- **The difference is in the keypoints the filter is fed.** Against the picks the prototype made on its frozen
-  candidate file, on the frames whose crop is the same in both (2,466 and 2,522 frames), the run picks the same
-  candidate for 92.9% (subject 1) and 94.0% (subject 2) of the keypoint-frames with a pick, 99.0% and 98.6% outside the
-  hard windows and 88.5% and 90.6% inside them. The mismatches are all keypoint-frames both candidate sets contain
-  (a prototype candidate is missing from the run's in 1 and 13 of them); the choices differ. The frozen file's consensus flags
-  differ from what the prototype's code computes on the same candidates (45.7% of the candidates flagged against
-  40.6%, different in 29% of them; the file's positions carry a half-cell offset that a geometric consensus is
-  sensitive to). With the frozen file's flags on the run's own candidates the agreement with its picks is 97.3% (95.5%
-  in the hard windows), its tracklets change nothing.
-- **The remaining difference is split between the two kinds of frame.** Subject 1, the prototype's input sequence with
-  the run's picks on the frames whose crop is the same: 13.1 / 15.0 cm; with the run's picks on the other frames
-  (18% of the frames, 60% of them in the hard windows, where the productized boxes differ from the prototype's crops,
-  which no productized run reproduces, section 9.4): 15.0 / 16.7 cm; the run's picks everywhere 16.0 / 18.2 cm.
+- **Picks against the prototype's on the same crops.** Against the picks of the prototype's choice on `gt6m`, the file
+  its tracker runs used, with the same neighbour limits, the run picks the same candidate for 96.2% (subject 1) and
+  96.1% (subject 2) of the keypoint-frames with a pick: 99.5% and 99.2% outside the hard windows, 93.8% and 93.9%
+  inside them (bar: 99%; 6,761 and 7,122 keypoint-frames differ, a prototype candidate is missing from the run's in 2
+  and 22 of them). The remaining difference is the consensus flags: the file's stored flags cannot be reproduced (below),
+  and on the old boxes, against the picks on the frozen evaluation file, giving the run's candidates that file's flags raised
+  the agreement from 93.2% to 97.3%. The prototype's choice does not depend on which of two tracklet partitions it uses.
 
-So the prototype's figures depend on candidates, on the frames in contact, that the productized extraction does not
-reproduce, and about 60% of the disagreement in picks on equal crops comes from the consensus flags of its file. The
-windowed choice is therefore not made the default, and the strict filter and the mask term stay off: with the
-productized candidates they change the tracker figures by 0.5 cm or less.
+**Half-cell convention.** The frozen evaluation files store a heatmap maximum at the cell's left edge; `gt6` and `gt6m`
+are those files plus exactly half a cell (4.2 px at a 513 px crop: 1.00 of a half cell, in x and y), so they, the
+prototype's input sequences, the label-fed reference's input sequence and the productized pipeline are all in the centre
+convention, and the scoring has no convention bias. The evaluation files are the left-edge export, used for the pick
+scores against the labels. A sequence moved to the left edge (the prototype's cross-camera input minus half a cell) gives
+13.7 / 15.0 and 4.9 / 5.6 cm against 10.9 / 11.4 and 3.3 / 4.2, so the scores are sensitive to the convention, 2.8 and
+1.6 cm. Which convention is right was not decidable on this capture: the cross-camera reprojection residual of the
+consensus sets is 17.6 px (left edge) and 17.4 px (centre) for subject 1 and 18.0 and 18.4 px for subject 2, a
+difference of 0.3-0.4 px under a floor set by the calibration (the wide-lens camera is at 30 px), and a scan of the
+shift has its minimum at +0.5 cells for subject 1 and at 0 to +0.25 for subject 2. The spike's measurement on the moving-box reference capture, with
+good extrinsics, has a sharp minimum at +0.52 cells in x (residual from 1.33% to 0.76% of the box side), which is the
+evidence for the centre convention; the decoder keeps it.
+
+**Consensus flags of the frozen files.** Recomputed with the prototype's `link_candidates.py` on the candidates of the
+frozen file under each of the extrinsic calibrations `5351f35e`, `b416cd21` and `9abfc616` and both conventions, and on
+`gt6` under `9abfc616`, `8c53e26a` and `5d2295a7`, the flags disagree with the stored ones in 16-25% of the candidates;
+the best combination (`b416cd21`, centre) still disagrees in 15.9% (with `gt6`) and 25.9% (with the frozen file). The
+stored flags of `gt6` and `gt6m` are identical and differ from those of the frozen file in 23.9%, so the files hold the
+output of different computations whose inputs are not recoverable: the spike repository has one version of the script,
+unchanged since 6 October, and the files date from 11-17 October. The productized consensus equals the prototype's code
+on the same input, so there is no bug to correct. The consensus does depend on the calibration: under `5351f35e` the
+wide-lens camera's residuals are about 24 px and its inlier radius becomes 60 px, against the 12 px floor under
+`b416cd21`, which has that camera's corrected intrinsics.
+
+The windowed choice is not made the default, and the strict filter and the mask term stay off.
+
+**Review material** for the keypoint-frames where the run's picks still differ from the prototype's: contact sheets
+outside the repository (`D:/mocap/stage9w-work/review/`, an `index.html` and a folder per subject and camera).
 
 ### 10.8 What the first description got wrong
 
@@ -656,3 +696,11 @@ productized candidates they change the tracker figures by 0.5 cm or less.
 - The prototype's runs, and the reference they are scored against, were tracked with another extrinsic calibration than
   the capture's current one.
 - The estimate of the cost (section 10.6) left out the consensus and the mask decoding.
+- The crops that differed from the prototype's were not a missing run but a mask version: the box run was built from
+  one state of the segmentation's masks and the prototype's candidates from another. A box run and a tracking run need
+  to record which version of the masks they read (a revision, or a hash of the masks of the frames used).
+- The frozen evaluation files are the left-edge export of the candidates; the prototype's tracker runs and the label-fed
+  reference were fed the centre convention, so the scoring has no convention bias.
+- The prototype's results were not reproducible from the productized candidates mainly because of the box masks, not
+  because of the choice: on boxes from the same masks the windowed choice is within 0.1 cm of the bar for subject 2 and
+  2.8 cm from it for subject 1.

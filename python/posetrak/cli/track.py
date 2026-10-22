@@ -365,6 +365,8 @@ def _apply_assignment_options(
 @click.option("--kp-mask-weight", "kp_mask_weight", default=None, type=float, help="With --kp-choice window: weight of the soft mask term in the score (+1 on the person's mask, -1 on another person's; needs --seg-run). Default: the base config's, else 0 (off).")
 @click.option("--kp-mask-window", "kp_mask_window", default=None, type=float, help="With --kp-mask-weight: half width (s) of the window the mask term is averaged over. Default: the base config's, else 2.0.")
 @click.option("--kp-mask-classes", "kp_mask_classes", default=None, help="With --kp-mask-weight: comma-separated keypoint classes the term applies to (body, hands, feet). Default: the base config's, else body.")
+@click.option("--kp-choice-model", "kp_choice_model", default=None, type=click.Path(exists=True, dir_okay=False), help="With --kp-choice window: use this choice model file (neighbour limits and keypoint classes, see posetrak.detection.kp_choice_model) instead of the pose model's shipped table.")
+@click.option("--kp-choice-dump", "kp_choice_dump", default=None, type=click.Path(), help="Diagnostics: write every keypoint candidate of the windowed choice, with its consensus flag and whether it was picked, to this CSV file.")
 @click.option("--strict-mask", "strict_mask", is_flag=True, default=False, help="Use a candidate or dot only if its tracklet lies on the tracked subject's own mask for enough of the recent steps (needs --seg-run).")
 @click.option("--mask-min-fraction", "mask_min_fraction", default=None, type=float, help="With --strict-mask: smallest share of recent steps a tracklet must lie on the subject's mask. Default: the base config's, else 0.5.")
 @click.option("--mask-window", "mask_window", default=None, type=int, help="With --strict-mask: number of recent steps the share is taken over. Default: the base config's, else 60.")
@@ -407,6 +409,8 @@ def cmd_run(
     kp_peak_weight: float | None,
     kp_tracklet_multiplier: float | None,
     kp_choice: str | None,
+    kp_choice_model: str | None,
+    kp_choice_dump: str | None,
     kp_support_window: float | None,
     kp_delta: float | None,
     kp_beta: float | None,
@@ -613,7 +617,8 @@ def cmd_run(
 
         pose_model = conn.execute(
             "SELECT pose_model FROM pose_observation_sequences WHERE id = ?", (sequence_id,)).fetchone()["pose_model"]
-        choice_model_path = write_choice_model(pose_model, out_path / "kp_choice_model.csv")
+        choice_model_path = (Path(kp_choice_model) if kp_choice_model
+                             else write_choice_model(pose_model, out_path / "kp_choice_model.csv"))
         if choice_model_path is None:
             click.echo(f"Note: pose model '{pose_model}' has no neighbour limits; the windowed choice has no skeleton support.", err=True)
         kp_confidence_scale = conf_scale_for_model(pose_model or "")
@@ -651,6 +656,7 @@ def cmd_run(
         tracklet_assignments_path=rules_path,
         kp_choice_model_path=choice_model_path,
         kp_confidence_scale=kp_confidence_scale,
+        kp_choice_dump_path=Path(kp_choice_dump) if kp_choice_dump else None,
         trace_assignment_steps=trace_steps,
         on_progress=lambda line: click.echo(line, err=True),
     )

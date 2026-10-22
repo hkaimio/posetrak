@@ -46,7 +46,7 @@ def detect_group() -> None:
 # rather than ignoring them silently. --trial is shared by pose and marker runs, so it is not
 # in either tuple.
 _POSE_OPTIONS = ("detector", "pose_model", "conf", "segmentation", "from_run", "refine_hands", "accept_licences",
-                 "decode", "candidates")
+                 "decode", "candidates", "mask_gate_margin")
 _MARKER_OPTIONS = ("object_ref", "frame_step", "min_marker_perimeter_rate", "parallel", "max_workers")
 _CODED_OPTIONS = ("marker_ids", "dictionary")
 _DOT_OPTIONS = (
@@ -90,6 +90,9 @@ _DOT_OPTIONS = (
               help="Detection run ID (prefix accepted) whose person boxes and track ids are reused instead of "
                    "running the YOLO detector (--type pose only): a new pose model on boxes already found. "
                    "The source run's track assignments are copied and the run finalised.")
+@click.option("--mask-gate-margin", "mask_gate_margin", type=click.FloatRange(min=0.0), default=40.0, show_default=True,
+              help="With --segmentation and SOMA-77: the pose model's heatmaps are multiplied with the person's mask grown "
+                   "by this many pixels, so a maximum on another person is not a candidate. 0 turns the gate off.")
 @click.option("--refine-hands/--no-refine-hands", default=None,
               help="Re-detect each tracked wrist's hand in a tight crop on the frame already decoded and add "
                    "refined finger keypoints, for every pose model that names a wrist and an elbow. "
@@ -162,6 +165,7 @@ def cmd_run(
     from_run: str | None,
     refine_hands: bool | None,
     candidates: bool,
+    mask_gate_margin: float,
     accept_licences: bool,
     decode: str | None,
     marker_ids: str | None,
@@ -259,6 +263,7 @@ def cmd_run(
             session, capture_id, sync_id, start, end, detector, pose_model, conf,
             trial_id=trial_id, segmentation=segmentation, from_run=from_run, refine_hands=refine_hands,
             accept_licences=accept_licences, decode=decode, candidates=candidates,
+            mask_gate_margin=mask_gate_margin,
         )
         return
 
@@ -364,7 +369,7 @@ def _run_pose_detection(
     session, capture_id: str, sync_id: str, start: float, end: float,
     detector: str, pose_model: str, conf: float,
     trial_id: str | None, segmentation: str | None, from_run: str | None, refine_hands: bool | None,
-    accept_licences: bool, decode: str | None, candidates: bool = False,
+    accept_licences: bool, decode: str | None, candidates: bool = False, mask_gate_margin: float = 40.0,
 ) -> None:
     """Run person detection and pose estimation; print the run ID to stdout."""
     click.echo(f"Capture:     {capture_id}", err=True)
@@ -387,7 +392,7 @@ def _run_pose_detection(
 
             seg_run_id = resolve_id_prefix(session, "seg_quality_runs", segmentation)
             persons_ordered = persons_ordered_for_seg_run(session, seg_run_id)
-            box_source = MaskBoxSource(session, seg_run_id, persons_ordered)
+            box_source = MaskBoxSource(session, seg_run_id, persons_ordered, gate_margin_px=mask_gate_margin)
             click.echo(f"Bbox source: segmentation {seg_run_id} revision {box_source.revision}", err=True)
         elif from_run is not None:
             from posetrak.detection.box_sources import RunBoxSource

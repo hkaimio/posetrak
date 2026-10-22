@@ -60,6 +60,9 @@ struct KeypointChoiceConfig {
     bool strict_filter = false;
     int strict_filter_window_frames = 10;     ///< Half width in video frames.
     double strict_filter_min_fraction = 0.5;  ///< Smallest in-mask share of the detections.
+    /// Comma-separated keypoint classes the strict filter applies to; hand and foot masks are
+    /// too thin and too often wrong in contact for it.
+    std::string strict_filter_classes = "body";
     double mask_term_weight = 0.0;    ///< Soft mask term in the score; 0 = off (needs masks).
     double mask_term_window_s = 2.0;  ///< Half width in seconds of its window.
     std::string mask_term_classes = "body";  ///< Comma-separated keypoint classes it applies to.

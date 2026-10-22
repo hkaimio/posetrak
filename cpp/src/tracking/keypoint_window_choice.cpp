@@ -369,6 +369,9 @@ FilterStats WindowChoice::apply_strict_filter(int half_window_frames, double min
             had[static_cast<size_t>(
                 cell(candidates_[i].camera, candidates_[i].keypoint, candidates_[i].frame))] = 1;
     for (auto& [key, rows] : groups) {
+        if (!input_.filter_keypoint.empty() &&
+            !input_.filter_keypoint[static_cast<size_t>(std::get<1>(key))])
+            continue;
         auto const& frames = input_.frames[static_cast<size_t>(std::get<0>(key))];
         auto video = [&](int r) {
             return frames[static_cast<size_t>(candidates_[static_cast<size_t>(r)].frame)]

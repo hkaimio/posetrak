@@ -268,6 +268,7 @@ apply to every anonymous candidate, dots and keypoint candidates.
 | kp_choice_support_window_s, kp_choice_delta, kp_choice_beta, kp_choice_gamma, kp_choice_rounds | REAL, REAL, REAL, REAL, INTEGER | **new, second release** settings of the windowed choice: half width of the support window (s), weights of the cross-camera support, the consensus flag and the peak, number of rounds; NULL = 1.0, 1.0, 0.3, 0.2, 3 |
 | kp_choice_skip_camera_ids | TEXT | **new, second release** JSON array of camera indices that take no part in the windowed choice and keep their fixed observations |
 | kp_strict_filter, kp_strict_filter_window_frames, kp_strict_filter_min_fraction | INTEGER, INTEGER, REAL | **new, second release** strict mask filter of the windowed choice: on/off, half window in video frames, smallest in-mask share; NULL = off, 10, 0.5 |
+| kp_strict_filter_classes | TEXT | **new, second release** keypoint classes the strict filter applies to; NULL = `body` |
 | kp_mask_term_weight, kp_mask_term_window_s, kp_mask_term_classes | REAL, REAL, TEXT | **new, second release** soft mask term of the windowed choice: weight, half window (s), comma-separated keypoint classes; NULL = off, 2.0, `body` |
 
 ### 3.10 `dot_assignment_edits` (session) — third release (rebuild)

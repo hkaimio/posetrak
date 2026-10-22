@@ -91,6 +91,8 @@ struct Input {
     std::vector<std::vector<std::pair<int, double>>> neighbours;
     /// Per keypoint: the mask term applies. Empty: none.
     std::vector<char> mask_keypoint;
+    /// Per keypoint: the strict mask filter applies. Empty: all keypoints.
+    std::vector<char> filter_keypoint;
     std::vector<Candidate> candidates;  ///< Any order; the class sorts them.
     std::vector<FixedPick> fixed;
     int own_mask_label = 0;  ///< The person's label in the masks.
@@ -126,7 +128,8 @@ class WindowChoice {
     void flag_consistent();
 
     /// Removes a candidate unless at least *min_fraction* of the detections of its tracklet within
-    /// +-*half_window_frames* video frames lie on the person's own mask. Candidates without a mask
+    /// +-*half_window_frames* video frames lie on the person's own mask. Only keypoints flagged in
+    /// Input::filter_keypoint are filtered. Candidates without a mask
     /// label are not counted; a candidate with no counted detection stays.
     FilterStats apply_strict_filter(int half_window_frames, double min_fraction);
 

@@ -231,7 +231,7 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
         "       kp_candidate_choice, kp_choice_support_window_s, kp_choice_delta, kp_choice_beta,"
         "       kp_choice_gamma, kp_choice_rounds, kp_choice_skip_camera_ids, kp_strict_filter,"
         "       kp_strict_filter_window_frames, kp_strict_filter_min_fraction, kp_mask_term_weight,"
-        "       kp_mask_term_window_s, kp_mask_term_classes"
+        "       kp_mask_term_window_s, kp_mask_term_classes, kp_strict_filter_classes"
         " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -278,7 +278,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //         76=kp_choice_beta, 77=kp_choice_gamma, 78=kp_choice_rounds,
     //         79=kp_choice_skip_camera_ids, 80=kp_strict_filter,
     //         81=kp_strict_filter_window_frames, 82=kp_strict_filter_min_fraction,
-    //         83=kp_mask_term_weight, 84=kp_mask_term_window_s, 85=kp_mask_term_classes
+    //         83=kp_mask_term_weight, 84=kp_mask_term_window_s, 85=kp_mask_term_classes,
+    //         86=kp_strict_filter_classes
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -536,6 +537,8 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
         apply_real(84, choice.mask_term_window_s);
         if (sqlite3_column_type(stmt.ptr, 85) != SQLITE_NULL)
             choice.mask_term_classes = text(85);
+        if (sqlite3_column_type(stmt.ptr, 86) != SQLITE_NULL)
+            choice.strict_filter_classes = text(86);
     }
 
     // active_joint_groups: stored as a JSON string array, e.g. ["main"]; NULL or [] tracks the

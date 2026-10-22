@@ -52,7 +52,8 @@ default. Options:
 
 - `--kp-skip-camera LABEL` (repeatable): a camera that keeps its strongest maxima and takes no part, such as a
   wide-lens camera.
-- `--kp-strict-filter` (needs `--seg-run`; `--kp-strict-window`, `--kp-strict-min-fraction`): drop a candidate unless
+- `--kp-strict-filter` (needs `--seg-run`; `--kp-strict-window`, `--kp-strict-min-fraction`, `--kp-strict-classes`): for the body keypoints by
+  default (the masks of hands and feet are too thin), drop a candidate unless
   its track lies on the tracked person's mask in at least half of its detections around the frame. A keypoint left
   without a candidate gives no observation, and the run prints the share of keypoint-frames this emptied. It needs
   reviewed masks around the contact windows: on unreviewed masks it removes correct candidates of hidden keypoints.

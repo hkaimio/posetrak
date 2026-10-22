@@ -866,6 +866,7 @@ _KP_CHOICE_CONFIG_COLUMNS = (
     ("kp_mask_term_weight", "REAL"),
     ("kp_mask_term_window_s", "REAL"),
     ("kp_mask_term_classes", "TEXT"),
+    ("kp_strict_filter_classes", "TEXT"),
 )
 
 

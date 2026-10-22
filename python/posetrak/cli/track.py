@@ -233,6 +233,7 @@ def _window_choice_changes(
     mask_weight: float | None,
     mask_window: float | None,
     mask_classes: str | None,
+    strict_classes: str | None = None,
 ) -> dict[str, float | int | str]:
     """The tracker_configs columns the windowed-choice options of ``track run`` set (only those given)."""
     import json
@@ -245,6 +246,7 @@ def _window_choice_changes(
         ("kp_choice_gamma", gamma), ("kp_choice_rounds", rounds), ("kp_strict_filter_window_frames", strict_window),
         ("kp_strict_filter_min_fraction", strict_min_fraction), ("kp_mask_term_weight", mask_weight),
         ("kp_mask_term_window_s", mask_window), ("kp_mask_term_classes", mask_classes),
+        ("kp_strict_filter_classes", strict_classes),
     ):
         if value is not None:
             changes[column] = value
@@ -255,12 +257,12 @@ def _window_choice_changes(
         if unknown:
             raise click.ClickException(f"--kp-skip-camera {unknown}: not a camera of the sequence {sequence_cameras}.")
         changes["kp_choice_skip_camera_ids"] = json.dumps([sequence_cameras.index(c) for c in skip_cameras])
-    if mask_classes is not None:
-        from posetrak.detection.kp_choice_model import KEYPOINT_CLASSES
+    from posetrak.detection.kp_choice_model import KEYPOINT_CLASSES
 
-        bad = [c for c in mask_classes.split(",") if c not in KEYPOINT_CLASSES]
+    for option, classes in (("--kp-mask-classes", mask_classes), ("--kp-strict-classes", strict_classes)):
+        bad = [c for c in (classes or "").split(",") if c and c not in KEYPOINT_CLASSES]
         if bad:
-            raise click.ClickException(f"--kp-mask-classes {bad}: the classes are {', '.join(KEYPOINT_CLASSES)}.")
+            raise click.ClickException(f"{option} {bad}: the classes are {', '.join(KEYPOINT_CLASSES)}.")
     return changes
 
 
@@ -362,6 +364,7 @@ def _apply_assignment_options(
 @click.option("--kp-strict-filter/--no-kp-strict-filter", "kp_strict_filter", default=None, help="With --kp-choice window: drop a candidate unless enough of the detections of its tracklet around its frame lie on the tracked person's own mask (needs --seg-run). Default: the base config's, else off.")
 @click.option("--kp-strict-window", "kp_strict_window", default=None, type=int, help="With --kp-strict-filter: half width (video frames) of the window. Default: the base config's, else 10.")
 @click.option("--kp-strict-min-fraction", "kp_strict_min_fraction", default=None, type=float, help="With --kp-strict-filter: smallest share of the detections that must lie on the mask. Default: the base config's, else 0.5.")
+@click.option("--kp-strict-classes", "kp_strict_classes", default=None, help="With --kp-strict-filter: comma-separated keypoint classes the filter applies to (body, hands, feet). Default: the base config's, else body.")
 @click.option("--kp-mask-weight", "kp_mask_weight", default=None, type=float, help="With --kp-choice window: weight of the soft mask term in the score (+1 on the person's mask, -1 on another person's; needs --seg-run). Default: the base config's, else 0 (off).")
 @click.option("--kp-mask-window", "kp_mask_window", default=None, type=float, help="With --kp-mask-weight: half width (s) of the window the mask term is averaged over. Default: the base config's, else 2.0.")
 @click.option("--kp-mask-classes", "kp_mask_classes", default=None, help="With --kp-mask-weight: comma-separated keypoint classes the term applies to (body, hands, feet). Default: the base config's, else body.")
@@ -423,6 +426,7 @@ def cmd_run(
     kp_mask_weight: float | None,
     kp_mask_window: float | None,
     kp_mask_classes: str | None,
+    kp_strict_classes: str | None,
     strict_mask: bool,
     mask_min_fraction: float | None,
     mask_window: int | None,
@@ -537,7 +541,7 @@ def cmd_run(
         kp_choice=kp_choice, support_window=kp_support_window, delta=kp_delta, beta=kp_beta, gamma=kp_gamma,
         rounds=kp_rounds, skip_cameras=kp_skip_cameras, sequence_cameras=seq_cameras, strict_filter=kp_strict_filter,
         strict_window=kp_strict_window, strict_min_fraction=kp_strict_min_fraction, mask_weight=kp_mask_weight,
-        mask_window=kp_mask_window, mask_classes=kp_mask_classes)
+        mask_window=kp_mask_window, mask_classes=kp_mask_classes, strict_classes=kp_strict_classes)
     _apply_assignment_options(
         conn, config_id, candidates=candidates, strict_mask=strict_mask, mask_min_fraction=mask_min_fraction,
         mask_window=mask_window, multi_view_agreement=multi_view_agreement, agreement_px=agreement_px,

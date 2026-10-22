@@ -1081,13 +1081,13 @@ def test_window_choice_options_set_their_own_columns_and_nothing_else(tmp_path):
     changes = _window_choice_changes(
         kp_choice="window", support_window=1.5, delta=0.5, beta=0.4, gamma=0.1, rounds=2, skip_cameras=("cam-b",),
         sequence_cameras=["cam-a", "cam-b", "cam-c"], strict_filter=True, strict_window=8, strict_min_fraction=0.6,
-        mask_weight=0.3, mask_window=2.5, mask_classes="body,feet")
+        mask_weight=0.3, mask_window=2.5, mask_classes="body,feet", strict_classes="body,hands")
     assert changes == {
         "kp_candidate_choice": "window", "kp_choice_support_window_s": 1.5, "kp_choice_delta": 0.5,
         "kp_choice_beta": 0.4, "kp_choice_gamma": 0.1, "kp_choice_rounds": 2,
         "kp_strict_filter_window_frames": 8, "kp_strict_filter_min_fraction": 0.6, "kp_mask_term_weight": 0.3,
         "kp_mask_term_window_s": 2.5, "kp_mask_term_classes": "body,feet", "kp_strict_filter": 1,
-        "kp_choice_skip_camera_ids": "[1]"}
+        "kp_choice_skip_camera_ids": "[1]", "kp_strict_filter_classes": "body,hands"}
     none = dict(kp_choice=None, support_window=None, delta=None, beta=None, gamma=None, rounds=None, skip_cameras=(),
                 sequence_cameras=[], strict_filter=None, strict_window=None, strict_min_fraction=None,
                 mask_weight=None, mask_window=None, mask_classes=None)

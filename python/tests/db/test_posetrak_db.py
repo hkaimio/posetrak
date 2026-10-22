@@ -1224,6 +1224,7 @@ def test_migrate_adds_the_window_choice_settings_and_the_picks_table() -> None:
         "kp_candidate_choice", "kp_choice_support_window_s", "kp_choice_delta", "kp_choice_beta", "kp_choice_gamma",
         "kp_choice_rounds", "kp_choice_skip_camera_ids", "kp_strict_filter", "kp_strict_filter_window_frames",
         "kp_strict_filter_min_fraction", "kp_mask_term_weight", "kp_mask_term_window_s", "kp_mask_term_classes",
+        "kp_strict_filter_classes",
     }
     for migrate, version in ((_migrate_registry_v18_to_v19, 19), (_migrate_session_v69_to_v70, 70)):
         conn = sqlite3.connect(":memory:")

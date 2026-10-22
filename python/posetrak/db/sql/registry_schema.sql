@@ -297,7 +297,9 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     kp_mask_term_window_s             REAL,
     -- Comma-separated keypoint classes the mask term applies to ('body', 'hands', 'feet'; the classes of a pose
     -- model are in its choice model file); NULL = 'body'.
-    kp_mask_term_classes              TEXT
+    kp_mask_term_classes              TEXT,
+    -- Comma-separated keypoint classes the strict mask filter applies to ('body', 'hands', 'feet'); NULL = 'body'.
+    kp_strict_filter_classes          TEXT
 );
 
 -- Added in schema migration v37: hierarchical body/hand solver -- per-stage

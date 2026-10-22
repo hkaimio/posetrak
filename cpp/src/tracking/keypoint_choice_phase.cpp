@@ -177,6 +177,18 @@ KeypointChoiceReport run_keypoint_choice_phase(PersonContext& ctx, KeypointChoic
         }
     }
 
+    if (cfg.strict_filter) {
+        std::set<std::string> classes;
+        for (auto const& name : split(cfg.strict_filter_classes, ','))
+            classes.insert(name);
+        input.filter_keypoint.assign(static_cast<size_t>(n_keypoints), 0);
+        for (int k = 0; k < n_keypoints; ++k) {
+            auto it = in.model.keypoint_class.find(data.keypoint_landmark[static_cast<size_t>(k)]);
+            if (it != in.model.keypoint_class.end() && classes.count(it->second))
+                input.filter_keypoint[static_cast<size_t>(k)] = 1;
+        }
+    }
+
     bool const has_rules = in.rules != nullptr && !in.rules->empty();
     input.candidates.reserve(data.candidates.size());
     std::set<std::tuple<int, int, int, int>> fixed_seen;

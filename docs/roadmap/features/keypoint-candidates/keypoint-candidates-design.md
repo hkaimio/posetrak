@@ -793,3 +793,37 @@ outside the repository (`D:/mocap/stage9w-work/review/`, an `index.html` and a f
   is not established outside range 3.
 - The mask box source reproduces the boxes of the prototype's script exactly; the difference between the product's figures
   and the earlier ones is the gate, which changes the stored keypoint row.
+
+### 10.9 Foot orientation with the SOMA-77 keypoints
+
+SOMA-77 has three keypoints on each foot: the ankle (`Foot`), the ball of the foot (`ToeBase`) and the toe tip
+(`ToeEnd`). They lie almost on one line along the foot, so they fix the foot's direction but leave its twist about that
+line poorly determined; the COCO-133 foot keypoints (big toe, small toe and, if present, heel) form a triangle and fix
+it. How the markers are bound to the joints decides how much of this the tracker can recover.
+
+In the composed skeleton the chain is hips - thigh - shin - foot - toe, every joint a three-axis ball joint. With
+`ToeBase` and `ToeEnd` both bound to the toe joint, the foot has only the ankle keypoint of its own: the two toe markers
+depend on the foot and the toe rotation together, and the toe joint (limits of 45 and 90 degrees) takes up the foot's
+orientation. Tracking runs over a 28 s trial of three people showed the toe bent 30-58 degrees almost permanently, the foot
+twist at its limit of 20 degrees, and the foot axis 30-40 degrees away from the foot axis of runs tracked from edited COCO-133
+keypoints, in which the toe markers are bound to the foot and the toe joint stays at rest. The shin twist (limit 90
+degrees) is also hardly observable from the keypoints; after initialisation it stayed at its limit for about 3 s, until the
+person took a step.
+
+Changes tried on the same trial, each against the edited runs:
+
+| Change | Result |
+|---|---|
+| `ToeBase` bound to the foot (its offset moved into the foot frame), toe joint locked | the foot has three rigid markers; the foot-axis difference falls to 20-29 degrees; the toe stays at its rest angle |
+| shin twist limit 35 degrees | the shin twist no longer sits at its limit after initialisation |
+| toe joint limited to 15 degrees (6 degrees of twist) instead of locked, `ToeBase` on the foot | foot-axis difference 21-30 degrees, within 1.5 degrees of the locked toe; the angle between foot and toe axes has a median of 11-20 degrees (6 degrees of it is the rest angle) and a 90th percentile of 16-26 degrees |
+| foot twist and swing limits widened to 40 degrees | no improvement; the foot twists up to 50-68 degrees, i.e. the keypoints and their offsets disagree with the foot frame |
+
+Tracker distance to the label-fed reference on the labelled range (subject 1 / subject 2, range / hard windows, ace2 outside
+the choice) with the first two changes: 6.5 / 8.4 and 3.60 / 4.84, against 6.0 / 8.0 and 3.59 / 4.60 without them. Body-joint
+distance to the edited runs over 44-64 s and the jerk of the joint positions did not change. The remaining difference of
+20-29 degrees in the foot axis follows from the marker offsets, which were fitted for upright and squatting poses.
+
+Open: the bundled default skeletons bind `ToeBase` to the toe (`catalog/pose-models/soma77.marker-offsets.yaml`). Binding it
+to the foot changes the content, and so the pinned ids, of the bundled skeletons. The toe and shin limits are values in the
+bundled joint limits. Foot roll could also be tied to the shin or to ground contact with a soft prior; this has not been tried.

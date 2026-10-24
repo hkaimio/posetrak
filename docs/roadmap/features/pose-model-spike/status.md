@@ -9,7 +9,7 @@ calibration items; keypoint candidates and mask versioning; tracklet editing.
 """
 categories = ["detection-pipeline", "tracker-core", "data-model"]
 target_release = "TBD"
-last_updated = 2026-10-22
+last_updated = 2026-10-24
 ```
 
 # SOMA/GEM-X Productization — Implementation Status
@@ -50,7 +50,7 @@ tracking. Main compared with `v0.1.0-proto2`:
 | 6 Tracker cost | Done; per-person threads not kept; [status](../tracker-performance/status.md) |
 | 7 Calibration items | Done, with box-video run time cut from about 12 min to 73 s on a 41 s range; [status](../extrinsics-improvements/status.md) |
 | 8 Mask versioning | Done (session schema 68); [status](../segmentation-versioning/status.md) |
-| 9 Keypoint candidates | Done (session schema 70), off by default; the windowed choice (`--kp-choice window`) matches the prototype over the whole trial; [status](../keypoint-candidates/status.md) |
+| 9 Keypoint candidates | Done (session schema 71), off by default; the windowed choice (`--kp-choice window`) matches the prototype over the whole trial; a sticky choice (`--kp-switch-penalty`) is available, off by default; [status](../keypoint-candidates/status.md) |
 | 10-12 | Not started; testing of the merged stages comes first |
 
 **Next: testing on real captures** before stage 10 (tracklet editing, the first UI on candidate tracklets):
@@ -72,9 +72,11 @@ The plan's "Known limits of the first release" lists them. The ones to settle by
 - **Keypoint candidates.** The windowed choice with the body-only strict filter matches the prototype over the whole
   trial against the operator-edited runs (12.5 cm, and 17.1 against 16.6 cm inside the ukemi events). Over the whole
   trial no variant differs by more than 0.6 cm. It needs reviewed masks, and it stays off by default.
-- **Jitter of the arms and hands.** It is 1.5-2 times that of the edited runs. The main causes are pick jumps and
-  tracklet switches. A sticky pick and lower process noise are the next things to try
-  (keypoint-candidates design section 10.10).
+- **Jitter of the arms and hands.** With the windowed choice it is 1.5-2 times that of the edited runs. Lowering the
+  process noise of the pose from 0.3 to 0.15 brings arms and hands to the per-step assignment's level (arms plus hands
+  50 to 40 mm, feet 23 to 16 mm) at the same accuracy; the sticky choice adds about 3 mm more. 15 jitter episodes
+  remain against 8 with the per-step assignment, mostly jumps of the pick within a tracklet. The tracker default stays
+  0.3 until a second capture confirms 0.15 (keypoint-candidates design section 10.10).
 - **Foot twist about the long axis.** The three SOMA-77 foot keypoints are collinear, so this twist cannot be
   observed. An open design question (keypoint-candidates design section 10.9).
 - **Mask edits in place.** Edits do not create a new revision, so a box or tracking run cannot record which masks

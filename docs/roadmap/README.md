@@ -98,7 +98,7 @@ Documents:
 
 #### Keypoint Candidates
 
-**Status:** 🚧 In progress (85%) · **Categories:** `detection-pipeline`, `tracker-core`, `data-model` · **Last updated:** 2026-10-22
+**Status:** 🚧 In progress (85%) · **Categories:** `detection-pipeline`, `tracker-core`, `data-model` · **Last updated:** 2026-10-24
 
 Several heatmap maxima per keypoint stored per detection run, linked into tracklets at detection time, and assigned to skeleton markers by the tracker's shared dot-assignment phase with a keypoint-class restriction; strict mask adherence and multi-view agreement as tracking options.
 
@@ -118,7 +118,7 @@ Documents:
 
 #### SOMA/GEM-X Productization
 
-**Status:** 🚧 In progress (70%) · **Categories:** `detection-pipeline`, `tracker-core`, `data-model` · **Last updated:** 2026-10-22
+**Status:** 🚧 In progress (70%) · **Categories:** `detection-pipeline`, `tracker-core`, `data-model` · **Last updated:** 2026-10-24
 
 SOMA-77 (GEM-X) as the recommended pose model in the main code line, in three releases: SOMA recommended with the detection pipeline, person assignment, skeleton binding, tracker cost and calibration items; keypoint candidates and mask versioning; tracklet editing.
 

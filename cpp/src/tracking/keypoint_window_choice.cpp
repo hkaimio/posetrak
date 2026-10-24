@@ -87,7 +87,94 @@ std::int64_t tracklet_key(Candidate const& c, int index) {
                            : -1 - static_cast<std::int64_t>(index);
 }
 
+/// Candidates of one keypoint per frame: (index into the candidates, score).
+using ScoredFrames = std::vector<std::vector<std::pair<int, double>>>;
+
+/// The highest-scoring candidate of every frame, -1 for a frame without one.
+std::vector<int> best_per_frame_impl(ScoredFrames const& scored) {
+    std::vector<int> picks(scored.size(), -1);
+    for (size_t f = 0; f < scored.size(); ++f) {
+        double best = -9.0;
+        for (auto const& [r, score] : scored[f]) {
+            if (score > best) {
+                best = score;
+                picks[f] = r;
+            }
+        }
+    }
+    return picks;
+}
+
 }  // namespace
+
+std::vector<int> WindowChoice::best_per_frame(ScoredFrames const& scored) const {
+    return best_per_frame_impl(scored);
+}
+
+std::vector<int> WindowChoice::best_chain(ScoredFrames const& scored,
+                                          std::vector<Frame> const& frames, double penalty,
+                                          double jump_box) const {
+    size_t const n = scored.size();
+    std::vector<int> picks(n, -1);
+    // A change between two candidates of consecutive frames: another linked tracklet, or a move
+    // of more than jump_box box heights (also for candidates that are not linked).
+    auto changed = [&](int a, int b, double box_height) {
+        auto const& ca = candidates_[static_cast<size_t>(a)];
+        auto const& cb = candidates_[static_cast<size_t>(b)];
+        if (ca.tracklet >= 0 && cb.tracklet >= 0 && ca.tracklet != cb.tracklet)
+            return true;
+        double const d =
+            std::hypot(static_cast<double>(ca.x) - cb.x, static_cast<double>(ca.y) - cb.y);
+        return d > jump_box * box_height;
+    };
+    // Best total score of a chain that ends in each option of a frame, and the option of the
+    // previous frame it continues.
+    std::vector<std::vector<double>> total(n);
+    std::vector<std::vector<int>> from(n);
+    size_t segment_end = 0;
+    for (size_t f = 0; f < n; ++f) {
+        auto const& options = scored[f];
+        total[f].assign(options.size(), 0.0);
+        from[f].assign(options.size(), -1);
+        bool const continues = f > 0 && !scored[f - 1].empty();
+        for (size_t i = 0; i < options.size(); ++i) {
+            double best = 0.0;
+            int best_j = -1;
+            if (continues) {
+                best = -std::numeric_limits<double>::infinity();
+                for (size_t j = 0; j < scored[f - 1].size(); ++j) {
+                    double const value =
+                        total[f - 1][j] -
+                        (changed(scored[f - 1][j].first, options[i].first, frames[f].box_height)
+                             ? penalty
+                             : 0.0);
+                    if (value > best) {
+                        best = value;
+                        best_j = static_cast<int>(j);
+                    }
+                }
+            }
+            total[f][i] = best + options[i].second;
+            from[f][i] = best_j;
+        }
+        // A segment ends where the next frame has no candidate, or at the last frame.
+        if (!options.empty() && (f + 1 == n || scored[f + 1].empty())) {
+            segment_end = f;
+            size_t at = 0;
+            for (size_t i = 1; i < options.size(); ++i)
+                if (total[f][i] > total[f][at])
+                    at = i;
+            for (size_t g = segment_end + 1; g-- > 0 && !scored[g].empty();) {
+                picks[g] = scored[g][at].first;
+                int const prev = from[g][at];
+                if (prev < 0)
+                    break;
+                at = static_cast<size_t>(prev);
+            }
+        }
+    }
+    return picks;
+}
 
 WindowChoice::WindowChoice(Input input, Settings const& settings)
     : input_(std::move(input)), settings_(settings) {
@@ -538,6 +625,7 @@ void WindowChoice::run() {
     };
 
     for (int round = 0; round < s.rounds; ++round) {
+        bool const last_round = round == s.rounds - 1;
         std::vector<int> next(picks_.size(), -1);
         for (int c = 0; c < n_cameras; ++c) {
             if (!is_active(c))
@@ -630,11 +718,14 @@ void WindowChoice::run() {
                             m_series.add(key, t, mask_value(cand));
                     }
                 }
+                // Score of every candidate of the keypoint, per frame; a fixed pick is the only
+                // candidate of its frame.
+                std::vector<std::vector<std::pair<int, double>>> scored(
+                    static_cast<size_t>(n_frames));
                 for (int f = 0; f < n_frames; ++f) {
                     int const id = cell(c, k, f);
                     double const t = frames[static_cast<size_t>(f)].time;
-                    double best = -9.0;
-                    int chosen = -1;
+                    auto& options = scored[static_cast<size_t>(f)];
                     for (int r = cell_first_[static_cast<size_t>(id)];
                          r < cell_first_[static_cast<size_t>(id) + 1]; ++r) {
                         auto const& cand = candidates_[static_cast<size_t>(r)];
@@ -647,15 +738,18 @@ void WindowChoice::run() {
                         score += s.beta * (cand.consistent ? 1.0 : 0.0) + s.gamma * cand.peak;
                         if (mask_here)
                             score += s.mask_weight * m_series.mean(key, t, s.mask_window_s, 0.0);
-                        if (score > best) {
-                            best = score;
-                            chosen = r;
-                        }
+                        options.emplace_back(r, score);
                     }
-                    next[static_cast<size_t>(id)] = fixed_[static_cast<size_t>(id)] >= 0
-                                                        ? fixed_[static_cast<size_t>(id)]
-                                                        : chosen;
+                    int const fixed = fixed_[static_cast<size_t>(id)];
+                    if (fixed >= 0)
+                        options.assign(1, {fixed, 0.0});
                 }
+                std::vector<int> chain =
+                    last_round && s.switch_penalty > 0.0
+                        ? best_chain(scored, frames, s.switch_penalty, s.jump_box)
+                        : best_per_frame(scored);
+                for (int f = 0; f < n_frames; ++f)
+                    next[static_cast<size_t>(cell(c, k, f))] = chain[static_cast<size_t>(f)];
             }
         }
         picks_ = std::move(next);

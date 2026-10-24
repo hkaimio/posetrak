@@ -299,7 +299,13 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     -- model are in its choice model file); NULL = 'body'.
     kp_mask_term_classes              TEXT,
     -- Comma-separated keypoint classes the strict mask filter applies to ('body', 'hands', 'feet'); NULL = 'body'.
-    kp_strict_filter_classes          TEXT
+    kp_strict_filter_classes          TEXT,
+    -- Score lost by a change of candidate between consecutive frames in the chain of picks the windowed choice
+    -- takes (a change is another tracklet or a jump of the pick, see kp_choice_jump_box); NULL/0 = every frame takes
+    -- its best score on its own.
+    kp_choice_switch_penalty          REAL,
+    -- Box heights between consecutive frames above which a move of the pick counts as a change; NULL = 0.04.
+    kp_choice_jump_box                REAL
 );
 
 -- Added in schema migration v37: hierarchical body/hand solver -- per-stage

@@ -281,6 +281,8 @@ KeypointChoiceReport run_keypoint_choice_phase(PersonContext& ctx, KeypointChoic
     settings.gamma = cfg.gamma;
     settings.mask_weight = cfg.mask_term_weight;
     settings.rounds = cfg.rounds;
+    settings.switch_penalty = cfg.switch_penalty;
+    settings.jump_box = cfg.jump_box;
     kpchoice::WindowChoice choice(std::move(input), settings);
     t0 = Clock::now();
     choice.flag_consistent();

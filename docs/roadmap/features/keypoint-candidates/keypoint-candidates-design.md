@@ -483,7 +483,15 @@ candidates between persons was measured as harmful and is not part of it (`Windo
      window the average is 0.5 (0 for `M`). A candidate without a tracklet is a tracklet of its own.
    - `peak` is the heatmap peak, the stored peak over the pose model's confidence scale (5.0 for SOMA-77).
    - Ties go to the candidate of the lowest rank. Defaults: `delta` 1.0, `beta` 0.3, `gamma` 0.2, `m` 0.3 when on.
-5. **Decisions.** A tracklet range rejected, marked as another subject's or forbidden for the keypoint's marker is
+5. **Sticky chain** (optional, last round only). With `switch_penalty` above 0, the picks of a keypoint in a camera
+   of the last round are the chain of candidates that maximises the sum of the scores minus `switch_penalty` for each
+   change between consecutive frames, found by a Viterbi search over the camera's frames in both directions, so the
+   result does not depend on where the window starts. A change is a different linked tracklet, or a move of more than
+   `jump_box` box heights (default 0.04) between the two candidates; candidates without a linked tracklet are compared by
+   the move alone. A frame without a candidate breaks the chain and costs nothing, and a frame with a fixed pick (the
+   decisions item) has that pick as its only option. Earlier rounds keep the best score of each frame on its own, because
+   their picks are the evidence of the support terms of the next round; the penalty is meant to smooth the output.
+6. **Decisions.** A tracklet range rejected, marked as another subject's or forbidden for the keypoint's marker is
    removed; one assigned to the keypoint's marker is the pick of every frame of its range whatever its score. Hand-placed
    keypoint edits stay.
 
@@ -566,6 +574,7 @@ values. A NULL column means the default.
 | `kp_choice_support_window_s` | `--kp-support-window` | 1.0 |
 | `kp_choice_delta`, `kp_choice_beta`, `kp_choice_gamma` | `--kp-delta`, `--kp-beta`, `--kp-gamma` | 1.0, 0.3, 0.2 |
 | `kp_choice_rounds` | `--kp-rounds` | 3 |
+| `kp_choice_switch_penalty`, `kp_choice_jump_box` | `--kp-switch-penalty`, `--kp-jump-box` | 0 (off), 0.04 |
 | `kp_choice_skip_camera_ids` (JSON array of camera indices) | `--kp-skip-camera LABEL` (repeatable) | none |
 | `kp_strict_filter`, `kp_strict_filter_window_frames`, `kp_strict_filter_min_fraction`, `kp_strict_filter_classes` | `--kp-strict-filter`, `--kp-strict-window`, `--kp-strict-min-fraction`, `--kp-strict-classes` | off, 10, 0.5, `body` |
 | `kp_mask_term_weight`, `kp_mask_term_window_s`, `kp_mask_term_classes` | `--kp-mask-weight`, `--kp-mask-window`, `--kp-mask-classes` | 0 (off), 2.0, `body` |
@@ -950,15 +959,16 @@ where a keypoint is absent for several frames, and little elsewhere.
   number of episodes about the same and the distance to the edited run at 14.6 and 14.7 cm. The smoother lowers the residual
   of the windowed run by 7-15% (subject 1, hands 33.3 to 28.1 mm).
 
-**Candidate fixes**, none chosen and none tried beyond the checks above:
+**Candidate fixes**, with what the grid below measured of them:
 
 - A sticky choice, which keeps the previous tracklet unless the score difference exceeds a margin. Evidence: jumps and tracklet
-  switches have the largest gain in R^2 and are in most episodes; the choice has no term for continuity apart from the
-  averaging of the support over the tracklet.
+  switches have the largest gain in R^2 and are in most episodes. Built as the sticky chain of section 10.1 and measured
+  below: it lowers the tracklet switches by a fifth to a third and the jitter by about 3 mm of arms plus hands.
 - A choice that follows the filter's track, as the per-step assignment does, while keeping the windowed choice's
   accuracy in the hard ranges. Evidence: `'step'` has 8 episodes against 18 and 14-33% lower jitter on the arms and hands,
   but is 0.7 cm worse in range 3.
-- Lower process noise, or a noise that depends on the joint group (hands and feet are the noisiest). Evidence: the check above.
+- Lower process noise, or a noise that depends on the joint group (hands and feet are the noisiest). Evidence: the check above
+  and the grid below; the global value lowers the jitter most. A per-group value is not available (see below).
 - Smoothing of the keypoint tracks before they enter the filter, or an observation noise that grows with the distance of the
   observation from the track's own fit. Evidence: the jump event.
 - Handling of the camera count: a keypoint that enters or leaves a camera changes the solution. Evidence: 12 of 18 episodes.
@@ -995,3 +1005,96 @@ Over the whole trial the variants differ by at most 0.6 cm. The filter lowers th
 cm) and in range 3 by 0.1-0.4 cm, and raises it by 0.2-0.3 cm in range 1 and by 0.1-0.3 cm outside the events. The
 windowed choice is no better than candidates off over the whole trial on this basis; it differs from the per-step
 assignment by 0.7 cm in range 3 (better) and 0.7 cm in the stretch between range 1 and range 3 (worse).
+
+**Sticky chain and process noise, grid.** The windowed choice (basis as above: ace2 pro outside the choice, body-only strict
+filter, calibration `b416cd21`, the ace2 configuration, the product's box path, 43.5-66.44 s, three subjects) with the switch
+penalty 0 (off), 0.2, 0.5 and 1.0 crossed with the process noise 0.3 (the default), 0.2 and 0.15. Process noise is the
+`--process-noise-std` of the pose; the velocity noise stays 1.0. A cell is picked by a rule fixed before the grid: admissible
+when the mean distance to the edited runs is not worse than the filtered baseline's by more than 0.2 cm over the whole trial
+and inside the ukemi events; among the admissible cells the lowest arms plus hands jitter (mean over the subjects).
+
+RMS residual of the smoothed states (mm), mean over the three subjects, and the episodes the edited run does not have (all
+subjects and groups):
+
+| Penalty / process noise | Torso | Arms | Hands | Legs | Feet | Arms + hands | Episodes |
+|---|---|---|---|---|---|---|---|
+| 0 / 0.3 (filtered baseline) | 12.9 | 18.7 | 31.7 | 12.5 | 23.0 | 50.3 | 18 |
+| 0.2 / 0.3 | 12.7 | 18.4 | 29.4 | 12.3 | 22.5 | 47.8 | 16 |
+| 0.5 / 0.3 | 13.2 | 18.9 | 29.9 | 12.7 | 22.9 | 48.8 | 18 |
+| 1.0 / 0.3 | 13.2 | 19.2 | 31.9 | 12.7 | 23.0 | 51.1 | 20 |
+| 0 / 0.2 | 11.7 | 16.0 | 24.3 | 11.2 | 18.3 | 40.4 | 20 |
+| 0.2 / 0.2 | 11.5 | 15.9 | 24.6 | 10.9 | 18.2 | 40.5 | 16 |
+| 0.5 / 0.2 | 11.7 | 16.1 | 25.9 | 11.1 | 18.0 | 42.0 | 15 |
+| 1.0 / 0.2 | 12.1 | 16.9 | 26.8 | 11.3 | 18.3 | 43.8 | 12 |
+| 0 / 0.15 | 11.3 | 15.5 | 24.8 | 10.4 | 15.6 | 40.2 | 14 |
+| 0.2 / 0.15 | 11.1 | 14.9 | 23.5 | 10.1 | 15.5 | 38.5 | 12 |
+| 0.5 / 0.15 | 11.5 | 15.3 | 22.6 | 10.3 | 15.5 | 37.9 | 17 |
+| **1.0 / 0.15 (chosen)** | 11.4 | 14.7 | 22.6 | 10.4 | 15.5 | 37.3 | 15 |
+| 1.0 / 0.15, no strict filter | 12.5 | 15.5 | 23.1 | 11.3 | 17.4 | 38.6 | 14 |
+| unfiltered baseline, 0 / 0.3 | 13.6 | 18.6 | 30.1 | 12.8 | 23.7 | 48.7 | 18 |
+| `'step'` | 10.5 | 14.4 | 23.1 | 10.5 | 19.5 | 37.6 | 8 |
+
+Mean body-joint distance (cm) to the edited runs, pooled, and the label-fed range 3 (52-56.8 s / the two hard windows, mean
+distance to the labels in cm, subjects 1 and 2):
+
+| Penalty / process noise | Whole | Range 3 | Inside ukemi | Outside ukemi | Label-fed, subject 1 | Label-fed, subject 2 |
+|---|---|---|---|---|---|---|
+| 0 / 0.3 (filtered baseline) | 12.53 | 13.86 | 17.06 | 11.87 | 7.61 / 9.94 | 3.43 / 4.63 |
+| 0 / 0.15 | 12.50 | 13.73 | 16.80 | 11.88 | 7.68 / 9.85 | 3.69 / 4.75 |
+| 0.2 / 0.15 | 12.46 | 13.80 | 16.68 | 11.85 | 7.42 / 9.48 | 3.80 / 4.83 |
+| 0.5 / 0.15 | 12.48 | 13.65 | 16.76 | 11.86 | 7.24 / 9.30 | 3.91 / 4.93 |
+| **1.0 / 0.15 (chosen)** | 12.50 | 13.74 | 16.97 | 11.85 | 7.28 / 9.36 | 3.98 / 5.13 |
+| 1.0 / 0.15, no strict filter | 12.99 | 15.13 | 19.49 | 12.06 | 6.61 / 8.08 | 3.74 / 4.77 |
+| unfiltered baseline, 0 / 0.3 | 12.71 | 14.29 | 19.17 | 11.78 | 6.75 / 8.54 | 3.73 / 4.82 |
+| `'step'` | 12.69 | 15.00 | 18.25 | 11.89 | 8.25 / 10.88 | 4.16 / 5.77 |
+
+All twelve filtered cells other than the baseline are admissible by the rule: 12.46-12.56 cm over the whole trial and
+16.68-17.24 cm inside the events.
+
+- **Process noise is the lever.** Halving it (0.3 to 0.15) at penalty 0 lowers arms plus hands from 50.3 to 40.2 mm, the feet
+  from 23.0 to 15.6 mm and the torso and legs by 1.6-2.1 mm, with no change in the distance to the edited runs (12.50 against
+  12.53 cm) and 0.3 cm less inside the events. The label-fed range 3 of subject 2 is 0.1-0.3 cm worse.
+- **The sticky chain adds about 3 mm of arms plus hands at noise 0.15** (40.2 to 37.3 mm at penalty 1.0) and nothing at noise
+  0.3 (50.3, 47.8, 48.8, 51.1 mm for penalties 0, 0.2, 0.5, 1.0). The cells do not order by penalty in the episodes (14, 12,
+  17, 15 at noise 0.15), so differences between penalties of 1-2 mm are within the spread between cells. The share of
+  keypoint-frames whose pick switches tracklet falls as the penalty rises (noise 0.15, penalty 0 / 1.0: subject 1 9.96 /
+  7.40 %, subject 2 8.73 / 6.11 %, subject 3 6.41 / 5.14 %). In a pilot over 50.2-57.8 s of subject 2 the 2D residual of the
+  used observations stayed at 16.5 px at penalties 0 to 1.2 and a threshold on the move alone (0.02 and 0.1 box heights)
+  did the same as 0.04: the jitter is mostly not switches between tracklets but jumps within a tracklet (a tracklet that
+  links two neighbouring maxima), which a penalty on the tracklet does not remove.
+- **The label-fed range 3 does not gain.** Subject 1 improves by 0.2-0.4 cm at penalty 0.2-1.0 (7.68 to 7.24-7.42 cm),
+  subject 2 becomes worse by 0.1-0.3 cm per step in penalty (3.69 to 3.98 cm); both stay inside the spread of the
+  baselines (subject 1 6.75-7.76, subject 2 3.34-3.98).
+- **Target.** The chosen cell reaches `'step'`'s jitter on the arms (14.7 against 14.4 mm) and hands (22.6 against 23.1 mm) and
+  keeps the accuracy of the filtered baseline, but has 15 episodes that the edited run does not have against the target of
+  10 or fewer (`'step'` has 8). The sticky chain is therefore not a default of `'window'`: `kp_choice_switch_penalty` stays
+  0. The process noise of the pose stays 0.3 as well; 0.15 is a recommendation for runs on this kind of footage.
+- **Without the strict filter** the same setting gives 38.6 mm and 14 episodes, but 12.99 cm over the whole trial and 19.49 cm
+  inside the events, 0.5 and 2.5 cm above the filtered cell.
+
+**Per-group process noise.** The tracker configuration has per-stage overrides (`tracker_config_stages`: process noise,
+measurement noise and outlier threshold of a child stage), but the ace2 configuration's stages are the two hands (the
+fingers); arms, wrists and torso are in the parent stage and cannot get a value of their own. `process_noise_vel_joint_names`
+and `process_noise_vel_scopes` set the velocity gain by joint name, not the base noise of the pose. A noise per joint group
+needs a per-joint-name multiplier of the base noise in the process model (`ConstantVelocityModel::get_process_noise`, rebuilt
+by `rebuild_process_noise`), one configuration field and the columns that store it. It is not built; the global value was
+measured instead.
+
+**Remaining episodes of the chosen cell.** 15 episodes: hands 6, arms 4, torso 3, legs 2; subject 1 has 4 (one of them a
+single sample), subject 2 has 8 and subject 3 has 3. For the 14 episodes that span more than one sample, the rate of each
+event inside the episode against its rate over the trial (mean of the ratio; number of episodes at least 1.5 times): tracklet
+switch of the pick 3.9 (9), jump of the observation 3.4 (12), change of the camera count 2.4 (12), outlier rejection 2.2 (8),
+missing observation 2.0 (7), run of missing observations 2.0 (7), NIS spike 1.4 (5). Jumps and camera-count changes are each
+above the trial rate in 12 of the 14 episodes, so they are the common companion, and a change of the camera count
+is not what stands out most in any single episode: the tracklet switches are the most enriched where they occur (12.5 and
+9.5 times in the torso and arms of subject 3 at 51.3-51.8 s, 5-6.6 times in the arms of subject 2 at 55.1-55.5 s and
+62.8-63.2 s). The five hand episodes of subject 2 (47.9-63.3 s) combine jumps and outliers, and at 55.3 s and 62.8 s
+missing observations.
+
+The camera-count changes do not dominate, so no fix for them is built. One that would address them: when a keypoint appears in a
+camera or leaves it, the evidence for it changes in one frame and the filter takes a step. Scaling the observation's
+measurement covariance from a multiple down to 1 over about five frames after it appears, and up again before it leaves,
+would spread the step. It needs the number of frames since the keypoint entered the camera in the update, which the picks
+of the choice (`tracking_kp_picks`) give.
+
+**Cost of the sticky chain.** Subject 2, 50-55 s, five cameras, body-only strict filter, optimized build, two runs in parallel: the choice itself takes 0.3 s with the penalty off and 0.4 s at 1.0; the phase takes 26.0 and 26.1 s (load 0.2, mask decoding 22.1, consensus 3.1). Over the trial (43.5-66.44 s) the whole run takes 599.8 s with the penalty off and 590.5 s at 1.0, the same within the spread between runs. The chain adds one pass over the scored candidates per keypoint and camera, and nothing measurable to the phase.

@@ -247,7 +247,7 @@ void create_fixture_db(fs::path const& path, int num_frames, double dt) {
             kp_choice_skip_camera_ids TEXT, kp_strict_filter INTEGER,
             kp_strict_filter_window_frames INTEGER, kp_strict_filter_min_fraction REAL,
             kp_mask_term_weight REAL, kp_mask_term_window_s REAL, kp_mask_term_classes TEXT,
-            kp_strict_filter_classes TEXT
+            kp_strict_filter_classes TEXT, kp_choice_switch_penalty REAL, kp_choice_jump_box REAL
         );
     )");
     exec_sql(db, R"(

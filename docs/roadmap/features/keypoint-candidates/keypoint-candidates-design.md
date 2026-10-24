@@ -824,6 +824,10 @@ the choice) with the first two changes: 6.5 / 8.4 and 3.60 / 4.84, against 6.0 /
 distance to the edited runs over 44-64 s and the jerk of the joint positions did not change. The remaining difference of
 20-29 degrees in the foot axis follows from the marker offsets, which were fitted for upright and squatting poses.
 
-Open: the bundled default skeletons bind `ToeBase` to the toe (`catalog/pose-models/soma77.marker-offsets.yaml`). Binding it
-to the foot changes the content, and so the pinned ids, of the bundled skeletons. The toe and shin limits are values in the
-bundled joint limits. Foot roll could also be tied to the shin or to ground contact with a soft prior; this has not been tried.
+The bundled skeletons follow these results: `ToeBase` is bound to the foot in the SOMA-77 marker set
+(`catalog/pose-models/soma77.marker-offsets.yaml`), and the toe joints are limited to 15 degrees of flexion and swing and 6
+degrees of twist in `joint_limits.yaml`. The shin twist is already locked in the bundled limits (the 90 degree twist
+above belongs to skeletons built outside the bundled layers), so it needs no change there. The ids of the bundled default
+skeletons change with their content; skeletons already stored in a session or registry keep the earlier binding and limits and
+have to be rebuilt from the marker set to get the new ones. Foot roll could also be tied to the shin or to ground contact
+with a soft prior; this has not been tried.

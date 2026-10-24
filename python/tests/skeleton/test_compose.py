@@ -90,7 +90,7 @@ def test_add_pose_model_skips_markers_whose_joint_the_skeleton_lacks():
     for g in doc["groups"]:
         g["joints"] = [j for j in g["joints"] if not j.startswith("toe.")]
     _, skipped = c.add_pose_model(yaml.safe_dump(doc), "soma77")
-    assert sorted(skipped) == ["LeftToeBase", "LeftToeEnd", "RightToeBase", "RightToeEnd"]
+    assert sorted(skipped) == ["LeftToeEnd", "RightToeEnd"]
 
 
 def test_compose_rejects_limits_and_dimensions_that_do_not_match_the_hierarchy():

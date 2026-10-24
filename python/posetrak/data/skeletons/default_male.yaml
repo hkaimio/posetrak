@@ -481,9 +481,9 @@ joints:
   bone_tip_offset: [0.0, 0.0318301506, 0.0]
   orientation: [0.0178220123, 0.600058258, -0.11808496]
   limits:
-    x: [-0.785398185, 0.785398185]
-    y: [-1.57079633, 1.57079633]
-    z: [-1.57079633, 1.57079633]
+    x: [-0.26, 0.26]
+    y: [-0.1, 0.1]
+    z: [-0.26, 0.26]
 - name: thigh.R
   type: ball
   parent: hips
@@ -521,9 +521,9 @@ joints:
   bone_tip_offset: [0.0, 0.0321446247, 0.0]
   orientation: [-0.00785797369, -0.526981294, -0.112900972]
   limits:
-    x: [-0.785398185, 0.785398185]
-    y: [-1.57079633, 1.57079633]
-    z: [-1.57079633, 1.57079633]
+    x: [-0.26, 0.26]
+    y: [-0.1, 0.1]
+    z: [-0.26, 0.26]
 markers:
 - name: MRK-nose
   parent: head
@@ -1057,8 +1057,8 @@ markers:
   offset: [-0.0128, -0.0319, -0.0985]
   landmark: soma77:LeftFoot
 - name: LeftToeBase
-  parent: toe.L
-  offset: [-0.0044, -0.0172, -0.0652]
+  parent: foot.L
+  offset: [-0.0402, 0.1223, -0.0491]
   landmark: soma77:LeftToeBase
 - name: LeftToeEnd
   parent: toe.L
@@ -1077,8 +1077,8 @@ markers:
   offset: [-0.0535, 0.0099, -0.0826]
   landmark: soma77:RightFoot
 - name: RightToeBase
-  parent: toe.R
-  offset: [-0.0302, 0.0109, -0.0346]
+  parent: foot.R
+  offset: [-0.0089, 0.1513, -0.0468]
   landmark: soma77:RightToeBase
 - name: RightToeEnd
   parent: toe.R

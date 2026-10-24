@@ -50,7 +50,7 @@ tracking. Main compared with `v0.1.0-proto2`:
 | 6 Tracker cost | Done; per-person threads not kept; [status](../tracker-performance/status.md) |
 | 7 Calibration items | Done, with box-video run time cut from about 12 min to 73 s on a 41 s range; [status](../extrinsics-improvements/status.md) |
 | 8 Mask versioning | Done (session schema 68); [status](../segmentation-versioning/status.md) |
-| 9 Keypoint candidates | Done (session schema 69), off by default; accuracy bar not met; [status](../keypoint-candidates/status.md) |
+| 9 Keypoint candidates | Done (session schema 70), off by default; the windowed choice (`--kp-choice window`) matches the prototype over the whole trial; [status](../keypoint-candidates/status.md) |
 | 10-12 | Not started; testing of the merged stages comes first |
 
 **Next: testing on real captures** before stage 10 (tracklet editing, the first UI on candidate tracklets):
@@ -69,7 +69,13 @@ The plan's "Known limits of the first release" lists them. The ones to settle by
 - **Existing persons' skeletons** have no SOMA markers; `skeleton compose --base` upgrades them.
 - **Box-video reference camera.** On one capture the same range fails with one reference camera and
   passes with another; not investigated.
-- **Keypoint candidates do not reach the prototype's accuracy.** On the evaluation range the tracker's per-step
-  choice among candidates is about as good as the strongest maxima (16.8 / 5.6 cm against 17.3 / 5.4 off), where
-  the prototype's offline per-tracklet cross-camera choice reached 10.2 / 3.4. The `suggest` rule from an automatic
-  grouped choice is the candidate next step; not decided. Candidates are off by default.
+- **Keypoint candidates.** The windowed choice with the body-only strict filter matches the prototype over the whole
+  trial against the operator-edited runs (12.5 cm, and 17.1 against 16.6 cm inside the ukemi events). Over the whole
+  trial no variant differs by more than 0.6 cm. It needs reviewed masks, and it stays off by default.
+- **Jitter of the arms and hands.** It is 1.5-2 times that of the edited runs. The main causes are pick jumps and
+  tracklet switches. A sticky pick and lower process noise are the next things to try
+  (keypoint-candidates design section 10.10).
+- **Foot twist about the long axis.** The three SOMA-77 foot keypoints are collinear, so this twist cannot be
+  observed. An open design question (keypoint-candidates design section 10.9).
+- **Mask edits in place.** Edits do not create a new revision, so a box or tracking run cannot record which masks
+  it read.

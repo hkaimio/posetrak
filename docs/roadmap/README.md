@@ -98,7 +98,7 @@ Documents:
 
 #### Keypoint Candidates
 
-**Status:** 🚧 In progress (85%) · **Categories:** `detection-pipeline`, `tracker-core`, `data-model` · **Last updated:** 2026-10-21
+**Status:** 🚧 In progress (85%) · **Categories:** `detection-pipeline`, `tracker-core`, `data-model` · **Last updated:** 2026-10-22
 
 Several heatmap maxima per keypoint stored per detection run, linked into tracklets at detection time, and assigned to skeleton markers by the tracker's shared dot-assignment phase with a keypoint-class restriction; strict mask adherence and multi-view agreement as tracking options.
 

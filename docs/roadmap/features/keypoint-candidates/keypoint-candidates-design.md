@@ -875,8 +875,9 @@ well, so an episode that the reference run of the same subject also has in the s
 motion and not as jitter of the run under test.
 
 **Runs compared** (43.5-66.4 s, three subjects): the windowed choice (ace2 pro outside the choice, no filter, calibration
-`b416cd21`, the ace2 configuration, the product's box path; runs `e8e1bb80`, `5dc83449`, `ad3708a3`), the prototype's
-`ace5` runs and the operator-edited runs. All use the same filter settings (process noise 0.3, measurement noise 25 px,
+`b416cd21`, the ace2 configuration, the product's box path; runs `e8e1bb80`, `5dc83449`, `ad3708a3`), the same with
+candidates off, with the per-step assignment (`'step'`), with the strict filter over all classes and over the body only,
+the prototype's `ace5` runs and the operator-edited runs. All use the same filter settings (process noise 0.3, measurement noise 25 px,
 outlier threshold 6, RTS smoothing on). The edited run of subject 1 has no smoothed states, so its figures are those of the
 filtered states and are higher than they would be smoothed. The thresholds come from the edited runs of subjects 2 and 3.
 Thresholds of the sliding RMS (mm): torso 31, arms 35, hands 50, legs 35, feet 67.
@@ -891,6 +892,18 @@ RMS residual (mm) / RMS jerk (m/s^3) over the trial, smoothed states:
 | prototype `ace5`, subject 1 | 15.4 / 254 | 18.8 / 345 | 28.9 / 579 | 15.4 / 305 | 33.3 / 791 |
 | prototype `ace5`, subject 2 | 11.5 / 192 | 18.7 / 368 | 34.5 / 712 | 12.7 / 238 | 25.1 / 532 |
 | prototype `ace5`, subject 3 | 16.6 / 350 | 19.4 / 398 | 28.0 / 529 | 16.0 / 356 | 28.0 / 616 |
+| candidates off, subject 1 | 17.5 / 302 | 21.6 / 391 | 32.2 / 612 | 15.7 / 296 | 26.6 / 617 |
+| candidates off, subject 2 | 12.9 / 204 | 22.3 / 422 | 38.5 / 763 | 13.5 / 230 | 22.8 / 463 |
+| candidates off, subject 3 | 16.2 / 319 | 20.1 / 397 | 27.1 / 536 | 14.7 / 306 | 25.0 / 597 |
+| `'step'`, subject 1 | 12.4 / 236 | 15.5 / 322 | 23.4 / 494 | 11.6 / 250 | 20.6 / 486 |
+| `'step'`, subject 2 | 8.9 / 150 | 14.1 / 276 | 24.7 / 505 | 9.8 / 193 | 18.9 / 421 |
+| `'step'`, subject 3 | 10.3 / 208 | 13.8 / 305 | 21.4 / 475 | 10.1 / 233 | 19.1 / 491 |
+| strict, all classes, subject 1 | 14.8 / 276 | 18.7 / 379 | 30.1 / 629 | 13.0 / 249 | 20.6 / 492 |
+| strict, all classes, subject 2 | 10.8 / 174 | 17.1 / 338 | 32.7 / 683 | 12.1 / 230 | 22.2 / 472 |
+| strict, all classes, subject 3 | 11.3 / 240 | 16.2 / 345 | 27.3 / 580 | 10.3 / 232 | 19.1 / 463 |
+| strict, body only, subject 1 | 15.4 / 236 | 19.6 / 349 | 29.2 / 556 | 14.8 / 279 | 28.3 / 659 |
+| strict, body only, subject 2 | 11.9 / 202 | 20.5 / 400 | 41.4 / 783 | 12.2 / 223 | 21.5 / 455 |
+| strict, body only, subject 3 | 11.6 / 231 | 16.0 / 323 | 24.4 / 486 | 10.6 / 229 | 19.1 / 442 |
 | edited, subject 1 (filtered) | 18.1 / 370 | 22.1 / 451 | 31.5 / 615 | 20.2 / 395 | 32.0 / 654 |
 | edited, subject 2 | 9.0 / 167 | 11.1 / 217 | 18.2 / 383 | 13.2 / 264 | 27.2 / 502 |
 | edited, subject 3 | 11.3 / 229 | 13.4 / 279 | 20.2 / 431 | 14.2 / 305 | 24.2 / 536 |
@@ -900,7 +913,16 @@ RMS residual (mm) / RMS jerk (m/s^3) over the trial, smoothed states:
   mm on the feet. The arms and hands are where keypoint input matters: 1.5 to 2 times the edited runs for subjects 2 and 3 (arms
   18-20 against 11-13 mm, hands 25-37 against 18-20 mm).
 - Over the trial the windowed run has 18 of 27 episodes that the edited run does not have. The hands of subject 2 have six
-  (4.1 s in total) and the arms of subject 2 five. The prototype's runs have the same episodes at the same places.
+  (4.1 s in total) and the arms of subject 2 five. The prototype's runs have the same episodes at the same places. Episodes
+  that the edited run does not have, all subjects and groups: candidates off 21, windowed 18, strict filter over the body
+  18, strict filter over all classes 21, per-step assignment 8.
+- The per-step assignment jitters least: 14-33% below the windowed run on the arms and hands (arms 14-16 against 18-20 mm,
+  hands 21-25 against 25-37 mm), 15-27% below on the torso and legs, and below the edited run of subject 1 in every group. The windowed run is below candidates off in every group (torso 12-15 against 13-18 mm). The 2D
+  residual of the used observations is lower for `'step'` (7.8-9.5 px, against 10.3-13.1 px windowed), as the assignment
+  follows the prediction and so the filter's own track. The distance to the edited run does not improve with it (table
+  below), so the lower jitter is not a better position.
+- The strict filter over all classes lowers the feet to 19-22 mm (windowed 21-28 mm) and the torso of subjects 2 and 3 by
+  1-3 mm, and leaves the arms and hands near the windowed run. The body-only filter changes little.
 
 **The reported moments.** Subject 1 at 53.2-54.4 s and 55.35-56.25 s (the two hard windows) has episodes in the torso, arms and
 hands, and at 53.8-54.3 s in the legs; the edited run has episodes at the same times, so they are not specific to the choice.
@@ -923,10 +945,11 @@ is a jump, and changes the camera count when a camera loses the keypoint), so th
 explain the episodes in the legs and torso of subject 1 at 53.8-54.3 s and in the hands and arms of subject 2 at 62.7-63.4 s,
 where a keypoint is absent for several frames, and little elsewhere.
 
-- The picks are smoother than the strongest maxima of the same keypoint-frames: 2D residual (all / keypoint still) 12.5 / 4.4 px
+- The picks of the windowed choice are smoother than the strongest maxima of the same keypoint-frames: 2D residual (all / keypoint still) 12.5 / 4.4 px
   against 18.2 / 8.9 px for subject 1, 12.7 / 3.4 against 17.6 / 4.5 for subject 2, 9.8 / 2.2 against 14.9 / 2.8 for subject
   3. The windowed run's observations are as noisy as the prototype's (12.9 / 4.2 against 12.5 / 4.6 px for subject 1). The
-  choice does not add noise; what remains is the noise of the keypoints themselves, a few pixels per frame, and jumps.
+  choice adds no noise over candidates off, which jitters more; what remains is the noise of the keypoints themselves, a few
+  pixels per frame, and jumps, which the per-step assignment avoids by following the prediction.
 - The filter settings are the same in every run. Halving the process noise (0.3 to 0.15) for subject 1 lowers the RMS residual
   by 8-10% on the filtered states and by 7-27% on the smoothed states (hands 28.1 to 24.2 mm, feet 28.1 to 20.6 mm), leaves the
   number of episodes about the same and the distance to the edited run at 14.6 and 14.7 cm. The smoother lowers the residual
@@ -937,6 +960,9 @@ where a keypoint is absent for several frames, and little elsewhere.
 - A sticky choice, which keeps the previous tracklet unless the score difference exceeds a margin. Evidence: jumps and tracklet
   switches have the largest gain in R^2 and are in most episodes; the choice has no term for continuity apart from the
   averaging of the support over the tracklet.
+- A choice that follows the filter's track, as the per-step assignment does, while keeping the windowed choice's
+  accuracy in the hard ranges. Evidence: `'step'` has 8 episodes against 18 and 14-33% lower jitter on the arms and hands,
+  but is 0.7 cm worse in range 3.
 - Lower process noise, or a noise that depends on the joint group (hands and feet are the noisiest). Evidence: the check above.
 - Smoothing of the keypoint tracks before they enter the filter, or an observation noise that grows with the distance of the
   observation from the track's own fit. Evidence: the jump event.
@@ -956,5 +982,21 @@ series' ratio to the threshold minus one; groups at the same time are one row):
 | 50.4-51.4 | 2 | hand.L/R, forearm.L, upper_arm.L/R | NIS spikes (2.7), outlier rejections (2.5), jumps (3.4) |
 | 47.8-48.4 | 2 | hand.L/R | jumps (2.6), tracklet switches (2.5), outliers (2.4) |
 
-The scores of the filter classes over the whole trial, and the jitter of the runs without candidates and with the per-step
-assignment, need runs that are made separately (`trial_runs.py`); they are not part of this subsection until they exist.
+**Filter classes over the whole trial.** Mean body-joint distance (cm) to the operator-edited runs, three subjects pooled,
+same basis as above. Range 1 is 43.5-47.5 s, between 47.5-51.7 s, range 3 51.7-56.8 s, after 56.8-66.44 s; inside and
+outside are the frames in and out of the ukemi events.
+
+| Run | Whole | Range 1 | Between | Range 3 | After | Outside ukemi | Inside ukemi |
+|---|---|---|---|---|---|---|---|
+| `'window'`, no filter | 12.7 | 11.0 | 12.3 | 14.3 | 12.7 | 11.8 | 19.2 |
+| candidates off | 12.7 | 10.8 | 12.5 | 14.4 | 12.7 | 11.9 | 18.5 |
+| `'step'` | 12.7 | 10.8 | 11.6 | 15.0 | 12.7 | 11.9 | 18.2 |
+| `'window'`, strict, all classes | 12.7 | 11.3 | 11.9 | 14.2 | 12.9 | 12.1 | 17.0 |
+| `'window'`, strict, body only | 12.5 | 11.2 | 11.5 | 13.9 | 12.8 | 11.9 | 17.1 |
+| prototype `ace5`, base | 13.1 | 11.2 | 13.0 | 15.3 | 12.8 | 12.2 | 19.1 |
+| prototype `ace5`, mask | 12.5 | 10.5 | 11.9 | 13.9 | 12.8 | 11.9 | 16.6 |
+
+Over the whole trial the variants differ by at most 0.6 cm. The filter lowers the error in the ukemi events (19.2 to 17.0-17.1
+cm) and in range 3 by 0.1-0.4 cm, and raises it by 0.2-0.3 cm in range 1 and by 0.1-0.3 cm outside the events. The
+windowed choice is no better than candidates off over the whole trial on this basis; it differs from the per-step
+assignment by 0.7 cm in range 3 (better) and 0.7 cm in the stretch between range 1 and range 3 (worse).

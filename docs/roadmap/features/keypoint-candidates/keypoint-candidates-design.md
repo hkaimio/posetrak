@@ -768,31 +768,26 @@ The windowed choice is not made the default, and the strict filter and the mask 
 **Review material** for the keypoint-frames where the run's picks still differ from the prototype's: contact sheets
 outside the repository (`D:/mocap/stage9w-work/review/`, an `index.html` and a folder per subject and camera).
 
-### 10.8 What the first description got wrong
+### 10.8 Findings that bound the comparison with the prototype
 
-- The phase needs the consensus (section 10.1, item 1), which is the largest part of its cost, and the picks have to
-  replace the stored keypoint row, not only the fixed observations of the bound markers (section 10.3).
-- The pair limits are 1.15 times the 98th percentile and need more than 50 samples; the labelled units cover the body
-  only, so the table covers 28 of the 76 pairs.
-- The peak weight applies to the heatmap peak, not to the stored confidence.
-- The prototype's runs, and the reference they are scored against, were tracked with another extrinsic calibration than
-  the capture's current one.
-- The estimate of the cost (section 10.6) left out the consensus and the mask decoding.
-- The crops that differed from the prototype's were not a missing run but a mask version: the box run was built from
-  one state of the segmentation's masks and the prototype's candidates from another. A box run and a tracking run need
-  to record which version of the masks they read (a revision, or a hash of the masks of the frames used).
-- The frozen evaluation files are the left-edge export of the candidates; the prototype's tracker runs and the label-fed
-  reference were fed the centre convention, so the scoring has no convention bias.
-- The prototype's results were not reproducible from the productized candidates mainly because of the box masks, not
-  because of the choice: on boxes from the same masks the windowed choice is within 0.1 cm of the bar for subject 2 and
-  2.8 cm from it for subject 1.
-- The figures with the filter on the body keypoints were measured on candidates without the mask gate, which the product
-  applies by default; they were also selected among six variants on the one range. With the gate the filter's result for
-  subject 1 is 10.73 cm (bar 10.7), and on the better basis (fitted ace2 intrinsics, `b416cd21`) the filter makes subject 1
-  worse. The restriction to the body keypoints stands as the less harmful form of the filter; that the filter helps at all
-  is not established outside range 3.
-- The mask box source reproduces the boxes of the prototype's script exactly; the difference between the product's figures
-  and the earlier ones is the gate, which changes the stored keypoint row.
+- **Mask versions.** When masks are edited in place, the prototype's candidates and a box run of the product can come
+  from different states of the same segmentation run: the revision stays the same and only the content differs. On this
+  capture every crop that differed from the prototype's (18% of range 3, 60% of them in the hard windows) was on an
+  edited mask, and on boxes from the same masks 99.2-99.8% of the candidates agree. A box run and a tracking run need to
+  record which version of the masks they read (a revision, or a hash of the masks of the frames used).
+- **The mask gate.** `detect run --segmentation` gates the heatmaps with the person's grown mask. The gate changes the
+  stored keypoint row (the strongest maximum after it) and leaves the candidates alone, so it helps candidates off and
+  `'step'` and not the windowed choice, which replaces that row.
+- **Calibration.** A camera whose lens model fits only part of the image (the ace2 pro in its wide mode) gets a
+  consensus inlier radius at the 60 px ceiling under intrinsics fitted to the whole image, and the 12 px floor with
+  intrinsics fitted to the area where the people move. A comparison with a reference needs the reference's calibration.
+- **Half-cell convention.** The frozen evaluation files store a maximum at the cell's left edge; the prototype's tracker
+  input, the label-fed reference and the product use the cell centre. Mixing the two moves the scores by 1.6-2.8 cm.
+- **The strict filter.** On range 3 alone its effect depends on the basis: with the whole-image calibration it gained
+  4.1 cm for subject 1 and, over all classes, cost 2.0 cm for subject 2; on the fitted calibration it costs subject 1
+  0.8 cm. Over the whole trial against the operator-edited runs (section 10.10) it lowers the error inside the ukemi
+  events from 19.2 to 17.0-17.1 cm and raises it outside them by 0.1-0.3 cm. The body-only restriction keeps that gain
+  with less loss on the hands and feet, whose masks are thin and wrong in contact. The restriction was chosen on range 3.
 
 ### 10.9 Foot orientation with the SOMA-77 keypoints
 

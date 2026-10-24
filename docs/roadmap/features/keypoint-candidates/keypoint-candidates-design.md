@@ -819,15 +819,41 @@ Changes tried on the same trial, each against the edited runs:
 | toe joint limited to 15 degrees (6 degrees of twist) instead of locked, `ToeBase` on the foot | foot-axis difference 21-30 degrees, within 1.5 degrees of the locked toe; the angle between foot and toe axes has a median of 11-20 degrees (6 degrees of it is the rest angle) and a 90th percentile of 16-26 degrees |
 | foot twist and swing limits widened to 40 degrees | no improvement; the foot twists up to 50-68 degrees, i.e. the keypoints and their offsets disagree with the foot frame |
 
-Tracker distance to the label-fed reference on the labelled range (subject 1 / subject 2, range / hard windows, ace2 outside
-the choice) with the first two changes: 6.5 / 8.4 and 3.60 / 4.84, against 6.0 / 8.0 and 3.59 / 4.60 without them. Body-joint
-distance to the edited runs over 44-64 s and the jerk of the joint positions did not change. The remaining difference of
-20-29 degrees in the foot axis follows from the marker offsets, which were fitted for upright and squatting poses.
+**Toe flexion range.** The toe joint's rest frame is turned 34 degrees about the bone against the foot's, so the toe bends
+about a diagonal of the x-z plane of its frame, not about x or z alone: in that frame the shank points along (0.87, 0, -0.49)
+on the left and (-0.84, 0, -0.55) on the right (median over the trial, all three subjects), which gives the flexion axes
+(-0.49, 0, -0.87) on the left and (-0.55, 0, 0.84) on the right, positive towards dorsiflexion. The bundled limits give the
+toe about 90 degrees of dorsiflexion and 40 of plantar flexion about that axis, 15 degrees of side swing and 6 degrees of
+twist: x from -57 to 33 degrees and z from -86 to 43 degrees on the left, x from -63 to 35 and z from -42 to 84 degrees on the
+right. Limits of 15 degrees on x and z, as in the table above, hold the toe near its rest angle and cannot follow a bent toe.
+
+With these limits on the trial (28 s, windowed choice, ace2 pro outside the choice, three subjects):
+
+- Standing (hips above 0.8 m) the toe dorsiflexion has a median of 2 and 3 degrees (left, right) for subject 1, 2 and -6
+  for subject 2 and -8 and -21 for subject 3; the 5th to 95th percentile spans 40-50 degrees.
+- Subject 1 kneels at 65-66.4 s with the toes tucked: the median dorsiflexion is 67 degrees on the left and 46 on the right,
+  and the largest is 87. The frames at 46.9-47.3 s and 56.8-57.9 s have the knees low but not the toes tucked, and the toe stays
+  at -9 to 14 degrees.
+- The foot-axis difference to the edited runs is 20 / 25, 25 / 19 and 30 / 20 degrees (left / right, subject 1 to 3), within 4
+  degrees of the 15 degree limits and of the locked toe.
+- On the labelled range the tracker distance to the label-fed reference (subject 1 / subject 2, range / hard windows) is
+  6.65 / 8.66 and 3.72 / 4.83, against 6.5 / 8.4 and 3.60 / 4.84 with the toe locked and 6.0 / 8.0 and 3.59 / 4.60 with the toe on
+  the original binding. Body-joint distance to the edited runs and the jerk of the joint positions did not change.
+
+The remaining difference of 20-30 degrees in the foot axis follows from the marker offsets, which were fitted for upright
+and squatting poses.
 
 The bundled skeletons follow these results: `ToeBase` is bound to the foot in the SOMA-77 marker set
-(`catalog/pose-models/soma77.marker-offsets.yaml`), and the toe joints are limited to 15 degrees of flexion and swing and 6
-degrees of twist in `joint_limits.yaml`. The shin twist is already locked in the bundled limits (the 90 degree twist
-above belongs to skeletons built outside the bundled layers), so it needs no change there. The ids of the bundled default
-skeletons change with their content; skeletons already stored in a session or registry keep the earlier binding and limits and
-have to be rebuilt from the marker set to get the new ones. Foot roll could also be tied to the shin or to ground contact
-with a soft prior; this has not been tried.
+(`catalog/pose-models/soma77.marker-offsets.yaml`), and the toe limits are those above (`joint_limits.yaml`). The shin twist is
+already locked in the bundled limits (the 90 degree twist above belongs to skeletons built outside the bundled layers), so it
+needs no change there. The ids of the bundled default skeletons change with their content; skeletons already stored in a session
+or registry keep the earlier binding and limits and have to be rebuilt from the marker set to get the new ones.
+
+**Open design question: the twist of the foot.** The twist of the foot about its long axis cannot be observed from the three
+nearly collinear SOMA-77 foot keypoints, whatever the binding: it stays at what the limits and the marker offsets allow.
+Options, none chosen:
+
+- a foot-contact or ground prior, which would also help against foot sliding;
+- the foot keypoints of COCO-133 as additional measurements;
+- markers on both sides of the foot in production captures;
+- the foot orientation of the per-camera body model fit.

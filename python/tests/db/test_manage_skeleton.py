@@ -363,6 +363,6 @@ def test_seed_default_skeletons_ids_are_stable(tmp_path: Path) -> None:
     conn = create_registry(tmp_path / "registry.db")
     ids = set(seed_default_skeletons(conn))
     assert ids == {
-        "81aeba675f7747fc0cb96cad7959c1ebf9e562d9fa7811cfe59b227484189923",  # Default female
-        "96ecb58f07dbebfcd0bcab09c9234fe5fc4445975db2e951b4ebd3cb78188def",  # Default male
+        "58249792529333e23f09296fe79bfde3978012d6ef9de2687774dcd2961503a7",  # Default female
+        "a98eb7e8822038336192fcecdc0ddba6702f0c78366b426f88eeec125f859244",  # Default male
     }

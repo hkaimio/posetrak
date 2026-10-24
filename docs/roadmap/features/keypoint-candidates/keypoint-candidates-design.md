@@ -959,7 +959,7 @@ where a keypoint is absent for several frames, and little elsewhere.
   number of episodes about the same and the distance to the edited run at 14.6 and 14.7 cm. The smoother lowers the residual
   of the windowed run by 7-15% (subject 1, hands 33.3 to 28.1 mm).
 
-**Candidate fixes**, none chosen and none tried beyond the checks above:
+**Candidate fixes**, with what the grid below measured of them:
 
 - A sticky choice, which keeps the previous tracklet unless the score difference exceeds a margin. Evidence: jumps and tracklet
   switches have the largest gain in R^2 and are in most episodes. Built as the sticky chain of section 10.1 and measured

@@ -63,8 +63,8 @@ default. Options:
   are the ones it was measured with.
 - `--kp-switch-penalty P` (default 0, off; `--kp-jump-box`, default 0.04): in the last round, keep the same track of a
   keypoint from frame to frame unless another one scores more than P better. On the evaluation trial it lowered the
-  tracklet switches of the picks by a fifth to a third and the jitter of arms and hands by about 3 mm, and the accuracy
-  stayed the same, so it is off by default. For less jitter, lowering `--process-noise-std` from 0.3 to 0.15 gave
+  tracklet switches of the picks by a fifth to a third and the jitter of arms and hands by about 3 mm at the same
+  accuracy, but it did not lower the number of jitter episodes, so it is off by default. For less jitter, lowering `--process-noise-std` from 0.3 to 0.15 gave
   more (arms and hands 50 to 40 mm, feet 23 to 16 mm) on the same trial without changing the accuracy.
 
 The choice adds a few seconds to a 5 s range (about 40 s to an 85 s trial); the mask options add a mask decode per

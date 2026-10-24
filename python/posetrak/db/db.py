@@ -27,12 +27,12 @@ _log = logging.getLogger(__name__)
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 19
+REGISTRY_SCHEMA_VERSION: Final[int] = 20
 
 #: Seconds a connection waits for another writer's lock before failing. The C++
 #: tracker's connections use the same value.
 BUSY_TIMEOUT_S: Final[float] = 60.0
-SESSION_SCHEMA_VERSION: Final[int] = 70
+SESSION_SCHEMA_VERSION: Final[int] = 71
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -352,6 +352,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 18
     if actual == 18:
         _migrate_registry_v18_to_v19(conn)
+        actual = 19
+    if actual == 19:
+        _migrate_registry_v19_to_v20(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -887,6 +890,32 @@ def _migrate_registry_v18_to_v19(conn: sqlite3.Connection) -> None:
     """
     _add_kp_choice_config_columns(conn)
     _set_schema_version(conn, 19)
+    conn.commit()
+
+
+_KP_STICKY_CONFIG_COLUMNS = (
+    ("kp_choice_switch_penalty", "REAL"),
+    ("kp_choice_jump_box", "REAL"),
+)
+
+
+def _add_kp_sticky_config_columns(conn: sqlite3.Connection) -> None:
+    """Add the switch penalty and jump threshold of the windowed choice to tracker_configs where they are missing."""
+    existing = _tracker_config_columns(conn)
+    for column, sql_type in _KP_STICKY_CONFIG_COLUMNS:
+        if column not in existing:
+            conn.execute(f"ALTER TABLE tracker_configs ADD COLUMN {column} {sql_type}")
+
+
+def _migrate_registry_v19_to_v20(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 19 to 20.
+
+    v20 adds the tracker_configs columns kp_choice_switch_penalty and kp_choice_jump_box (the sticky chain of the
+    windowed choice), mirroring the session schema v70->v71 change. A configuration from before keeps NULL, which
+    means no penalty.
+    """
+    _add_kp_sticky_config_columns(conn)
+    _set_schema_version(conn, 20)
     conn.commit()
 
 
@@ -2255,6 +2284,17 @@ def _migrate_session_v68_to_v69(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v70_to_v71(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 70 to 71.
+
+    v71 adds the tracker_configs columns kp_choice_switch_penalty and kp_choice_jump_box (mirroring registry
+    v19->v20). A configuration from before keeps NULL, which means no penalty.
+    """
+    _add_kp_sticky_config_columns(conn)
+    _set_schema_version(conn, 71)
+    conn.commit()
+
+
 def _migrate_session_v69_to_v70(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 69 to 70.
 
@@ -2668,6 +2708,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 69
     if actual == 69:
         _migrate_session_v69_to_v70(conn)
+        actual = 70
+    if actual == 70:
+        _migrate_session_v70_to_v71(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

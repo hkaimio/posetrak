@@ -234,6 +234,8 @@ def _window_choice_changes(
     mask_window: float | None,
     mask_classes: str | None,
     strict_classes: str | None = None,
+    switch_penalty: float | None = None,
+    jump_box: float | None = None,
 ) -> dict[str, float | int | str]:
     """The tracker_configs columns the windowed-choice options of ``track run`` set (only those given)."""
     import json
@@ -246,7 +248,8 @@ def _window_choice_changes(
         ("kp_choice_gamma", gamma), ("kp_choice_rounds", rounds), ("kp_strict_filter_window_frames", strict_window),
         ("kp_strict_filter_min_fraction", strict_min_fraction), ("kp_mask_term_weight", mask_weight),
         ("kp_mask_term_window_s", mask_window), ("kp_mask_term_classes", mask_classes),
-        ("kp_strict_filter_classes", strict_classes),
+        ("kp_strict_filter_classes", strict_classes), ("kp_choice_switch_penalty", switch_penalty),
+        ("kp_choice_jump_box", jump_box),
     ):
         if value is not None:
             changes[column] = value
@@ -365,6 +368,8 @@ def _apply_assignment_options(
 @click.option("--kp-strict-window", "kp_strict_window", default=None, type=int, help="With --kp-strict-filter: half width (video frames) of the window. Default: the base config's, else 10.")
 @click.option("--kp-strict-min-fraction", "kp_strict_min_fraction", default=None, type=float, help="With --kp-strict-filter: smallest share of the detections that must lie on the mask. Default: the base config's, else 0.5.")
 @click.option("--kp-strict-classes", "kp_strict_classes", default=None, help="With --kp-strict-filter: comma-separated keypoint classes the filter applies to (body, hands, feet). Default: the base config's, else body.")
+@click.option("--kp-switch-penalty", "kp_switch_penalty", default=None, type=float, help="With --kp-choice window: score lost by a change of candidate (another tracklet, or a jump) between consecutive frames in the chain of picks; 0 = every frame takes its best score on its own. Default: the base config's, else 0.")
+@click.option("--kp-jump-box", "kp_jump_box", default=None, type=float, help="With --kp-switch-penalty: box heights between consecutive frames above which a move of the pick is a change. Default: the base config's, else 0.04.")
 @click.option("--kp-mask-weight", "kp_mask_weight", default=None, type=float, help="With --kp-choice window: weight of the soft mask term in the score (+1 on the person's mask, -1 on another person's; needs --seg-run). Default: the base config's, else 0 (off).")
 @click.option("--kp-mask-window", "kp_mask_window", default=None, type=float, help="With --kp-mask-weight: half width (s) of the window the mask term is averaged over. Default: the base config's, else 2.0.")
 @click.option("--kp-mask-classes", "kp_mask_classes", default=None, help="With --kp-mask-weight: comma-separated keypoint classes the term applies to (body, hands, feet). Default: the base config's, else body.")
@@ -427,6 +432,8 @@ def cmd_run(
     kp_mask_window: float | None,
     kp_mask_classes: str | None,
     kp_strict_classes: str | None,
+    kp_switch_penalty: float | None,
+    kp_jump_box: float | None,
     strict_mask: bool,
     mask_min_fraction: float | None,
     mask_window: int | None,
@@ -541,7 +548,8 @@ def cmd_run(
         kp_choice=kp_choice, support_window=kp_support_window, delta=kp_delta, beta=kp_beta, gamma=kp_gamma,
         rounds=kp_rounds, skip_cameras=kp_skip_cameras, sequence_cameras=seq_cameras, strict_filter=kp_strict_filter,
         strict_window=kp_strict_window, strict_min_fraction=kp_strict_min_fraction, mask_weight=kp_mask_weight,
-        mask_window=kp_mask_window, mask_classes=kp_mask_classes, strict_classes=kp_strict_classes)
+        mask_window=kp_mask_window, mask_classes=kp_mask_classes, strict_classes=kp_strict_classes,
+        switch_penalty=kp_switch_penalty, jump_box=kp_jump_box)
     _apply_assignment_options(
         conn, config_id, candidates=candidates, strict_mask=strict_mask, mask_min_fraction=mask_min_fraction,
         mask_window=mask_window, multi_view_agreement=multi_view_agreement, agreement_px=agreement_px,

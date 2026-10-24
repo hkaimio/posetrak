@@ -54,6 +54,11 @@ struct KeypointChoiceConfig {
     double gamma =
         0.2;  ///< Weight of the heatmap peak (the stored peak over the model's confidence scale).
     int rounds = 3;
+    /// Score lost by a change of candidate (another tracklet, or a jump) between consecutive frames
+    /// in the chain the last round picks; 0 = every frame takes its best score on its own.
+    double switch_penalty = 0.0;
+    /// Box heights per frame above which a move of the pick is a change.
+    double jump_box = 0.04;
     /// Camera ids (Camera::id()) that take no part: they keep their fixed observations.
     std::vector<int> skip_camera_ids;
     /// Remove candidates whose tracklet mostly lies off the person's own mask (needs masks).

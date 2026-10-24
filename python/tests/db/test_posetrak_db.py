@@ -1239,11 +1239,29 @@ def test_migrate_adds_the_window_choice_settings_and_the_picks_table() -> None:
         conn.close()
 
 
+def test_migrate_adds_the_sticky_choice_settings() -> None:
+    """Registry v19->v20 and session v70->v71 add the switch penalty and jump threshold, repeatably."""
+    import sqlite3
+
+    from posetrak.db.db import _migrate_registry_v19_to_v20, _migrate_session_v70_to_v71
+
+    for migrate, version in ((_migrate_registry_v19_to_v20, 20), (_migrate_session_v70_to_v71, 71)):
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE tracker_configs (id TEXT PRIMARY KEY)")
+        migrate(conn)
+        migrate(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tracker_configs)")}
+        assert {"kp_choice_switch_penalty", "kp_choice_jump_box"} <= cols
+        assert get_schema_version(conn) == version
+        conn.close()
+
+
 def test_fresh_databases_hold_the_window_choice_columns(tmp_path: Path) -> None:
     """A new registry has the settings in tracker_configs; a new session has the picks table with the migration's columns."""
     registry = create_registry(tmp_path / "reg.db")
     cols = {r[1] for r in registry.execute("PRAGMA table_info(tracker_configs)")}
-    assert {"kp_candidate_choice", "kp_strict_filter", "kp_mask_term_classes"} <= cols
+    assert {"kp_candidate_choice", "kp_strict_filter", "kp_mask_term_classes", "kp_choice_switch_penalty",
+            "kp_choice_jump_box"} <= cols
     registry.close()
     session = create_session(tmp_path / "ses.db")
     picks = [r[1] for r in session.execute("PRAGMA table_info(tracking_kp_picks)")]

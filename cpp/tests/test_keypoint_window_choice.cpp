@@ -279,3 +279,101 @@ TEST_CASE("keypoint choice: consensus flags the candidates that triangulate toge
     for (int c = 0; c < 4; ++c)
         CHECK(w.candidates()[static_cast<size_t>(w.pick(c, 0, 1))].rank == 1);
 }
+
+namespace {
+
+/// Keypoint 2 (no neighbours, one camera): its score is 0.5 plus the peak, so the peaks decide.
+/// `peak1(f)` and `peak2(f)` give the peaks of the two tracklets, a negative value leaves the
+/// candidate out. Frames run from `first` to `last`.
+template <class P1, class P2>
+WindowChoice sticky_run(int first, int last, double penalty, P1 peak1, P2 peak2,
+                        std::vector<FixedPick> fixed = {}) {
+    auto in = make_input(last - first + 1, 3);
+    for (int f = first; f <= last; ++f) {
+        if (peak1(f) >= 0)
+            in.candidates.push_back(
+                cand(0, 2, f - first, 100, 200, 1, 0, static_cast<float>(peak1(f))));
+        if (peak2(f) >= 0)
+            in.candidates.push_back(
+                cand(0, 2, f - first, 300, 200, 2, 1, static_cast<float>(peak2(f))));
+    }
+    for (auto& fp : fixed) {
+        fp.frame -= first;
+        in.fixed.push_back(fp);
+    }
+    auto s = plain();
+    s.gamma = 1.0;
+    s.switch_penalty = penalty;
+    WindowChoice w(std::move(in), s);
+    w.run();
+    return w;
+}
+
+}  // namespace
+
+TEST_CASE("keypoint choice: a one-frame switch to a slightly better candidate is removed",
+          "[kpchoice][sticky]") {
+    auto p1 = [](int) { return 0.5; };
+    auto p2 = [](int f) { return f == 5 ? 0.6 : 0.1; };
+    auto off = sticky_run(0, 11, 0.0, p1, p2);
+    auto on = sticky_run(0, 11, 0.5, p1, p2);
+    CHECK(picked_tracklet(off, 0, 2, 5) == 2);
+    for (int f = 0; f < 12; ++f)
+        CHECK(picked_tracklet(on, 0, 2, f) == 1);
+}
+
+TEST_CASE("keypoint choice: a lasting change to a clearly better candidate is kept",
+          "[kpchoice][sticky]") {
+    auto p1 = [](int f) { return f < 10 ? 0.6 : 0.3; };
+    auto p2 = [](int f) { return f < 10 ? 0.3 : 0.9; };
+    auto on = sticky_run(0, 19, 0.5, p1, p2);
+    for (int f = 0; f < 20; ++f)
+        CHECK(picked_tracklet(on, 0, 2, f) == (f < 10 ? 1 : 2));
+}
+
+TEST_CASE("keypoint choice: an assigned tracklet wins whatever the switch penalty",
+          "[kpchoice][sticky]") {
+    auto p1 = [](int) { return 0.9; };
+    auto p2 = [](int) { return 0.05; };
+    auto on = sticky_run(0, 9, 5.0, p1, p2, {{0, 2, 4, 2}, {0, 2, 5, 2}});
+    CHECK(picked_tracklet(on, 0, 2, 4) == 2);
+    CHECK(picked_tracklet(on, 0, 2, 5) == 2);
+}
+
+TEST_CASE("keypoint choice: a jump of the pick is a change, a gap costs nothing",
+          "[kpchoice][sticky]") {
+    // One unlinked candidate per frame; at frame 6 a better one 20 box heights away, and frames
+    // 9-10 have no candidate.
+    int const n = 14;
+    auto in = make_input(n, 3);
+    for (int f = 0; f < n; ++f) {
+        if (f == 9 || f == 10)
+            continue;
+        in.candidates.push_back(cand(0, 2, f, 100 + f, 200, -1, 0, 0.5f));
+        if (f == 6)
+            in.candidates.push_back(cand(0, 2, f, 2100, 200, -1, 1, 0.6f));
+    }
+    auto s = plain();
+    s.gamma = 1.0;
+    s.switch_penalty = 0.5;
+    WindowChoice w(std::move(in), s);
+    w.run();
+    CHECK(w.candidates()[static_cast<size_t>(w.pick(0, 2, 6))].x < 200.f);
+    CHECK(w.pick(0, 2, 9) < 0);
+    CHECK(w.pick(0, 2, 10) < 0);
+    CHECK(w.pick(0, 2, 11) >= 0);
+}
+
+TEST_CASE("keypoint choice: the sticky result does not depend on where the window starts",
+          "[kpchoice][sticky]") {
+    auto p1 = [](int f) { return f < 20 ? 0.6 : 0.2; };
+    auto p2 = [](int f) { return f == 12 ? 0.8 : (f < 20 ? 0.3 : 0.9); };
+    auto full = sticky_run(0, 39, 0.5, p1, p2);
+    for (int first : {3, 7, 11}) {
+        auto part = sticky_run(first, 39, 0.5, p1, p2);
+        for (int f = first; f < 40; ++f)
+            CHECK(picked_tracklet(part, 0, 2, f - first) == picked_tracklet(full, 0, 2, f));
+    }
+    CHECK(picked_tracklet(full, 0, 2, 12) == 1);
+    CHECK(picked_tracklet(full, 0, 2, 25) == 2);
+}

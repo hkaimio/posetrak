@@ -233,7 +233,8 @@ static void create_fixture_db() {
             kp_choice_beta REAL, kp_choice_gamma REAL, kp_choice_rounds INTEGER,
             kp_choice_skip_camera_ids TEXT, kp_strict_filter INTEGER,
             kp_strict_filter_window_frames INTEGER, kp_strict_filter_min_fraction REAL,
-            kp_mask_term_weight REAL, kp_mask_term_window_s REAL, kp_mask_term_classes TEXT, kp_strict_filter_classes TEXT
+            kp_mask_term_weight REAL, kp_mask_term_window_s REAL, kp_mask_term_classes TEXT, kp_strict_filter_classes TEXT,
+            kp_choice_switch_penalty REAL, kp_choice_jump_box REAL
         );
     )");
 
@@ -442,9 +443,10 @@ static void create_fixture_db() {
              "kp_candidate_choice,kp_choice_support_window_s,kp_choice_delta,kp_choice_beta,"
              "kp_choice_gamma,kp_choice_rounds,kp_choice_skip_camera_ids,kp_strict_filter,"
              "kp_strict_filter_window_frames,kp_strict_filter_min_fraction,kp_mask_term_weight,"
-             "kp_mask_term_window_s,kp_mask_term_classes,kp_strict_filter_classes) "
+             "kp_mask_term_window_s,kp_mask_term_classes,kp_strict_filter_classes,"
+             "kp_choice_switch_penalty,kp_choice_jump_box) "
              "VALUES ('tc_win','window','2024-01-01',120.0,1,'window',1.5,0.5,0.4,0.1,2,'[3,4]',"
-             "1,8,0.6,0.3,2.5,'body,feet','body,hands');");
+             "1,8,0.6,0.3,2.5,'body,feet','body,hands',0.7,0.06);");
 
     // Pose observation sequence
     exec_sql(db,
@@ -973,6 +975,8 @@ TEST_CASE("SessionReader load_tracker_config reads the windowed choice settings"
     REQUIRE(off.mask_term_window_s == Catch::Approx(2.0));
     REQUIRE(off.mask_term_classes == "body");
     REQUIRE(off.strict_filter_classes == "body");
+    REQUIRE(off.switch_penalty == 0.0);
+    REQUIRE(off.jump_box == Catch::Approx(0.04));
 
     auto const& on = reader.load_tracker_config("tc_win").tracker.kp_choice;
     REQUIRE(on.window);
@@ -989,6 +993,8 @@ TEST_CASE("SessionReader load_tracker_config reads the windowed choice settings"
     REQUIRE(on.mask_term_window_s == Catch::Approx(2.5));
     REQUIRE(on.mask_term_classes == "body,feet");
     REQUIRE(on.strict_filter_classes == "body,hands");
+    REQUIRE(on.switch_penalty == Catch::Approx(0.7));
+    REQUIRE(on.jump_box == Catch::Approx(0.06));
 }
 
 TEST_CASE("SessionReader load_sequence_info", "[session_reader]") {

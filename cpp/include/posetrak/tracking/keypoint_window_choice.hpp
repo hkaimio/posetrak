@@ -28,6 +28,13 @@
  * that continues the previous frame's tracklet, else the first. A keypoint-frame without a
  * candidate (none recorded, rejected, or removed by the strict mask filter) has no pick.
  *
+ * The last round takes the picks of a keypoint in a camera as the chain of candidates that
+ * maximises the sum of the scores minus `switch_penalty` for each change between consecutive
+ * frames. It is a Viterbi search over both directions in time, so the result does not depend on
+ * where the window starts. A change is a different tracklet or a move of more than `jump_box` box
+ * heights; a frame without a candidate breaks the chain and costs nothing. With a penalty of 0
+ * every frame takes its best score on its own.
+ *
  * The class has no database or tracker dependency: the caller loads the candidates, fills in
  * undistorted positions and mask labels, and turns the picks into observations.
  */
@@ -106,6 +113,9 @@ struct Settings {
     double gamma = 0.2;             ///< Weight of the peak.
     double mask_weight = 0.0;       ///< m: weight of the mask term; 0 = off.
     int rounds = 3;
+    double switch_penalty = 0.0;  ///< Score lost by a change of candidate between frames; 0 = off.
+    double jump_box =
+        0.04;  ///< Box heights between consecutive frames above which a move is a change.
     double epipolar_threshold = 0.04;  ///< Box heights within which a pick fully supports.
     double decay = 0.05;               ///< Box heights over which support decays beyond a limit.
     double sync_tolerance_s =
@@ -159,6 +169,10 @@ class WindowChoice {
                frame;
     }
     void build_index();
+    using ScoredFrames = std::vector<std::vector<std::pair<int, double>>>;
+    std::vector<int> best_per_frame(ScoredFrames const& scored) const;
+    std::vector<int> best_chain(ScoredFrames const& scored, std::vector<Frame> const& frames,
+                                double penalty, double jump_box) const;
     std::vector<int> start_picks() const;
 
     Input input_;

@@ -100,6 +100,9 @@ def run_tracker(
     seg_mask_label: int | None = None,
     seg_revision: int | None = None,
     tracklet_assignments_path: Path | None = None,
+    kp_choice_model_path: Path | None = None,
+    kp_confidence_scale: float | None = None,
+    kp_choice_dump_path: Path | None = None,
     trace_assignment_steps: tuple[int, int] | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> TrackerResult:
@@ -149,6 +152,14 @@ def run_tracker(
         pin the newest closed revision at its start; callers that want to know it resolve it
         themselves (``posetrak.db.seg_revisions.newest_closed_revision``) and pass it. The binary
         records it in ``tracking_run_persons.seg_revision``.
+    kp_choice_model_path:
+        Choice model file (``posetrak.detection.kp_choice_model``) for the windowed choice of keypoint candidates:
+        the pose model's neighbour limits and keypoint classes (``--kp-choice-model``).
+    kp_confidence_scale:
+        The pose model's confidence scale (``--kp-confidence-scale``); the binary assumes 5.0 (SOMA-77) without it.
+    kp_choice_dump_path:
+        CSV file the binary writes every keypoint candidate of the windowed choice to, with its consensus flag and
+        whether it was picked (``--kp-choice-dump``, diagnostics).
     on_progress:
         Callback invoked for each non-empty output line. Called from whichever
         thread calls ``run_tracker()``.
@@ -182,6 +193,12 @@ def run_tracker(
             args += ["--seg-revision", str(seg_revision)]
     if tracklet_assignments_path is not None:
         args += ["--tracklet-assignments", str(tracklet_assignments_path)]
+    if kp_choice_model_path is not None:
+        args += ["--kp-choice-model", str(kp_choice_model_path)]
+    if kp_confidence_scale is not None:
+        args += ["--kp-confidence-scale", str(kp_confidence_scale)]
+    if kp_choice_dump_path is not None:
+        args += ["--kp-choice-dump", str(kp_choice_dump_path)]
     if trace_assignment_steps is not None:
         args += [
             "--trace-assignment-start", str(trace_assignment_steps[0]),

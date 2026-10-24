@@ -14,6 +14,7 @@
 #include <sqlite3.h>
 
 #include <chrono>
+#include <cstdint>
 #include <map>
 #include <string>
 #include <tuple>
@@ -25,6 +26,21 @@ namespace posetrak {
 ///
 /// Creates a tracking_runs row (status 'running') on construction and batches tracking_results
 /// inserts for efficiency. Call flush() (or let the destructor do it) when done.
+/// @brief The picks of the windowed choice of keypoint candidates for one camera: the arrays
+/// are those of the tracking_kp_picks columns of the same names.
+struct KeypointPicks {
+    std::string camera_instance_id;
+    int n_frames = 0;
+    int n_keypoints = 0;
+    std::vector<std::int32_t> video_frames;  ///< [n_frames]
+    std::vector<std::int32_t>
+        tracklet_ids;                ///< [n_frames * n_keypoints]; -1 no pick, -2 unlinked pick
+    std::vector<std::int8_t> ranks;  ///< [n_frames * n_keypoints]; -1 no pick
+    long n_candidate_keypoint_frames = 0;
+    long n_filter_emptied = 0;
+    long n_picked = 0;
+};
+
 class ResultWriter {
    public:
     /// @brief Open db_path read-write and create a tracking_runs row.
@@ -158,6 +174,10 @@ class ResultWriter {
     /// @param step Tracker step index the entries were captured on
     /// @param entries One row per (candidate, slot) pair costed this step
     void write_assignment_trace(int step, std::vector<AssignmentTraceEntry> const& entries);
+
+    /// @brief Store the keypoint candidates a windowed choice picked for one camera
+    /// (tracking_kp_picks, one row per run, person and camera; replaces an earlier row).
+    void write_kp_picks(KeypointPicks const& picks);
 
     /// @brief Insert or update a tracking_run_stages row's status (upsert).
     ///

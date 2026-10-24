@@ -8,6 +8,7 @@
 #include <posetrak/core/config.hpp>
 #include <posetrak/core/observation.hpp>
 #include <posetrak/core/skeleton.hpp>
+#include <posetrak/db/blob_codec.hpp>
 
 #include <sqlite3.h>
 
@@ -133,6 +134,53 @@ struct KeypointCandidates {
     /// Skeleton marker index -> keypoint_idx of the candidates it takes; the markers of the body
     /// pose model that have candidates in the sequence.
     std::unordered_map<int, int> marker_keypoint;
+};
+
+/// @brief Keypoint rows that take the place of the stored body row of a (camera, frame) when
+/// load_observations() builds the frame's observations: the windowed choice of keypoint candidates
+/// hands over the candidate it picked for each keypoint, so that everything built from the row
+/// (the positions, the child-minus-parent pairs, the hand overlays' base) comes from the picks.
+struct KeypointRowOverrides {
+    /// camera_instance_id -> video_frame -> one entry per keypoint of the primary row: distorted
+    /// pixels and confidence (0 = no pick, the keypoint gives no observation).
+    std::unordered_map<std::string, std::unordered_map<int, std::vector<db::Keypoint>>> rows;
+};
+
+/// @brief One frame of a camera that holds keypoint candidates of the person.
+struct KeypointChoiceFrame {
+    int video_frame = 0;
+    double timestamp = 0.0;   ///< Seconds on the capture timeline.
+    double crop_scale = 1.0;  ///< Model input pixels to frame pixels of the person's crop.
+};
+
+/// @brief The candidates of one camera.
+struct KeypointChoiceCamera {
+    int camera_id = 0;                        ///< Camera::id().
+    std::string camera_instance_id;           ///< camera_instances.id, for the stored picks.
+    std::vector<KeypointChoiceFrame> frames;  ///< Ascending in video frame.
+};
+
+/// @brief One heatmap maximum of the person, as stored.
+struct KeypointChoiceRow {
+    std::int32_t camera = 0;  ///< Index into KeypointChoiceData::cameras.
+    std::int32_t frame = 0;   ///< Index into that camera's frames.
+    std::int32_t keypoint = 0;
+    std::int32_t rank = 0;
+    std::int32_t tracklet_id = -1;
+    float x = 0.f, y = 0.f;    ///< Distorted pixels.
+    float ux = 0.f, uy = 0.f;  ///< Undistorted pixels.
+    float peak = 0.f;          ///< As stored in the sequence (scaled like the body confidence).
+};
+
+/// @brief All keypoint candidates of a person in a time window, for the windowed choice.
+struct KeypointChoiceData {
+    /// Skeleton marker index -> keypoint_idx, for the markers whose landmark the manifest names.
+    std::unordered_map<int, int> marker_keypoint;
+    /// Per keypoint_idx of the manifest (width = highest index + 1): the qualified landmark
+    /// ("soma77:Hips"), empty for an index the manifest does not name.
+    std::vector<std::string> keypoint_landmark;
+    std::vector<KeypointChoiceCamera> cameras;
+    std::vector<KeypointChoiceRow> candidates;
 };
 
 /// @brief Reads tracking data from a per-session SQLite database
@@ -274,6 +322,8 @@ class SessionReader {
     /// @param window_end_s Load only observations with timestamp < this (default: all). A caller
     ///   that tracks a time range passes the range plus a margin: the observations of a long
     ///   sequence are the largest part of the tracker's memory otherwise.
+    /// @param row_overrides Rows that replace the stored primary row of a (camera, frame) before
+    ///   the observations are built; null: the stored rows.
     /// @return ObservationSet ready for the tracker
     ObservationSet
     load_observations(std::string const& sequence_id, std::map<std::string, Camera> const& cameras,
@@ -284,7 +334,8 @@ class SessionReader {
                       std::vector<std::string> const& confidence_threshold_marker_names = {},
                       double confidence_threshold_override = 0.0,
                       double window_start_s = -std::numeric_limits<double>::infinity(),
-                      double window_end_s = std::numeric_limits<double>::infinity());
+                      double window_end_s = std::numeric_limits<double>::infinity(),
+                      KeypointRowOverrides const* row_overrides = nullptr);
 
     /// @brief Load anonymous reflective-dot candidates for a sequence.
     ///
@@ -327,6 +378,21 @@ class SessionReader {
                              double min_confidence = 0.1, int person_id = 0,
                              double window_start_s = -std::numeric_limits<double>::infinity(),
                              double window_end_s = std::numeric_limits<double>::infinity());
+
+    /// @brief Load every keypoint candidate of a person in a time window, for the windowed choice
+    /// (keypoint_window_choice.hpp). Unlike load_keypoint_candidates() it keeps the keypoints no
+    /// marker is bound to, because they support the picks of their neighbours, and it keeps
+    /// candidates of any peak.
+    ///
+    /// @param person_id Person index within the sequence.
+    /// @param window_start_s, window_end_s Load only rows with timestamp in [start, end).
+    /// @return Empty (no cameras) when the sequence holds no candidates.
+    KeypointChoiceData
+    load_keypoint_choice_data(std::string const& sequence_id,
+                              std::map<std::string, Camera> const& cameras,
+                              Skeleton const& skeleton, int person_id = 0,
+                              double window_start_s = -std::numeric_limits<double>::infinity(),
+                              double window_end_s = std::numeric_limits<double>::infinity());
 
    private:
     /// @brief Read pose_observation_sequences.pixels_are_undistorted for sequence_id.

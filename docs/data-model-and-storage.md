@@ -368,6 +368,15 @@ further columns set how the tracker chooses among them: `kp_candidate_peak_weigh
 peak in its assignment cost) and `kp_candidate_tracklet_multiplier` (preference for the candidate that continues
 the tracklet chosen for the same keypoint on the previous step); NULL means off for both.
 
+`tracker_configs.kp_candidate_choice` selects how the candidates are chosen: `'step'` (NULL) lets the tracker's
+prediction choose at each step; `'window'` chooses over the tracked range before the first step, from the
+candidates, the other cameras, the skeleton neighbours and the masks alone, and feeds the picks to the filter in place
+of the stored keypoints. The `kp_choice_*`, `kp_strict_filter*` and `kp_mask_term_*` columns hold its settings (see the
+schema file and `docs/roadmap/features/keypoint-candidates/keypoint-candidates-design.md` section 10.5). A window
+run stores what it picked in `tracking_kp_picks`, one row per run, person and camera: the tracklet id and rank of the
+picked candidate for every keypoint of every frame, with the counts of keypoint-frames that had a candidate, were
+emptied by the strict mask filter and were picked.
+
 ### Pose blob extensibility: the keypoint manifest
 A `PoseObservation.kp_blob` has its keypoint count and ordering named by a per-source
 manifest, so the blob is indexed by `keypoint_idx` and the name of the slot rather than by

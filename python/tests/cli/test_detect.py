@@ -405,6 +405,28 @@ class TestDetectRunSegmentation:
     @patch("app.pose.finalise.auto_assign_and_finalise")
     @patch("posetrak.cli.detect.create_estimator")
     @patch("posetrak.cli.detect.DetectionPipeline")
+    def test_mask_gate_margin_reaches_the_box_source(
+        self, mock_pipeline_cls, mock_create, mock_finalise,
+        seeded_session_db_path: Path, capture_id: str, sync_id: str,
+    ) -> None:
+        seg_id = self._seed_segmentation(seeded_session_db_path, capture_id)
+        mock_finalise.return_value = ["seq1"]
+        mock_pipeline_cls.return_value.cameras = ["cam"]
+        mock_pipeline_cls.return_value.run.return_value = PipelineResult(detection_run_id="run-1")
+        margins = []
+        for extra in ([], ["--mask-gate-margin", "0"]):
+            result = _invoke(
+                ["detect", "run", "--capture", capture_id, "--sync", sync_id,
+                 "--start", "0", "--end", "1", "--segmentation", seg_id, *extra],
+                seeded_session_db_path,
+            )
+            assert result.exit_code == 0, result.output
+            margins.append(mock_pipeline_cls.call_args.kwargs["box_source"].options()["mask_gate_margin_px"])
+        assert margins == [40.0, 0.0]
+
+    @patch("app.pose.finalise.auto_assign_and_finalise")
+    @patch("posetrak.cli.detect.create_estimator")
+    @patch("posetrak.cli.detect.DetectionPipeline")
     def test_soma_segmentation_run_refines_hands_unless_told_not_to(
         self, mock_pipeline_cls, mock_create, mock_finalise, monkeypatch,
         seeded_session_db_path: Path, capture_id: str, sync_id: str,

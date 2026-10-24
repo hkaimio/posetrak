@@ -261,7 +261,45 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     kp_candidate_peak_weight          REAL,
     -- Divides the squared Mahalanobis distance of a keypoint candidate that continues the tracklet resolved into
     -- the same camera and marker on the previous step (dot_tracklet_gate_multiplier is the dot's). NULL/1.0 = off.
-    kp_candidate_tracklet_multiplier  REAL
+    kp_candidate_tracklet_multiplier  REAL,
+    -- Added in schema migration v70 (session)/v19 (registry): the choice of keypoint candidates over a time
+    -- window (see docs/roadmap/features/keypoint-candidates/keypoint-candidates-design.md, section 10). The
+    -- choice runs as a phase of the tracking run before the first filter step and feeds its picks to the filter
+    -- as the fixed observations of the markers bound to the keypoints.
+    -- 'window' = the windowed choice, 'step' = the per-step assignment of the shared dot-assignment phase;
+    -- NULL = 'step'. Only read when kp_candidates_enabled is 1.
+    kp_candidate_choice               TEXT,
+    -- Half width in seconds of the window the neighbour and cross-camera support of a candidate are averaged over
+    -- along its tracklet; NULL = 1.0.
+    kp_choice_support_window_s        REAL,
+    -- Weight of the cross-camera (epipolar) support in the score of a candidate; NULL = 1.0, 0 = off.
+    kp_choice_delta                   REAL,
+    -- Weight of the multi-camera consensus flag in the score of a candidate; NULL = 0.3.
+    kp_choice_beta                    REAL,
+    -- Weight of the heatmap peak in the score of a candidate; NULL = 0.2.
+    kp_choice_gamma                   REAL,
+    -- Number of scoring rounds, each started from the picks of the previous one; NULL = 3.
+    kp_choice_rounds                  INTEGER,
+    -- JSON array of integer camera indices (as velocity_mode_camera_ids) that take no part in the windowed
+    -- choice: their fixed observations are kept and their candidates give no support. NULL/[] = every camera takes part.
+    kp_choice_skip_camera_ids         TEXT,
+    -- Strict mask filter before the choice: 1 = a candidate is dropped unless enough of the detections of its
+    -- tracklet around its frame lie on the tracked person's own mask (needs --seg-run); NULL/0 = off.
+    kp_strict_filter                  INTEGER,
+    -- Half width of the strict filter's window in video frames, looking backwards and forwards; NULL = 10.
+    kp_strict_filter_window_frames    INTEGER,
+    -- Smallest share of the detections in that window that must lie on the person's mask; NULL = 0.5.
+    kp_strict_filter_min_fraction     REAL,
+    -- Weight of the soft mask term in the score of a candidate (+1 on the person's mask, -1 on another person's,
+    -- averaged along the tracklet); NULL/0 = off. Needs --seg-run.
+    kp_mask_term_weight               REAL,
+    -- Half width in seconds of the window the mask term is averaged over; NULL = 2.0.
+    kp_mask_term_window_s             REAL,
+    -- Comma-separated keypoint classes the mask term applies to ('body', 'hands', 'feet'; the classes of a pose
+    -- model are in its choice model file); NULL = 'body'.
+    kp_mask_term_classes              TEXT,
+    -- Comma-separated keypoint classes the strict mask filter applies to ('body', 'hands', 'feet'); NULL = 'body'.
+    kp_strict_filter_classes          TEXT
 );
 
 -- Added in schema migration v37: hierarchical body/hand solver -- per-stage

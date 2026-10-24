@@ -42,6 +42,19 @@ bool decode_seg_mask(std::string const& png_bytes, DecodedSegMask& out) {
     return true;
 }
 
+int mask_label_at(DecodedSegMask const& mask, Eigen::Vector2d const& native_pos) {
+    if (!mask.valid() || mask.native_w <= 0 || mask.native_h <= 0)
+        return -1;
+    if (native_pos.x() < 0 || native_pos.y() < 0 || native_pos.x() >= mask.native_w ||
+        native_pos.y() >= mask.native_h)
+        return -1;
+    double const scale_x = static_cast<double>(mask.mask_w) / mask.native_w;
+    double const scale_y = static_cast<double>(mask.mask_h) / mask.native_h;
+    int const x = std::min(mask.mask_w - 1, static_cast<int>(native_pos.x() * scale_x));
+    int const y = std::min(mask.mask_h - 1, static_cast<int>(native_pos.y() * scale_y));
+    return mask.labels[static_cast<size_t>(y) * mask.mask_w + x];
+}
+
 bool mask_label_present_near(DecodedSegMask const& mask, Eigen::Vector2d const& native_pos,
                              int label, double dilate_px) {
     if (label <= 0 || !mask.valid() || mask.native_w <= 0 || mask.native_h <= 0)

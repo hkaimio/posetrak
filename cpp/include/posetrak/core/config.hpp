@@ -37,6 +37,37 @@ struct VelocityNoiseScope {
 /**
  * @brief Configuration parameters for Tracker
  */
+/// @brief Settings of the windowed choice of keypoint candidates (keypoint_window_choice.hpp).
+/// Stored in the tracker_configs columns kp_candidate_choice, kp_choice_*, kp_strict_filter* and
+/// kp_mask_term_*; see docs/roadmap/features/keypoint-candidates/keypoint-candidates-design.md,
+/// section 10.
+struct KeypointChoiceConfig {
+    /// True: choose the candidates over a time window before the first filter step and feed the
+    /// picks to the filter as fixed observations. False: the per-step assignment of the shared
+    /// dot-assignment phase. Only read when TrackerConfig::kp_candidates_enabled.
+    bool window = false;
+    /// Half width in seconds of the window the neighbour and cross-camera support are averaged
+    /// over.
+    double support_window_s = 1.0;
+    double delta = 1.0;  ///< Weight of the cross-camera support.
+    double beta = 0.3;   ///< Weight of the multi-camera consensus flag.
+    double gamma =
+        0.2;  ///< Weight of the heatmap peak (the stored peak over the model's confidence scale).
+    int rounds = 3;
+    /// Camera ids (Camera::id()) that take no part: they keep their fixed observations.
+    std::vector<int> skip_camera_ids;
+    /// Remove candidates whose tracklet mostly lies off the person's own mask (needs masks).
+    bool strict_filter = false;
+    int strict_filter_window_frames = 10;     ///< Half width in video frames.
+    double strict_filter_min_fraction = 0.5;  ///< Smallest in-mask share of the detections.
+    /// Comma-separated keypoint classes the strict filter applies to; hand and foot masks are
+    /// too thin and too often wrong in contact for it.
+    std::string strict_filter_classes = "body";
+    double mask_term_weight = 0.0;    ///< Soft mask term in the score; 0 = off (needs masks).
+    double mask_term_window_s = 2.0;  ///< Half width in seconds of its window.
+    std::string mask_term_classes = "body";  ///< Comma-separated keypoint classes it applies to.
+};
+
 struct TrackerConfig {
     // UKF parameters
     double process_noise_std = 0.1;  ///< Process noise std for angle/position DOFs
@@ -176,6 +207,10 @@ struct TrackerConfig {
     /// resolved into the same (camera, marker) slot on the previous step, like
     /// dot_tracklet_gate_multiplier does for a dot. 1.0 turns it off.
     double kp_candidate_tracklet_multiplier = 1.0;
+
+    /// Choice of the keypoint candidates over a time window instead of per step; see
+    /// KeypointChoiceConfig.
+    KeypointChoiceConfig kp_choice;
 
     // === Streak-derived dot velocity ===
     // See docs/roadmap/features/marker-based-mocap/streak-velocity-design.md §3/§4.

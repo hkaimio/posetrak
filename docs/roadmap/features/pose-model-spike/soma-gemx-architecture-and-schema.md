@@ -264,6 +264,12 @@ apply to every anonymous candidate, dots and keypoint candidates.
 | kp_candidates_enabled | INTEGER | **new, second release** **new** 0/1: use the sequence's keypoint candidates instead of its fixed body observations for the markers of that model; NULL/0 = off |
 | kp_candidate_peak_weight | REAL | **new, second release** weight of -ln(peak) in the assignment cost of a keypoint candidate (cost = squared Mahalanobis distance + ln det S - weight * ln(peak)); NULL/0 = no peak term |
 | kp_candidate_tracklet_multiplier | REAL | **new, second release** divisor of the squared Mahalanobis distance of a keypoint candidate that continues the tracklet of the same marker's previous step; NULL/1.0 = off |
+| kp_candidate_choice | TEXT | **new, second release** `'window'` (choice over a time window before the first filter step) or `'step'`; NULL = `'step'` |
+| kp_choice_support_window_s, kp_choice_delta, kp_choice_beta, kp_choice_gamma, kp_choice_rounds | REAL, REAL, REAL, REAL, INTEGER | **new, second release** settings of the windowed choice: half width of the support window (s), weights of the cross-camera support, the consensus flag and the peak, number of rounds; NULL = 1.0, 1.0, 0.3, 0.2, 3 |
+| kp_choice_skip_camera_ids | TEXT | **new, second release** JSON array of camera indices that take no part in the windowed choice and keep their fixed observations |
+| kp_strict_filter, kp_strict_filter_window_frames, kp_strict_filter_min_fraction | INTEGER, INTEGER, REAL | **new, second release** strict mask filter of the windowed choice: on/off, half window in video frames, smallest in-mask share; NULL = off, 10, 0.5 |
+| kp_strict_filter_classes | TEXT | **new, second release** keypoint classes the strict filter applies to; NULL = `body` |
+| kp_mask_term_weight, kp_mask_term_window_s, kp_mask_term_classes | REAL, REAL, TEXT | **new, second release** soft mask term of the windowed choice: weight, half window (s), comma-separated keypoint classes; NULL = off, 2.0, `body` |
 
 ### 3.10 `dot_assignment_edits` (session) — third release (rebuild)
 
@@ -297,6 +303,7 @@ The `CHECK` on `kind` is the reason for the rebuild. `dot_assignment_proposals` 
 | 67 | second | `seg_mask_revisions`; `seg_masks.revision`, nullable blob, new key; `seg_masks_latest` view | table rebuild with copy, revision 0 rows |
 | 68 | second | `tracker_configs.kp_candidates_enabled`, `kp_candidate_peak_weight`, `kp_candidate_tracklet_multiplier` (registry version 18 in step) | `ALTER TABLE ADD COLUMN` |
 | 69 | third | `dot_assignment_edits` kinds 'force', 'split', column `edit_group_id` | table rebuild with copy |
+| (stage 9, windowed choice) | second | `tracker_configs.kp_candidate_choice`, `kp_choice_*`, `kp_strict_filter*`, `kp_mask_term_*` (registry in step); table `tracking_kp_picks` | `ALTER TABLE ADD COLUMN`; `CREATE TABLE` |
 
 The version numbers are provisional and follow version 63; the order is what matters. A stage
 branch takes the next free session and registry version when it merges, after any migration that

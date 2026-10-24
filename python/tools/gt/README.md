@@ -66,6 +66,18 @@ fed with them, on a frozen evaluation set of operator labels. Its parts:
   index at the cell's left edge and the decoder now uses the cell centre: `--cell-shift` (default 0.5 cell) moves
   the file's positions to the same convention before comparing.
 
+`window-picks --detection-run RUN --sequence SEQ --run TRACKING_RUN --subject N --prototype-picks FILE` compares the
+  candidates a tracking run chose over a time window (`tracking_kp_picks`) with the prototype's picks for the same
+  settings, on the frames whose crop is the same in the run and in the prototype's candidate file. It reports the share
+  of keypoint-frames with the same candidate (picked candidates within 0.5 px, after the half-cell shift) and sorts
+  the others by what the two candidate sets allow: the prototype's pick has no counterpart among the run's candidates,
+  the run's has none among the prototype's, or both exist and the choices differ. Columns: all frames of the range,
+  the interior of the range (a second from each end left out, where the two do not average over the same window),
+  inside the hard windows, outside them. `--prototype-candidates FILE` names the candidate file the prototype's picks
+  were made from when it is not the evaluation set's (a file made from the run's own candidates compares the choice
+  alone). The prototype's picks file is made by running its cross-camera choice (`xcam.XAssign.run`) with the same
+  neighbour limits; its layout is in the subcommand's help.
+
 `track-picks --range RANGE --run SUBJECT=RUN ...` traces the candidate each used observation of a tracking run
   came from (`kp_gt.tracker_picks`: the keypoint of the marker, the sequence row nearest in time, the candidate whose
   undistorted position is nearest to the observation) and reports the share of labelled keypoint-frames, among those
@@ -74,3 +86,32 @@ fed with them, on a frozen evaluation set of operator labels. Its parts:
 
 Picks come from the strongest maximum of the candidates, or from a pose observation sequence
 (`picks --pick-sequence SUBJECT=SEQUENCE`), so a productized pipeline is scored without changing the harness.
+
+### Neighbour limits of the windowed choice
+
+The windowed choice of keypoint candidates needs the largest plausible distance between skeleton neighbours, in box
+heights (`docs/roadmap/features/keypoint-candidates/keypoint-candidates-design.md`, section 10.4).
+
+- `derive_neighbour_limits.py` computes the shipped table (`posetrak/detection/soma77_neighbour_limits.py`) from the
+  labels of a range of the evaluation set: 1.15 times the 98th percentile of the labelled distance of each pair, for
+  the pairs with more than 50 samples. The shipped table uses range 1 only, so that range 3 stays a test.
+- `estimate_neighbour_limits.py` computes the same percentile in a tracked sequence from the candidates the
+  multi-camera consensus flagged (the dump of `posetrak-tracker track --kp-choice-dump`), prints it against the
+  shipped table and writes a choice model file that `track run --kp-choice-model` takes.
+
+### Jitter of tracked motion
+
+`jitter.py` measures the high-frequency noise of the 3D joint positions of tracking runs and relates it to the keypoint
+choice and the filter (`docs/roadmap/features/keypoint-candidates/keypoint-candidates-design.md`, section 10.10; the
+metric is defined in the module's docstring). Runs are named in a JSON file `{variant: {subject: tracking run id}}`.
+
+- `measure --db DB --runs RUNS.json --out OUT.json [--reference edited] [--reference-subjects A,B] [--states auto|filtered] [--obs]`
+  prints the RMS residual (mm) and jerk per run and joint group, the episodes above the thresholds taken from the
+  reference runs, and with `--obs` the 2D residual of the used observations. `--states filtered` compares runs without
+  the smoother's effect; a reference run with filtered states only is compared fairly this way.
+- `causes --db DB --runs RUNS.json --variant NAME --measure OUT.json --out CAUSES.json` gives, per episode, the rate of each
+  event (pick jump and tracklet switch, missing observation, outlier, change in the number of cameras, NIS spike) against
+  its rate over the trial, and the variance of the jitter that the events explain beyond the motion.
+- `picks --db DB --run RUN ...` compares the 2D jitter of the picks of a windowed run with that of the strongest maxima of
+  the same keypoint-frames.
+- `synthetic` checks the metric on a smooth motion plus known noise.

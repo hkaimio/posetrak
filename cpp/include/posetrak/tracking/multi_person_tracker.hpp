@@ -141,6 +141,9 @@ struct BuildPersonContextOptions {
 struct PersonContext {
     PersonSpec spec;
 
+    /// spec.sequence_id resolved to the full id (the spec may carry a prefix).
+    std::string full_sequence_id;
+
     // Loaded once in build_person_context().
     Skeleton skeleton;
     std::map<std::string, Camera> cameras_by_name;
@@ -148,6 +151,11 @@ struct PersonContext {
     TrackerConfig tracker_config;
     double tracker_fps = 100.0;
     ObservationSet observations;
+    /// How `observations` were loaded, for a phase that loads them again with other keypoints
+    /// (run_keypoint_choice_phase()).
+    double observation_min_confidence = 0.1;
+    double observation_window_start = -std::numeric_limits<double>::infinity();
+    double observation_window_end = std::numeric_limits<double>::infinity();
     std::string session_id;
     std::string extrinsic_calibration_id;
     std::string sync_config_id;

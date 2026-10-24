@@ -40,6 +40,31 @@ independently of the other:
 - `--multi-view-agreement`: a candidate is preferred when another camera's candidate for the same keypoint
   lies on its epipolar line (`--agreement-px`, `--agreement-factor`).
 
+Instead of choosing step by step, the tracker can choose the candidates of the whole tracked range before it starts
+(`--kp-choice window`, with `--candidates`). It scores each candidate by how well it fits the picks of the
+neighbouring keypoints of the skeleton and of the other cameras, averaged along the candidate's track over one second
+on each side, and by whether several cameras agree on it, and gives the filter the best one as the keypoint's
+observation. A keypoint with no candidate left gives no observation. It does not use the filter's prediction, so an
+earlier error does not carry over into the choice, and every decision about a track made in the editor (reject, assign)
+is followed. On the evaluation trial it was better than both the strongest maxima and the per-step choice, by up to
+2 cm of mean joint distance, and it did not reach the result of the offline choice it is modelled on, so it is not the
+default. Options:
+
+- `--kp-skip-camera LABEL` (repeatable): a camera that keeps its strongest maxima and takes no part, such as a
+  wide-lens camera.
+- `--kp-strict-filter` (needs `--seg-run`; `--kp-strict-window`, `--kp-strict-min-fraction`, `--kp-strict-classes`): for the body keypoints by
+  default (the masks of hands and feet are too thin), drop a candidate unless
+  its track lies on the tracked person's mask in at least half of its detections around the frame. A keypoint left
+  without a candidate gives no observation, and the run prints the share of keypoint-frames this emptied. It needs
+  reviewed masks around the contact windows: on unreviewed masks it removes correct candidates of hidden keypoints.
+- `--kp-mask-weight W` (needs `--seg-run`; `--kp-mask-window`, `--kp-mask-classes`): prefer candidates on the person's
+  own mask and avoid those on another person's, for the body keypoints by default.
+- `--kp-support-window`, `--kp-delta`, `--kp-beta`, `--kp-gamma`, `--kp-rounds`: the weights of the choice; the defaults
+  are the ones it was measured with.
+
+The choice adds a few seconds to a 5 s range (about 40 s to an 85 s trial); the mask options add a mask decode per
+camera and frame (about 5 ms each, 4 minutes for an 85 s trial and five cameras). The picks are stored with the run.
+
 A candidate's cost is its distance to the prediction plus the log-determinant of the covariance it implies, so a
 weak maximum, which implies a wide covariance, does not win on distance alone. `--kp-peak-weight` adds a reward for
 a high peak (default 0, off) and `--kp-tracklet-multiplier` a preference for the candidate that continues the track

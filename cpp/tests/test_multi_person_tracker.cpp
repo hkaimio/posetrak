@@ -241,7 +241,13 @@ void create_fixture_db(fs::path const& path, int num_frames, double dt) {
             active_joint_groups TEXT,
             kp_candidates_enabled INTEGER,
             kp_candidate_peak_weight REAL,
-            kp_candidate_tracklet_multiplier REAL
+            kp_candidate_tracklet_multiplier REAL,
+            kp_candidate_choice TEXT, kp_choice_support_window_s REAL, kp_choice_delta REAL,
+            kp_choice_beta REAL, kp_choice_gamma REAL, kp_choice_rounds INTEGER,
+            kp_choice_skip_camera_ids TEXT, kp_strict_filter INTEGER,
+            kp_strict_filter_window_frames INTEGER, kp_strict_filter_min_fraction REAL,
+            kp_mask_term_weight REAL, kp_mask_term_window_s REAL, kp_mask_term_classes TEXT,
+            kp_strict_filter_classes TEXT
         );
     )");
     exec_sql(db, R"(

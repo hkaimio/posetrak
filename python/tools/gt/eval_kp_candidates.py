@@ -21,6 +21,8 @@ pose sequence), the within-3%-of-box-height share, the same-candidate share, the
 pick and the false picks on not-visible labels, inside the hard windows and outside them.
 ``tracker`` is the label-fed comparison: body-joint distance of runs to the reference run.
 ``events`` is the failure-event comparison of two run groups.
+``window-picks`` compares the candidates a tracking run chose over a time window (``tracking_kp_picks``) with the
+prototype's picks for the same settings, on the frames whose crop is the same.
 ``track-picks`` traces the candidate each used observation of a tracking run came from and scores it against the
 labels of a range, next to the strongest maximum of the same keypoint-frames.
 """
@@ -113,6 +115,26 @@ def _outside_windows(rng, hard) -> list[tuple[float, float]]:
     return spans
 
 
+def same_crop_frames(conn, run: str, frames: np.ndarray, videos: list[str], subject: int, tol_px: float):
+    """Split the prototype's frames into those whose crop the detection run *run* shares and those it does not.
+
+    ``frames`` is the prototype file's frame table (camera, frame, time, crop centre x, y, crop side), ``videos`` the
+    shot video ids of its cameras. The run stores the person's box; the crop is 1.6 times its longer side. Frames
+    without a box in the run are in neither set. Returns two sets of (prototype camera index, frame).
+    """
+    same_crop, other_crop = set(), set()
+    for cam, frame, _, cx, cy, side in frames:
+        video = videos[int(cam)]
+        box = conn.execute("SELECT bbox_x, bbox_y, bbox_w, bbox_h FROM person_detections WHERE detection_run_id = ? AND "
+                           "shot_video_id = ? AND video_frame = ? AND track_id = ? AND region_type = 'full_body'",
+                           (run, video, int(frame), subject)).fetchone()
+        if box is None:
+            continue
+        near = max(abs(box[0] - cx), abs(box[1] - cy), abs(max(box[2], box[3]) * 1.6 - side)) <= tol_px
+        (same_crop if near else other_crop).add((int(cam), int(frame)))
+    return same_crop, other_crop
+
+
 def cmd_compare(args) -> int:
     """Candidates of a detection run against the prototype's candidate file of the same subject and range."""
     cfg, root, conn = load_set(), eval_root(args), open_db(args)
@@ -133,16 +155,7 @@ def cmd_compare(args) -> int:
         side = {(int(c), int(f)): s for c, f, _, _, _, s in z}
         shift = np.array([side.get((int(c), int(f)), 0.0) for c, f in zip(proto.camera, proto.frame)]) / 64 * args.cell_shift
         proto.x, proto.y = proto.x + shift, proto.y + shift
-    same_crop, other_crop = set(), set()
-    for cam, frame, _, cx, cy, side in z:
-        video = proto_videos[int(cam)]
-        box = conn.execute("SELECT bbox_x, bbox_y, bbox_w, bbox_h FROM person_detections WHERE detection_run_id = ? AND "
-                           "shot_video_id = ? AND video_frame = ? AND track_id = ? AND region_type = 'full_body'",
-                           (run, video, int(frame), subject)).fetchone()
-        if box is None:
-            continue
-        near = max(abs(box[0] - cx), abs(box[1] - cy), abs(max(box[2], box[3]) * 1.6 - side)) <= args.crop_tol_px
-        (same_crop if near else other_crop).add((int(cam), int(frame)))
+    same_crop, other_crop = same_crop_frames(conn, run, z, proto_videos, subject, args.crop_tol_px)
     print(f"{'frames':22s} {'prototype':>10s} {'run':>10s} {'prototype reproduced':>21s} {'run reproduced':>15s}")
     for label, frames in (("all common frames", None), ("same crop", same_crop), ("different crop", other_crop)):
         if frames is not None and not frames:
@@ -153,6 +166,150 @@ def cmd_compare(args) -> int:
     print(f"crops within {args.crop_tol_px} px of the prototype's: {len(same_crop)} frames, other: {len(other_crop)} frames; "
           f"tolerance {args.tol_px} px")
     return 0
+
+
+def read_window_picks(conn, run: str, person_id: int = 0) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """``tracking_kp_picks`` of a run: camera instance id -> (video frames, tracklet ids, ranks).
+
+    The two arrays are [n_frames, n_keypoints]; -1 is no pick, -2 a pick without a tracklet (rank is valid).
+    """
+    out = {}
+    for cam, n, k, frames, tracklets, ranks in conn.execute(
+            "SELECT camera_instance_id, n_frames, n_keypoints, video_frames, tracklet_ids, ranks FROM tracking_kp_picks "
+            "WHERE run_id = ? AND person_id = ?", (run, person_id)):
+        out[cam] = (np.frombuffer(frames, "<i4"), np.frombuffer(tracklets, "<i4").reshape(n, k),
+                    np.frombuffer(ranks, "i1").reshape(n, k))
+    return out
+
+
+def cmd_window_picks(args) -> int:
+    """The candidates a run chose over a time window against the prototype's picks, on the frames with the same crop.
+
+    ``--prototype-picks`` is an npz made by running the prototype's cross-camera choice with the same settings and the
+    same neighbour limits: ``cams`` (camera instance ids), ``camera``, ``frame``, ``keypoint`` (one entry per
+    keypoint-frame the prototype decided), ``x``, ``y`` (the position of the candidate it picked in the prototype
+    file's convention, NaN for no pick) and ``rank``. A keypoint-frame is the same when both picked a candidate within
+    ``--tol-px`` of each other (after ``--cell-shift``) or neither picked one. The rest are classified by what the
+    two candidate sets allow: the prototype's pick has no counterpart among the run's candidates (a data
+    difference), the run's pick has none among the prototype's, or both exist and the choices differ.
+    """
+    cfg, root, conn = load_set(), eval_root(args), open_db(args)
+    rng = cfg["ranges"][args.range]
+    subject = int(args.subject)
+    hard = [(w["t0"], w["t1"]) for w in cfg["hard_windows"]]
+    proto_path = Path(args.prototype_candidates) if args.prototype_candidates else root / rng["dir"] / f"candidates_subject{subject}.npz"
+    z = np.load(proto_path, allow_pickle=True)
+    proto_videos = [str(v) for v in z["svids"]]
+    proto_cams = [str(c) for c in z["cams"]]
+    frames_table = z["frames"]
+    time_of = {(int(c), int(f)): float(t) for c, f, t, *_ in frames_table}
+    side_of = {(int(c), int(f)): float(side) for c, f, _, _, _, side in frames_table}
+    run = conn.execute("SELECT id FROM detection_runs WHERE id LIKE ?", (args.detection_run + "%",)).fetchone()[0]
+    tracking = conn.execute("SELECT id FROM tracking_runs WHERE id LIKE ?", (args.run + "%",)).fetchone()[0]
+    same_crop, _ = same_crop_frames(conn, run, frames_table, proto_videos, subject, args.crop_tol_px)
+
+    picks = np.load(args.prototype_picks, allow_pickle=True)
+    pcam, pframe, pkp = (picks[k].astype(int) for k in ("camera", "frame", "keypoint"))
+    px, py = picks["x"].astype(float), picks["y"].astype(float)
+    prank = picks["rank"].astype(int)
+    if [str(c) for c in picks["cams"]] != proto_cams:
+        sys.exit("the prototype picks were made with a different camera list than the candidate file")
+    shift = np.array([side_of.get((c, f), 0.0) for c, f in zip(pcam, pframe)]) / 64 * args.cell_shift
+    px, py = px + shift, py + shift
+    proto_pick = {(int(c), int(f), int(k)): (x, y, r) for c, f, k, x, y, r in zip(pcam, pframe, pkp, px, py, prank)}
+
+    # The prototype's own candidates, to tell a data difference from a different choice.
+    proto_cand = kp_gt.read_candidates(proto_path)
+    cs = np.array([side_of.get((int(c), int(f)), 0.0) for c, f in zip(proto_cand.camera, proto_cand.frame)]) / 64 * args.cell_shift
+    proto_by = {}
+    for c, f, k, x, y in zip(proto_cand.camera, proto_cand.frame, proto_cand.keypoint, proto_cand.x + cs, proto_cand.y + cs):
+        proto_by.setdefault((int(c), int(f), int(k)), []).append((float(x), float(y)))
+
+    # The run's candidates and picks.
+    rows = kp_gt.read_sequence_candidates(conn, args.sequence, 0)
+    cand_by = {}
+    for cam_id, items in rows.items():
+        if cam_id not in proto_cams:
+            continue
+        c = proto_cams.index(cam_id)
+        for frame, _, table in items:
+            for kp, x, y, peak, rank, tracklet in table:
+                cand_by.setdefault((c, frame, int(kp)), []).append((float(x), float(y), int(rank), int(tracklet)))
+    run_picks = read_window_picks(conn, tracking)
+
+    def near(pos, points):
+        return any(np.hypot(pos[0] - q[0], pos[1] - q[1]) <= args.tol_px for q in points)
+
+    t0, t1 = rng["t0"], rng["t1"]
+    tallies: dict[str, dict[str, int]] = {}
+
+    def add(window: str, kind: str):
+        tallies.setdefault(window, {})
+        tallies[window][kind] = tallies[window].get(kind, 0) + 1
+
+    for cam_id, (frames, tracklets, ranks) in run_picks.items():
+        if cam_id not in proto_cams:
+            continue
+        c = proto_cams.index(cam_id)
+        for i, frame in enumerate(frames):
+            frame = int(frame)
+            if (c, frame) not in same_crop:
+                continue
+            t = time_of.get((c, frame), float("nan"))
+            if not t0 <= t <= t1:
+                continue
+            windows = ["all"]
+            if t0 + args.interior_s <= t <= t1 - args.interior_s:
+                windows.append("interior")
+            windows.append("hard" if any(a <= t <= b for a, b in hard) else "outside")
+            for kp in range(tracklets.shape[1]):
+                if (c, frame, kp) not in proto_pick:
+                    continue  # the prototype did not decide this keypoint-frame (a keypoint it does not track)
+                x, y, _ = proto_pick[(c, frame, kp)]
+                proto_has = not np.isnan(x)
+                trk, rank = int(tracklets[i, kp]), int(ranks[i, kp])
+                run_pos = None
+                if trk != -1:
+                    for cx, cy, crank, ctrk in cand_by.get((c, frame, kp), []):
+                        if crank == rank and (trk == -2 or ctrk == trk):
+                            run_pos = (cx, cy)
+                            break
+                run_has = run_pos is not None
+                if not proto_has and not run_has:
+                    kind = "neither picked"
+                elif proto_has and run_has:
+                    if np.hypot(x - run_pos[0], y - run_pos[1]) <= args.tol_px:
+                        kind = "same candidate"
+                    elif not near((x, y), cand_by.get((c, frame, kp), [])):
+                        kind = "differs: prototype's candidate is not in the run's"
+                    elif not near(run_pos, proto_by.get((c, frame, kp), [])):
+                        kind = "differs: run's candidate is not in the prototype's"
+                    else:
+                        kind = "differs: different choice"
+                elif proto_has:
+                    kind = "prototype picked, run did not"
+                else:
+                    kind = "run picked, prototype did not"
+                for w in windows:
+                    add(w, kind)
+
+    kinds = ["same candidate", "neither picked", "differs: different choice", "differs: prototype's candidate is not in the run's",
+             "differs: run's candidate is not in the prototype's", "prototype picked, run did not", "run picked, prototype did not"]
+    print(f"{len(same_crop)} frames with the same crop; picks of {args.run} against {args.prototype_picks}")
+    print(f"{'':54s}" + "".join(f"{w:>11s}" for w in ("all", "interior", "hard", "outside")))
+    for kind in kinds:
+        print(f"{kind:54s}" + "".join(f"{tallies.get(w, {}).get(kind, 0):11d}" for w in ("all", "interior", "hard", "outside")))
+    print(f"{'same, of keypoint-frames with a pick in either':54s}" + "".join(
+        f"{100 * _share(tallies.get(w, {})):10.2f}%" for w in ("all", "interior", "hard", "outside")))
+    print(f"{'same, counting neither picked':54s}" + "".join(
+        f"{100 * _share(tallies.get(w, {}), count_neither=True):10.2f}%" for w in ("all", "interior", "hard", "outside")))
+    return 0
+
+
+def _share(t: dict[str, int], count_neither: bool = False) -> float:
+    total = sum(t.values()) - (0 if count_neither else t.get("neither picked", 0))
+    same = t.get("same candidate", 0) + (t.get("neither picked", 0) if count_neither else 0)
+    return same / total if total else float("nan")
 
 
 def cmd_tracker(args) -> int:
@@ -232,6 +389,22 @@ def main(argv=None) -> int:
     q.add_argument("--cell-shift", type=float, default=0.5,
                    help="move the prototype file's positions by this share of a heatmap cell (the file has the cell "
                         "index at the cell's left edge, the decoder uses the cell centre); 0 compares them as stored")
+    q = sub.add_parser("window-picks")
+    q.add_argument("--detection-run", required=True, help="detection run (id prefix) the tracked sequence was made from")
+    q.add_argument("--sequence", required=True, help="the pose observation sequence (id) the run tracked")
+    q.add_argument("--run", required=True, help="tracking run (id prefix) that chose candidates over a time window")
+    q.add_argument("--subject", required=True, help="subject of the evaluation set; also the detection run's track id")
+    q.add_argument("--prototype-picks", required=True, help="npz of the prototype's picks (see the subcommand's help)")
+    q.add_argument("--prototype-candidates", default=None,
+                   help="candidate file the prototype's picks were made from, if not the evaluation set's file of the "
+                        "subject (a file made from the run's own candidates compares the choice alone)")
+    q.add_argument("--range", default="range3")
+    q.add_argument("--tol-px", type=float, default=0.5)
+    q.add_argument("--crop-tol-px", type=float, default=1.0)
+    q.add_argument("--cell-shift", type=float, default=0.5, help="as for compare")
+    q.add_argument("--interior-s", type=float, default=1.0,
+                   help="the 'interior' column leaves out this many seconds at each end of the range, where the run "
+                        "and the prototype do not average over the same window")
     p = sub.add_parser("picks")
     p.add_argument("--pick-sequence", action="append", default=[], metavar="SUBJECT=SEQUENCE",
                    help="score the picks of this pose observation sequence (person 0) for the subject instead of the "
@@ -250,7 +423,7 @@ def main(argv=None) -> int:
                        help="group of [tracker.*] runs in kp_eval_set.toml to score")
     args = ap.parse_args(argv)
     return {"verify": cmd_verify, "picks": cmd_picks, "tracker": cmd_tracker, "events": cmd_events,
-            "compare": cmd_compare, "track-picks": cmd_track_picks}[args.cmd](args)
+            "compare": cmd_compare, "track-picks": cmd_track_picks, "window-picks": cmd_window_picks}[args.cmd](args)
 
 
 if __name__ == "__main__":

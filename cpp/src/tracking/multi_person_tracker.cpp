@@ -246,6 +246,7 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
 
     auto ctx = std::make_unique<PersonContext>();
     ctx->spec = spec;
+    ctx->full_sequence_id = full_sequence_id;
 
     // Load skeleton
     if (!quiet) {
@@ -308,6 +309,9 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
     double const window_end = std::isnan(opts.override_end_time)
                                   ? inf
                                   : opts.override_end_time + kObservationWindowMarginS;
+    ctx->observation_min_confidence = opts.min_confidence;
+    ctx->observation_window_start = window_start;
+    ctx->observation_window_end = window_end;
     ctx->observations = reader.load_observations(
         full_sequence_id, ctx->cameras_by_name, ctx->skeleton, opts.min_confidence, spec.person_id,
         ctx->tracker_config.use_relative_observations, ctx->tracker_config.relative_min_confidence,
@@ -353,7 +357,8 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
     // Keypoint candidates (keypoint-candidates-design.md): for the markers bound to the pose model
     // of the sequence's candidates they take the place of the fixed body observations from the
     // first step after initialisation, which still uses the fixed observations.
-    if (ctx->tracker_config.kp_candidates_enabled) {
+    // With the windowed choice the candidates are loaded by run_keypoint_choice_phase() instead.
+    if (ctx->tracker_config.kp_candidates_enabled && !ctx->tracker_config.kp_choice.window) {
         auto kp = reader.load_keypoint_candidates(full_sequence_id, ctx->cameras_by_name,
                                                   ctx->skeleton, opts.min_confidence,
                                                   spec.person_id, window_start, window_end);

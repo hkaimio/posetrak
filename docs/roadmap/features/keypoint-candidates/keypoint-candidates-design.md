@@ -857,3 +857,104 @@ Options, none chosen:
 - the foot keypoints of COCO-133 as additional measurements;
 - markers on both sides of the foot in production captures;
 - the foot orientation of the per-camera body model fit.
+
+### 10.10 Jitter of the tracked motion
+
+The tracked joint positions carry high-frequency noise that shows in a rendered clip. `python/tools/gt/jitter.py` measures
+it and relates it to the events of the choice and the filter (README of `python/tools/gt/`).
+
+**Metric.** The 3D position of each body joint (joint origins, finger joints left out) is sampled at 60 Hz. The jitter is
+the residual from a Savitzky-Golay fit of order 3 over 0.2 s, divided by `sqrt(1 - h0)` (`h0` the centre coefficient of the
+filter) so that white noise of a given RMS gives that RMS back; a smooth motion plus white noise of 4 mm per axis returns
+6.94 mm in 3D against 6.93 expected (`jitter.py synthetic`). The jerk is the third derivative of a fit of order 4 over the same
+span. A time series is the RMS of the squared residual over a sliding 0.5 s (30 samples), advanced one sample at a time. An
+episode of a joint group is a run of consecutive samples above that group's threshold. The threshold is the 99th percentile of
+the series of the reference runs, pooled over the subjects: the tracker's own noise on good input then crosses it on one
+sample in a hundred by construction, and seldom for long. Fast genuine motion raises the residual of the reference runs as
+well, so an episode that the reference run of the same subject also has in the same group, within 0.25 s, is counted as
+motion and not as jitter of the run under test.
+
+**Runs compared** (43.5-66.4 s, three subjects): the windowed choice (ace2 pro outside the choice, no filter, calibration
+`b416cd21`, the ace2 configuration, the product's box path; runs `e8e1bb80`, `5dc83449`, `ad3708a3`), the prototype's
+`ace5` runs and the operator-edited runs. All use the same filter settings (process noise 0.3, measurement noise 25 px,
+outlier threshold 6, RTS smoothing on). The edited run of subject 1 has no smoothed states, so its figures are those of the
+filtered states and are higher than they would be smoothed. The thresholds come from the edited runs of subjects 2 and 3.
+Thresholds of the sliding RMS (mm): torso 31, arms 35, hands 50, legs 35, feet 67.
+
+RMS residual (mm) / RMS jerk (m/s^3) over the trial, smoothed states:
+
+| Run | Torso | Arms | Hands | Legs | Feet |
+|---|---|---|---|---|---|
+| windowed, subject 1 | 14.7 / 248 | 18.1 / 334 | 28.1 / 551 | 14.1 / 288 | 28.1 / 659 |
+| windowed, subject 2 | 11.9 / 197 | 19.5 / 407 | 37.1 / 777 | 12.3 / 230 | 21.2 / 458 |
+| windowed, subject 3 | 14.2 / 282 | 18.2 / 349 | 25.0 / 474 | 11.9 / 250 | 21.8 / 502 |
+| prototype `ace5`, subject 1 | 15.4 / 254 | 18.8 / 345 | 28.9 / 579 | 15.4 / 305 | 33.3 / 791 |
+| prototype `ace5`, subject 2 | 11.5 / 192 | 18.7 / 368 | 34.5 / 712 | 12.7 / 238 | 25.1 / 532 |
+| prototype `ace5`, subject 3 | 16.6 / 350 | 19.4 / 398 | 28.0 / 529 | 16.0 / 356 | 28.0 / 616 |
+| edited, subject 1 (filtered) | 18.1 / 370 | 22.1 / 451 | 31.5 / 615 | 20.2 / 395 | 32.0 / 654 |
+| edited, subject 2 | 9.0 / 167 | 11.1 / 217 | 18.2 / 383 | 13.2 / 264 | 27.2 / 502 |
+| edited, subject 3 | 11.3 / 229 | 13.4 / 279 | 20.2 / 431 | 14.2 / 305 | 24.2 / 536 |
+
+- The windowed run jitters as much as the prototype's run (differences of 1-4 mm) and, on the torso, legs and feet, about as
+  much as the tracker does on edited keypoints. The tracker itself on good input leaves 9-14 mm on the torso and legs and 24-27
+  mm on the feet. The arms and hands are where keypoint input matters: 1.5 to 2 times the edited runs for subjects 2 and 3 (arms
+  18-20 against 11-13 mm, hands 25-37 against 18-20 mm).
+- Over the trial the windowed run has 18 of 27 episodes that the edited run does not have. The hands of subject 2 have six
+  (4.1 s in total) and the arms of subject 2 five. The prototype's runs have the same episodes at the same places.
+
+**The reported moments.** Subject 1 at 53.2-54.4 s and 55.35-56.25 s (the two hard windows) has episodes in the torso, arms and
+hands, and at 53.8-54.3 s in the legs; the edited run has episodes at the same times, so they are not specific to the choice.
+At 42-44 s (4-6 s into the trial) subject 1's jitter stays below the thresholds. Subject 2 has no episode at 58 s (20 s into
+the trial); the windowed run, the prototype's and the edited run agree on the legs there within 6-7 cm, and the observed
+ankle positions of subject 2 stay nearly still in several cameras at 57-58.25 s, so the stall in the walk is in the data
+and not a loss of tracking.
+
+**Where it comes from.** The rate of each event inside the episodes against its rate over the trial (windowed run, over the
+markers of the joint group), and the share of the variance of the smoothed jitter that the events explain. Fast motion raises
+both, so the regression has the group's speed as its first regressor: the speed alone explains 0.45 of the variance on
+average over the subjects and groups (0.06-0.79), the speed and all events 0.85. The gain in R^2 when one event is added to
+the speed (mean over 3 subjects x 5 groups): jump of an observation from the fit of its own track (more than 12 px from the
+fit over 0.2 s) 0.31, tracklet switch of the pick 0.23, change in the number of cameras observing the marker 0.18, outlier
+rejection 0.12, NIS spike 0.04, missing observation 0.02, run of five missing observations 0.01. Of the 18 episodes the
+edited run does not have, the event rate inside the episode is at least twice the rate over the trial for jumps in 13, tracklet
+switches in 15, changes of the camera count in 12, NIS spikes in 13, outlier rejections in 10, missing observations in 5 and
+runs of missing observations in 4; every episode has at least one. The events overlap (a switch to another tracklet usually
+is a jump, and changes the camera count when a camera loses the keypoint), so the shares do not add up. Missing observations
+explain the episodes in the legs and torso of subject 1 at 53.8-54.3 s and in the hands and arms of subject 2 at 62.7-63.4 s,
+where a keypoint is absent for several frames, and little elsewhere.
+
+- The picks are smoother than the strongest maxima of the same keypoint-frames: 2D residual (all / keypoint still) 12.5 / 4.4 px
+  against 18.2 / 8.9 px for subject 1, 12.7 / 3.4 against 17.6 / 4.5 for subject 2, 9.8 / 2.2 against 14.9 / 2.8 for subject
+  3. The windowed run's observations are as noisy as the prototype's (12.9 / 4.2 against 12.5 / 4.6 px for subject 1). The
+  choice does not add noise; what remains is the noise of the keypoints themselves, a few pixels per frame, and jumps.
+- The filter settings are the same in every run. Halving the process noise (0.3 to 0.15) for subject 1 lowers the RMS residual
+  by 8-10% on the filtered states and by 7-27% on the smoothed states (hands 28.1 to 24.2 mm, feet 28.1 to 20.6 mm), leaves the
+  number of episodes about the same and the distance to the edited run at 14.6 and 14.7 cm. The smoother lowers the residual
+  of the windowed run by 7-15% (subject 1, hands 33.3 to 28.1 mm).
+
+**Candidate fixes**, none chosen and none tried beyond the checks above:
+
+- A sticky choice, which keeps the previous tracklet unless the score difference exceeds a margin. Evidence: jumps and tracklet
+  switches have the largest gain in R^2 and are in most episodes; the choice has no term for continuity apart from the
+  averaging of the support over the tracklet.
+- Lower process noise, or a noise that depends on the joint group (hands and feet are the noisiest). Evidence: the check above.
+- Smoothing of the keypoint tracks before they enter the filter, or an observation noise that grows with the distance of the
+  observation from the track's own fit. Evidence: the jump event.
+- Handling of the camera count: a keypoint that enters or leaves a camera changes the solution. Evidence: 12 of 18 episodes.
+- For runs of missing observations (62.7-63.4 s of subject 2), prediction that holds the joint's velocity damped. Evidence:
+  four episodes.
+- Better hand input. Evidence: the hands jitter 1.5 to 2 times the edited runs.
+
+**Five worst episodes of the windowed run that the edited run does not have** (ranked by the sum over the episode of the
+series' ratio to the threshold minus one; groups at the same time are one row):
+
+| Time (s) | Subject | Joints | Cause the measurement points to |
+|---|---|---|---|
+| 51.1-51.9 | 3 | forearm.L, upper_arm.L/R, head, neck, hands | jumps (7.7-8.7 times the trial rate), tracklet switches (6-7.6), outliers (4-6) |
+| 55.0-56.1 | 2 | hand.L/R, forearm.R/L | missing observations (3.4), tracklet switches (3.2-5.2), jumps (2.9-4.9) |
+| 62.7-63.4 | 2 | hand.R/L, forearm.R/L, upper_arm.R | runs of missing observations (6.2, 4.5 in the arms), missing observations (4.1) |
+| 50.4-51.4 | 2 | hand.L/R, forearm.L, upper_arm.L/R | NIS spikes (2.7), outlier rejections (2.5), jumps (3.4) |
+| 47.8-48.4 | 2 | hand.L/R | jumps (2.6), tracklet switches (2.5), outliers (2.4) |
+
+The scores of the filter classes over the whole trial, and the jitter of the runs without candidates and with the per-step
+assignment, need runs that are made separately (`trial_runs.py`); they are not part of this subsection until they exist.

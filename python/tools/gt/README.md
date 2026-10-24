@@ -98,3 +98,20 @@ heights (`docs/roadmap/features/keypoint-candidates/keypoint-candidates-design.m
 - `estimate_neighbour_limits.py` computes the same percentile in a tracked sequence from the candidates the
   multi-camera consensus flagged (the dump of `posetrak-tracker track --kp-choice-dump`), prints it against the
   shipped table and writes a choice model file that `track run --kp-choice-model` takes.
+
+### Jitter of tracked motion
+
+`jitter.py` measures the high-frequency noise of the 3D joint positions of tracking runs and relates it to the keypoint
+choice and the filter (`docs/roadmap/features/keypoint-candidates/keypoint-candidates-design.md`, section 10.10; the
+metric is defined in the module's docstring). Runs are named in a JSON file `{variant: {subject: tracking run id}}`.
+
+- `measure --db DB --runs RUNS.json --out OUT.json [--reference edited] [--reference-subjects A,B] [--states auto|filtered] [--obs]`
+  prints the RMS residual (mm) and jerk per run and joint group, the episodes above the thresholds taken from the
+  reference runs, and with `--obs` the 2D residual of the used observations. `--states filtered` compares runs without
+  the smoother's effect; a reference run with filtered states only is compared fairly this way.
+- `causes --db DB --runs RUNS.json --variant NAME --measure OUT.json --out CAUSES.json` gives, per episode, the rate of each
+  event (pick jump and tracklet switch, missing observation, outlier, change in the number of cameras, NIS spike) against
+  its rate over the trial, and the variance of the jitter that the events explain beyond the motion.
+- `picks --db DB --run RUN ...` compares the 2D jitter of the picks of a windowed run with that of the strongest maxima of
+  the same keypoint-frames.
+- `synthetic` checks the metric on a smooth motion plus known noise.

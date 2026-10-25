@@ -49,8 +49,11 @@ resume, size checking, a SHA-256 and the camera's metadata in a JSON file beside
 Matching the copied files to captures and registering them in the session (the rest of the
 collection step in the design) is not built.
 
-Not built yet: mode detection from video files, matching and registering offloaded files, the
-other camera drivers (Hero11, Insta360, Android, iPhone), node peripherals (LED rings, sync
+`posetrak-capture detect-mode <file>...` tells which registry camera and capture mode a video
+file was recorded in, from what the file states about itself (needs `exiftool`). It is
+checked on Hero13 files only, and is not yet wired into the setup wizard or the offload.
+
+Not built yet: matching and registering offloaded files, the other camera drivers (Hero11, Insta360, Android, iPhone), node peripherals (LED rings, sync
 beacon) and the Qt integration. The beacon and node firmware are developed separately in Rust.
 
 Camera priority: Hero13, then Hero11 and Insta360 Ace Pro 2, then Android, then iPhone.

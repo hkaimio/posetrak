@@ -369,21 +369,29 @@ The mode actually used is recorded per camera in `capture_events` (`camera_mode_
 
 **Mode detection from video files.** Calibration footage and any other video recorded
 outside the capture daemon must land on the right mode without the camera being connected.
-Detection is a function of the file, in the driver layer but independent of any control
-connection:
+Detection is a function of the file (`pipeline.capture.mode_detect`), independent of any
+control connection:
 
-```python
-class ModeDetector(Protocol):
-    def detect(self, probe: VideoProbeResult, modes: list[CameraMode]) -> ModeMatch: ...
-```
+- `read_video_facts(path)` reads the recording details with `exiftool`: image size, frame
+  rate, and where the file carries them make, model, serial number and field of view.
+- `detect_mode(facts, modes)` ranks the registry modes of the camera's model. Each match
+  lists the evidence that agrees and what could not be checked; only a mode for which
+  everything checked out counts as certain, and a file is assigned without asking only when
+  exactly one mode is certain.
+- `match_registry(registry, facts)` finds the registry camera by the serial number in the
+  file (the registry serial, or the end of it for a camera linked for control before its
+  serial was recorded), and takes the modes of its model; without a registered serial the
+  camera model named in the file decides.
 
-`ModeMatch` is a ranked list of candidate modes, each with a confidence and the
-evidence. Inputs are the existing `video_probe` result (container size and fps, capture
-fps, codec, make/model/serial) and any vendor metadata a detector knows how to parse
-(for GoPro the GPMF/`udta` atoms give lens, sensor mode and linear/wide flags; for
-Insta360 the proprietary trailer). A detector registers per camera make/model; the
-generic fallback matches only width, height and fps. The serial number in the metadata
-selects the camera instance. The result is used in three places:
+What the files carry decides the rules, and the findings are these. A GoPro file states its
+lens (`FieldOfView`) and the camera's full serial number in its telemetry header, and the
+metadata the camera serves over its HTTP API does not state the lens, so detection has to
+read the file. Cameras record NTSC frame rates (119.88 for a nominal 120, 239.76 for 240),
+so frame rates match within one percent. Image size and frame rate alone do not tell
+modes of the same size apart (linear and superview at 4K 120 fps look the same to them),
+which is why the lens is part of a mode. Other cameras register their own readers of what
+their files state; the generic fallback has only size and frame rate and never reaches
+certainty for a mode that states a lens. The result is used in three places:
 
 1. Collection verify (§3.5): the detected mode is compared with the commanded one;
    disagreement gives `verify_status = 'mode_mismatch'`.

@@ -298,6 +298,50 @@ def offload(config_path: Path, labels: tuple[str, ...], dest: Path, list_only: b
         click.echo(f"copied under {dest.resolve()}")
 
 
+@main.command("detect-mode")
+@click.argument("files", nargs=-1, required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.pass_obj
+def detect_mode_command(config_path: Path, files: tuple[Path, ...]) -> None:
+    """Tell which registry camera and capture mode video files were recorded in.
+
+    The camera is found by the serial number in the file, the mode by the image size, the
+    frame rate and, where the file states it, the lens. Needs exiftool on the PATH.
+    """
+    from pipeline.capture.mode_detect import ProbeError, match_registry, read_video_facts
+
+    registry = _open_registry(_load_optional_config(config_path))
+    try:
+        for path in files:
+            try:
+                found = match_registry(registry, read_video_facts(path))
+            except ProbeError as exc:
+                raise click.ClickException(str(exc)) from exc
+            facts = found.detection.facts
+            details = ", ".join(
+                x
+                for x in (
+                    f"{facts.make or ''} {facts.model or ''}".strip(),
+                    f"serial {facts.serial_number}" if facts.serial_number else "",
+                    f"{facts.width}x{facts.height} at {facts.fps:g} fps",
+                    f"lens {facts.lens}" if facts.lens else "no lens in the file",
+                    *(f"{k.replace('_', ' ')} {v}" for k, v in facts.extra.items()),
+                )
+                if x
+            )
+            click.echo(f"{path.name}: {details}")
+            click.echo(f"  camera: {found.label or 'not identified'}" + (f" ({found.model_name})" if found.model_name else ""))
+            for note in found.notes:
+                click.echo(f"  note: {note}")
+            matches = found.detection.matches
+            if not matches:
+                click.echo("  mode: none of the registered modes fits")
+            for m in matches:
+                certainty = "certain" if m.confidence >= 0.99 else f"unsure ({', '.join(m.unchecked)} not checked)"
+                click.echo(f"  mode: {m.mode.name} - {certainty}")
+    finally:
+        registry.close()
+
+
 @main.command("settings")
 def settings() -> None:
     """List the settings a capture mode can specify for a Hero13, with their allowed values.

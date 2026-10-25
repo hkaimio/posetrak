@@ -131,6 +131,12 @@ def _require(table: dict[str, Any], key: str, where: str) -> Any:
     return table[key]
 
 
+def _path(section: dict, key: str) -> Path | None:
+    """A path setting; surrounding whitespace is ignored and an empty value means unset."""
+    value = str(section.get(key) or "").strip()
+    return Path(value) if value else None
+
+
 def parse_config(data: dict[str, Any]) -> CaptureConfig:
     """Build a validated :class:`CaptureConfig` from parsed TOML.
 
@@ -143,14 +149,13 @@ def parse_config(data: dict[str, Any]) -> CaptureConfig:
     port = int(d.get("port", DEFAULT_PORT))
     if not 0 < port < 65536:
         raise ConfigError(f"daemon.port out of range: {port}")
-    session_db = d.get("session_db")
     daemon = DaemonConfig(
         host=str(d.get("host", "0.0.0.0")),
         port=port,
         token=str(d.get("token", "")),
-        session_db=Path(session_db) if session_db else None,
-        registry_db=Path(d["registry_db"]) if d.get("registry_db") else None,
-        credentials_dir=Path(d["credentials_dir"]) if d.get("credentials_dir") else None,
+        session_db=_path(d, "session_db"),
+        registry_db=_path(d, "registry_db"),
+        credentials_dir=_path(d, "credentials_dir"),
     )
 
     p = data.get("profile", {})

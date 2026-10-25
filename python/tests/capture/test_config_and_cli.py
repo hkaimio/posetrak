@@ -132,3 +132,9 @@ def test_manual_driver_lifecycle() -> None:
         DeviceState.STOPPED,
         DeviceState.OFFLINE,
     ]
+
+
+def test_path_settings_ignore_surrounding_whitespace() -> None:
+    cfg = parse_config({"daemon": {"session_db": " C:/captures/s.db ", "registry_db": "  "}})
+    assert cfg.daemon.session_db == Path("C:/captures/s.db")
+    assert cfg.daemon.registry_db is None

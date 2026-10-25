@@ -183,6 +183,24 @@ def _device_serial(registry: sqlite3.Connection, camera: RegistryCamera, serial:
 _SERIAL_HELP = "Device serial (the digits in the camera's Bluetooth name) when the camera is not linked yet."
 
 
+@main.command("settings")
+def settings() -> None:
+    """List the settings a capture mode can specify for a Hero13, with their allowed values.
+
+    These are the keys of a mode's ``capture_settings`` (``posetrak camera-mode add
+    --settings '{"lens": "linear"}'``) and of a setup's per-camera ``settings``. A
+    number as key is passed to the camera as a raw setting id with a raw option value.
+    """
+    from pipeline.capture.gopro_profile import SUPPORTED
+
+    click.echo("Hero13 (gopro_cohn):")
+    for name, choices in SUPPORTED.items():
+        click.echo(f"  {name:<12} {', '.join(str(c) for c in choices)}")
+    click.echo("  <number>     raw Open GoPro setting id, with the raw option value")
+    click.echo("Which values a camera accepts depends on the others (frame rates on the resolution, lenses on both);")
+    click.echo("a setting the camera refuses is reported when the cameras are armed.")
+
+
 @main.command("cameras")
 @click.option("--scan", "scan_s", type=float, default=6.0, show_default=True, help="Seconds to scan over Bluetooth.")
 @click.pass_obj

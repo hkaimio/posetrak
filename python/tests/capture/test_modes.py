@@ -286,3 +286,14 @@ def test_a_camera_set_by_hand_must_be_confirmed_by_the_operator(tmp_path: Path) 
     run(scenario())
     events = {e.camera_instance_id: e for e in get_capture_events(rig.session, rig.ctl.capture_id)}
     assert events["inst-phone"].camera_mode_id == "m-px"
+
+
+def test_the_settings_command_lists_the_hero13_vocabulary() -> None:
+    from click.testing import CliRunner
+
+    from pipeline.capture.cli import main
+
+    result = CliRunner().invoke(main, ["settings"])
+    assert result.exit_code == 0, result.output
+    for expected in ("resolution", "5.3K", "fps", "240", "lens", "linear", "bit_rate", "performance", "raw Open GoPro"):
+        assert expected in result.output

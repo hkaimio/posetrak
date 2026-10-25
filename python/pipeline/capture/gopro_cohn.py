@@ -129,6 +129,13 @@ class CohnEndpoint:
         return httpx.AsyncClient(base_url=self.base_url, verify=verify, headers=headers)
 
 
+def _describe(exc: Exception | None) -> str:
+    """A short reason for a failed request: the HTTP status, or the kind of error."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    return type(exc).__name__ if exc is not None else "unknown error"
+
+
 class GoProCohnDriver(CameraDriver):
     """One Hero13 controlled over COHN.
 
@@ -397,11 +404,19 @@ class GoProCohnDriver(CameraDriver):
         return files
 
     async def media_info(self, file: MediaFile) -> dict[str, Any]:
-        try:
-            return (await self._get("/gopro/media/info", {"path": file.path})).json()
-        except httpx.HTTPError:
-            logger.warning("%s: no metadata for %s", self.label, file.path)
-            return {}
+        # The documented form has the folder's slash as it is; fall back to the encoded one.
+        attempts: list[tuple[str, dict[str, Any] | None]] = [
+            (f"/gopro/media/info?path={file.path}", None),
+            ("/gopro/media/info", {"path": file.path}),
+        ]
+        error: Exception | None = None
+        for url, params in attempts:
+            try:
+                return (await self._get(url, params)).json()
+            except (httpx.HTTPError, ValueError) as exc:
+                error = exc
+        logger.warning("%s: no metadata for %s (%s)", self.label, file.path, _describe(error))
+        return {}
 
     async def download(self, file: MediaFile, dest: Path, progress: ProgressCallback | None = None) -> Downloaded:
         part = dest.with_name(dest.name + ".part")

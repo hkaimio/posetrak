@@ -81,6 +81,8 @@ class FakeGoPro:
         self.media: dict[str, tuple[bytes, int, dict]] = {}
         #: number of body bytes after which a download is cut off (once), to test resuming
         self.cut_download_at: int | None = None
+        #: "raw" or "encoded": the only spelling of the folder's slash media/info accepts (404 otherwise)
+        self.media_info_only: str | None = None
         self.remaining_video_s = 20_000
         self.battery_percent = 100
         self.system_hot = False
@@ -198,6 +200,9 @@ class FakeGoPro:
                 folders.setdefault(folder, []).append({"n": name, "cre": str(created), "mod": str(created), "s": str(len(content))})
             return self._reply(handler, 200, {"id": "1", "media": [{"d": d, "fs": fs} for d, fs in folders.items()]})
         if url.path == "/gopro/media/info":
+            spelling = "encoded" if "%2F" in handler.path.upper() else "raw"
+            if self.media_info_only not in (None, spelling):
+                return self._reply(handler, 404, {"error": "no such file"})
             entry = self.media.get(query.get("path", ""))
             if entry is None:
                 return self._reply(handler, 404, {"error": "no such file"})

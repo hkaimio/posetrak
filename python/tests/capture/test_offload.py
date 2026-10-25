@@ -57,6 +57,29 @@ def test_the_media_list_is_read(fake: FakeGoPro) -> None:
     run(go())
 
 
+@pytest.mark.parametrize("only", ["raw", "encoded"])
+def test_the_metadata_is_found_whichever_spelling_of_the_path_the_camera_takes(fake: FakeGoPro, only: str) -> None:
+    fake.media_info_only = only
+
+    async def go():
+        async with driver_for(fake) as d:
+            clip = next(f for f in await d.list_media() if f.name == "GX010001.MP4")
+            return await d.media_info(clip)
+
+    assert run(go()) == INFO_A
+
+
+def test_missing_metadata_is_reported_with_the_reason(fake: FakeGoPro, caplog) -> None:
+    async def go():
+        async with driver_for(fake) as d:
+            from pipeline.capture.devices import MediaFile
+
+            return await d.media_info(MediaFile("100GOPRO/NOPE.MP4"))
+
+    assert run(go()) == {}
+    assert "NOPE.MP4 (HTTP 404)" in caplog.text
+
+
 def test_videos_are_copied_with_a_sidecar_and_not_copied_twice(fake: FakeGoPro, tmp_path: Path) -> None:
     async def go():
         async with driver_for(fake) as d:
@@ -77,6 +100,24 @@ def test_videos_are_copied_with_a_sidecar_and_not_copied_twice(fake: FakeGoPro, 
     assert not list(tmp_path.rglob("*.part"))
     assert seen[-1][1] == seen[-1][2] and {p for p, *_ in seen} == {"100GOPRO/GX010001.MP4", "100GOPRO/GX010002.MP4"}
     assert all(r.skipped for r in second) and len(second) == 2
+
+
+def test_metadata_missing_from_an_earlier_copy_is_filled_in(fake: FakeGoPro, tmp_path: Path) -> None:
+    fake.media_info_only = "none"  # the camera answers 404 to every metadata request
+
+    async def go():
+        async with driver_for(fake) as d:
+            first = await offload_camera(d, tmp_path)
+            side = sidecar_path(first[0].path)
+            assert json.loads(side.read_text(encoding="utf-8"))["camera_info"] == {}
+            fake.media_info_only = None
+            second = await offload_camera(d, tmp_path)
+            return side, second
+
+    side, second = run(go())
+    assert all(r.skipped for r in second)
+    stored = json.loads(side.read_text(encoding="utf-8"))
+    assert stored["camera_info"] == INFO_A and stored["sha256"] == hashlib.sha256(CLIP_A).hexdigest()
 
 
 def test_selecting_recordings(fake: FakeGoPro, tmp_path: Path) -> None:

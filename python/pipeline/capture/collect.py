@@ -61,6 +61,21 @@ def already_copied(target: Path, file: MediaFile) -> bool:
     return size == file.size if file.size is not None else size > 0
 
 
+async def _fill_in_metadata(driver: CameraDriver, file: MediaFile, target: Path) -> None:
+    """Add the camera's metadata to the sidecar of an earlier copy that was made without it."""
+    path = sidecar_path(target)
+    try:
+        sidecar = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if sidecar.get("camera_info"):
+        return
+    info = await driver.media_info(file)
+    if info:
+        sidecar["camera_info"] = info
+        path.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
+
+
 async def offload_camera(
     driver: CameraDriver,
     dest_root: Path,
@@ -98,6 +113,7 @@ async def offload_camera(
     for file in chosen:
         target = target_path(dest_root, driver.label, file)
         if already_copied(target, file):
+            await _fill_in_metadata(driver, file, target)
             results.append(OffloadedFile(file, target, target.stat().st_size, None, skipped=True))
             continue
         info = await driver.media_info(file)

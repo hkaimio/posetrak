@@ -170,6 +170,8 @@ class CaptureController:
         Camera registry used to register copied videos; None means the default registry.
     auto_offload:
         Copy the recordings automatically when a capture has stopped.
+    offload_registrar:
+        Replaces the registration of copied videos, for simulated cameras.
     checklist:
         Items the operator must tick before the controller reports ready.
     command_timeout_s:
@@ -188,6 +190,7 @@ class CaptureController:
         offload_dir: Path | None = None,
         registry_path: Path | None = None,
         auto_offload: bool = False,
+        offload_registrar: Callable[..., Any] | None = None,
         checklist: list[ChecklistItem] | None = None,
         command_timeout_s: float = 5.0,
         arm_timeout_s: float = 30.0,
@@ -223,6 +226,7 @@ class CaptureController:
             destination=offload_dir,
             registry_path=registry_path,
             auto=auto_offload and offload_dir is not None,
+            registrar=offload_registrar,
             on_alert=lambda camera, kind, message, active: self._toggle_alert(camera, kind, active, message),
         )
 

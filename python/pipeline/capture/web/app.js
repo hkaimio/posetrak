@@ -6,7 +6,7 @@
 // checklist, alerts and the control lease. See api.py for the protocol.
 
 import { html, render, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "./vendor/htm-preact-standalone.js";
-import { chosenSetup, formatDuration, formatStorage, initialState, permissions, reduce } from "./store.js";
+import { chosenSetup, formatDuration, formatStorage, initialState, offloadSummary, permissions, reduce } from "./store.js";
 
 const LEASE_REFRESH_MS = 10_000;
 const RECONNECT_MS = [500, 1000, 2000, 4000];
@@ -208,6 +208,42 @@ function CameraTile({ cam, options, override, canControl, onAction, onMode }) {
     </div>`;
 }
 
+const MB = (bytes) => `${(bytes / 1e6).toFixed(bytes < 1e7 ? 1 : 0)} MB`;
+const OFFLOAD_STATE = { waiting: "waiting", copying: "copying", registering: "adding to the capture", done: "done", failed: "failed", skipped: "skipped" };
+
+function Offload({ offload, canControl, canCopyNow, onAuto, onNow, onCancel }) {
+  if (!offload.available) return null;
+  const cams = Object.entries(offload.cameras).sort(([a], [b]) => a.localeCompare(b));
+  const summary = offloadSummary(offload);
+  return html`
+    <h2>Videos</h2>
+    <label class="auto-offload">
+      <input type="checkbox" checked=${offload.auto} disabled=${!canControl || offload.busy} onChange=${(e) => onAuto(e.target.checked)} />
+      <span>Copy the videos to this computer after stopping</span>
+    </label>
+    ${offload.busy &&
+    html`
+      <div class="progress"><div style=${`width:${Math.round(summary.fraction * 100)}%`}></div></div>
+      <div class="muted">${MB(summary.done)} of ${MB(summary.total)}</div>
+      ${canControl && html`<button class="small" onClick=${onCancel}>Cancel copying</button>`}`}
+    ${canCopyNow && html`<button class="small" onClick=${onNow}>Copy the videos now</button>`}
+    <div class="offload-list">
+      ${cams.map(
+        ([label, c]) => html`
+          <div key=${label} class=${`offload-cam ${c.state}`}>
+            <strong>${label}</strong> <span class="pill">${OFFLOAD_STATE[c.state] ?? c.state}</span>
+            ${c.state === "copying" && html`<span class="muted"> ${MB(c.bytes_done)} of ${MB(c.bytes_total)}</span>`}
+            ${c.error && html`<div class="fault-text">${c.error}</div>`}
+            ${c.videos.map(
+              (v) => html`<div class=${v.status === "ok" || v.status === "mode_assumed" ? "muted" : "fault-text"}>
+                ${v.file}: ${v.mode ?? "no mode"}${v.status === "ok" ? "" : ` (${v.status.replaceAll("_", " ")})`}${v.notes ? ` – ${v.notes}` : ""}
+              </div>`,
+            )}
+          </div>`,
+      )}
+    </div>`;
+}
+
 function Alerts({ alerts }) {
   return alerts.map(
     (a) => html`
@@ -315,6 +351,9 @@ function App() {
       if (what === "enabled") return call("POST", `${base}/enabled`, { enabled: value });
       return call("POST", `${base}/manual`);
     });
+  const onAuto = (enabled) => run(() => call("POST", "/offload/auto", { enabled }));
+  const onCopyNow = () => run(() => call("POST", "/capture/offload"));
+  const onCancelCopy = () => run(() => call("POST", "/offload/cancel"));
   const onTick = (id, done) => run(() => call("POST", `/checklist/${encodeURIComponent(id)}`, { done }));
 
   const chosen = chosenSetup(state, setup);
@@ -355,6 +394,15 @@ function App() {
 
     <${Report} report=${state.report} />
     <${Checklist} items=${state.checklist} canControl=${perms.mine} onTick=${onTick} />
+
+    <${Offload}
+      offload=${state.offload}
+      canControl=${perms.mine}
+      canCopyNow=${perms.mine && state.phase === "stopped" && !state.offload.busy && !state.offload.auto && Object.keys(state.offload.cameras).length === 0}
+      onAuto=${onAuto}
+      onNow=${onCopyNow}
+      onCancel=${onCancelCopy}
+    />
 
     <h2>Cameras</h2>
     <div class="wall">

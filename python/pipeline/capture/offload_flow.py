@@ -92,6 +92,8 @@ class CaptureOffloader:
         Cameras copied at the same time.
     on_alert:
         ``(camera label or None, kind, message, active)`` raises or clears an operator alert.
+    registrar:
+        Replaces :func:`pipeline.capture.register.register_video`, for simulated cameras.
     """
 
     def __init__(
@@ -105,6 +107,7 @@ class CaptureOffloader:
         auto: bool = False,
         concurrency: int = 2,
         on_alert: Callable[[str | None, str, str, bool], None] | None = None,
+        registrar: Callable[..., Any] | None = None,
     ) -> None:
         self._session = session
         self._session_id = session_id
@@ -114,6 +117,7 @@ class CaptureOffloader:
         self.auto = auto
         self._concurrency = max(1, concurrency)
         self._on_alert = on_alert or (lambda *args: None)
+        self._registrar = registrar
         self._baseline: dict[str, set[str] | None] = {}
         self._progress: dict[str, _Progress] = {}
         self._task: asyncio.Task[None] | None = None
@@ -209,7 +213,8 @@ class CaptureOffloader:
         gate = asyncio.Semaphore(self._concurrency)
         registry: sqlite3.Connection | None = None
         try:
-            registry = open_registry(self._registry_path or DEFAULT_REGISTRY_PATH)
+            if self._registrar is None:
+                registry = open_registry(self._registry_path or DEFAULT_REGISTRY_PATH)
             opened = registry
 
             async def guarded(target: OffloadTarget) -> None:
@@ -234,7 +239,7 @@ class CaptureOffloader:
             self._running = False
             self._publish()
 
-    async def _one(self, capture_id: str, target: OffloadTarget, root: Path, registry: sqlite3.Connection) -> None:
+    async def _one(self, capture_id: str, target: OffloadTarget, root: Path, registry: sqlite3.Connection | None) -> None:
         progress = self._progress[target.label]
         try:
             files = await self._new_recordings(target)
@@ -281,13 +286,15 @@ class CaptureOffloader:
         now = await target.driver.list_media()
         return sorted((f for f in now if f.path not in before and is_video(f)), key=lambda f: (f.created or 0, f.path))
 
-    async def _register(self, capture_id: str, target: OffloadTarget, result: Any, registry: sqlite3.Connection, progress: _Progress) -> None:
+    async def _register(self, capture_id: str, target: OffloadTarget, result: Any, registry: sqlite3.Connection | None, progress: _Progress) -> None:
+        facts = None
+        if self._registrar is None:
+            try:
+                facts = await asyncio.to_thread(registration.read_video_facts, result.path)
+            except registration.ProbeError:
+                facts = None
         try:
-            facts = await asyncio.to_thread(registration.read_video_facts, result.path)
-        except registration.ProbeError:
-            facts = None
-        try:
-            video = registration.register_video(
+            video = (self._registrar or registration.register_video)(
                 self._session,
                 registry,
                 self._session_id,

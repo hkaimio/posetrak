@@ -125,6 +125,14 @@ def _check_setups(cfg: CaptureConfig, cameras: list[PlannedCamera]) -> None:
                 raise ConfigError(f"setup {setup.name!r} names camera {label!r}, which has no [[camera]] block")
 
 
+def demo_registrar(session, registry, session_id, capture_id, camera_instance_id, path, *, expected_mode_id=None, **_):  # type: ignore[no-untyped-def]
+    """Stands in for registering a copied video when the cameras are simulated."""
+    from pipeline.capture.register import RegisteredVideo, VideoStatus
+
+    names = {"demo-4k": "4K 120 linear", "demo-2k": "2.7K 240 linear", "demo-hd": "1080 60"}
+    return RegisteredVideo("demo", path, expected_mode_id, names.get(expected_mode_id), VideoStatus.OK, "")
+
+
 def demo_planner(slots: Sequence[CameraSlot]) -> ModePlanner:
     """Modes and setups for simulated cameras; the last of three or more is set by hand."""
     from pipeline.capture.config import SetupConfig
@@ -190,7 +198,11 @@ def controller_factory(cfg: CaptureConfig, *, demo_cameras: int = 0) -> Callable
             session = open_session(cfg.daemon.session_db)
             sid = latest_or_new_session(session)
         offload_dir = None
-        if not demo_cameras:
+        registrar = None
+        if demo_cameras:
+            offload_dir = Path(tempfile.mkdtemp(prefix="posetrak-capture-demo-videos-"))
+            registrar = demo_registrar
+        else:
             offload_dir = cfg.daemon.offload_dir or (cfg.daemon.session_db.parent / "videos" if cfg.daemon.session_db else None)
         return CaptureController(
             slots,
@@ -201,6 +213,7 @@ def controller_factory(cfg: CaptureConfig, *, demo_cameras: int = 0) -> Callable
             offload_dir=offload_dir,
             registry_path=cfg.daemon.registry_db,
             auto_offload=cfg.daemon.auto_offload,
+            offload_registrar=registrar,
         )
 
     return factory

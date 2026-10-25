@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { chosenSetup, formatDuration, formatStorage, initialState, permissions, reduce } from "../../../pipeline/capture/web/store.js";
+import { chosenSetup, formatDuration, formatStorage, initialState, offloadSummary, permissions, reduce } from "../../../pipeline/capture/web/store.js";
 
 const cam = (label, extra = {}) => ({ label, state: "ready", enabled: true, ...extra });
 const snapshot = (extra = {}) => ({
@@ -118,4 +118,34 @@ test("the chosen setup falls back from the pick to the last arm, the default and
   assert.equal(chosenSetup(state({ default: "b", selected: "a" }), null), "a");
   assert.equal(chosenSetup(state({ default: "b", selected: "a" }), "b"), "b");
   assert.equal(chosenSetup(state({ setups: [] }), null), null);
+});
+
+const offloadState = (extra = {}) => ({
+  available: true,
+  auto: true,
+  busy: true,
+  capture_id: "c1",
+  cameras: {
+    a: { state: "copying", files: 1, files_done: 0, bytes_done: 50, bytes_total: 100, error: null, videos: [] },
+    b: { state: "failed", files: 1, files_done: 0, bytes_done: 0, bytes_total: 100, error: "ejected", videos: [] },
+  },
+  ...extra,
+});
+
+test("offload events replace the offload state, and arming waits until copying is over", () => {
+  let s = reduce(initialState(), snapshot({ lease: { holder: "me", label: "x", expires_in_s: 5 } }));
+  assert.equal(permissions(s, "me").canArm, true);
+  s = reduce(s, event(11, "offload", offloadState()));
+  assert.equal(s.offload.busy, true);
+  assert.equal(permissions(s, "me").canArm, false);
+  s = reduce(s, event(12, "offload", offloadState({ busy: false })));
+  assert.equal(permissions(s, "me").canArm, true);
+});
+
+test("a snapshot without offload keeps the known state, and the summary adds the cameras up", () => {
+  const s = reduce(reduce(initialState(), snapshot({ offload: offloadState() })), snapshot());
+  assert.equal(s.offload.available, true);
+  const sum = offloadSummary(s.offload);
+  assert.deepEqual([sum.done, sum.total, sum.fraction, sum.failed, sum.cameras], [50, 200, 0.25, 1, 2]);
+  assert.equal(offloadSummary(initialState().offload).fraction, 0);
 });

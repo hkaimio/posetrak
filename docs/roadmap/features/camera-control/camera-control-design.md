@@ -277,14 +277,20 @@ stopping; Hero11 and Insta360 cameras go on the dock after teardown.
 1. **Enumerate** per type: Hero13 → Open GoPro HTTP media list over COHN; Hero11 → wired
    USB HTTP media list; Insta360 → mass-storage scan; Android → `adb shell ls` of DCIM,
    filtered to the capture window.
-2. **Match** files to `capture_events` rows by camera + timestamp overlap; unmatched
-   files and unmatched captures are both flagged.
-3. **Copy** to `{session_dir}/{capture_label}/{camera_label}_{start_iso}.mp4`, SHA-256
-   on the fly. Wireless downloads run in parallel with a configurable concurrency cap so
-   the WLAN is not saturated.
-4. **Verify**: ffprobe fps/resolution/codec/duration vs the expected `camera_modes` row
-   and the logged start–stop window; creation time vs logged start (±2 s warn).
-5. **Register**: create/complete `capture_videos` rows (`file_path`, `actual_fps`,
+2. **Match** files to captures. For a capture the daemon controls, the camera's media
+   list is read when the cameras are armed and again after they have stopped, and the
+   videos that appeared in between are the capture's; no clock is involved. Files recorded
+   without the daemon have to be matched by time: the creation time of the per-file
+   metadata and of the container is UTC, while the one in the media list is the camera's
+   local time written as if it were UTC, and the camera's clock may be off, so a match by
+   time needs a tolerance and a camera clock check.
+3. **Copy** to `<offload dir>/capture-<number>/<camera label>/<camera folder>/`, SHA-256
+   on the fly, resuming interrupted copies. Wireless downloads run in parallel with a
+   concurrency cap so the WLAN is not saturated. The cameras are not armed again until
+   copying has finished or been cancelled.
+4. **Verify**: size against what the camera announced, and the detected capture mode
+   against the one the camera was armed with (§3.6); a mismatch raises an alert.
+5. **Register** (see §3.6): create/complete `capture_videos` rows (`file_path`, `actual_fps`,
    frame range) and write provenance (§4). The capture wizard's manual
    "add videos" step becomes a review step.
 

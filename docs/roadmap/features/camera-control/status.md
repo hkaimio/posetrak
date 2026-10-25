@@ -46,8 +46,15 @@ Credentials are kept in a registry table that sessions never get (`control_crede
 
 `posetrak-capture offload <label>...` copies the recordings of Hero13s over the network, with
 resume, size checking, a SHA-256 and the camera's metadata in a JSON file beside each copy.
-Matching the copied files to captures and registering them in the session (the rest of the
-collection step in the design) is not built.
+
+After a capture stops the daemon can copy the capture's recordings by itself (`auto_offload`,
+or the switch in the web UI). The recordings that appeared on a camera between arming and
+stopping are the capture's; they are copied to `<offload dir>/capture-<number>/<camera>/`
+and registered in the capture with their capture mode, a video in another mode than the
+camera was armed with raises an alert, and the cameras cannot be armed again until copying
+has finished or been cancelled. Matching files that were recorded without the daemon to
+captures (by time) is not built. Chaptered recordings (a long recording split by the
+camera) become one registered video per file.
 
 `posetrak-capture detect-mode <file>...` tells which registry camera and capture mode a video
 file was recorded in, from what the file states about itself (needs `exiftool`). It is

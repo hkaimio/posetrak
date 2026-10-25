@@ -163,3 +163,11 @@ h2 { font-size: 0.95rem; margin: 18px 0 8px; color: var(--muted); text-transform
 
 .tile .mode-select, .setup-pick select { margin-top: 6px; max-width: 100%; font: inherit; padding: 6px; background: var(--panel); color: inherit; border: 1px solid var(--line); border-radius: 6px; }
 .setup-pick { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+
+.auto-offload { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.progress { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; margin: 8px 0 4px; }
+.progress > div { height: 100%; background: var(--ok); transition: width 0.3s; }
+.offload-list { margin-top: 8px; display: grid; gap: 8px; }
+.offload-cam { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: var(--panel); font-size: 0.9rem; }
+.offload-cam.failed, .offload-cam.skipped { border-color: var(--bad); }
+.offload-cam.done { border-color: var(--ok); }

@@ -19,6 +19,9 @@ export const initialState = () => ({
   checklist: [],
   // Setups and capture modes the operator can choose from; `selected` is the setup of the last arm.
   modes: { setups: [], default: null, cameras: {}, selected: null },
+  // Copying the recordings off the cameras after a capture: whether it is possible, automatic,
+  // running, and the progress of every camera.
+  offload: { available: false, auto: false, busy: false, capture_id: null, cameras: {} },
   alerts: [],
   lease: { holder: null, label: null, expires_in_s: null },
   // Outcome of the last start/stop command, per camera, for the confirmation wall.
@@ -38,6 +41,7 @@ export function applySnapshot(state, snap) {
     cameras: snap.cameras,
     checklist: snap.checklist,
     modes: snap.modes ?? state.modes,
+    offload: snap.offload ?? state.offload,
     alerts: snap.alerts,
     lease: snap.lease ?? state.lease,
     stale: false,
@@ -65,6 +69,8 @@ export function reduce(state, msg) {
         ...next,
         checklist: next.checklist.map((i) => (i.id === d.item ? { ...i, done: d.done } : i)),
       };
+    case "offload":
+      return { ...next, offload: d };
     case "plan":
       return { ...next, checklist: d.checklist, modes: { ...next.modes, selected: d.setup } };
     case "alert": {
@@ -87,7 +93,7 @@ export function permissions(state, clientId) {
   const enabled = Object.values(state.cameras).filter((c) => c.enabled);
   return {
     mine,
-    canArm: mine && ["idle", "stopped", "armed"].includes(state.phase),
+    canArm: mine && ["idle", "stopped", "armed"].includes(state.phase) && !state.offload.busy,
     canStart: mine && state.phase === "armed",
     canStop: mine && state.phase === "recording",
     enabledCount: enabled.length,
@@ -99,6 +105,15 @@ export function permissions(state, clientId) {
 export function chosenSetup(state, picked) {
   const { setups, selected, default: fallback } = state.modes;
   return picked ?? selected ?? fallback ?? setups[0] ?? null;
+}
+
+// Progress of copying the recordings, for display: bytes copied of the bytes to copy over all cameras.
+export function offloadSummary(offload) {
+  const cams = Object.values(offload.cameras);
+  const done = cams.reduce((n, c) => n + c.bytes_done, 0);
+  const total = cams.reduce((n, c) => n + c.bytes_total, 0);
+  const failed = cams.filter((c) => c.state === "failed" || c.state === "skipped").length;
+  return { done, total, fraction: total > 0 ? Math.min(1, done / total) : 0, failed, cameras: cams.length };
 }
 
 export function formatDuration(totalSeconds) {

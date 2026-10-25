@@ -294,6 +294,11 @@ host = "0.0.0.0"
 port = {DEFAULT_PORT}
 token = "{token}"
 {db_line}
+# Where the recordings of captures are copied to (default: a videos directory
+# beside the session database), and whether that happens by itself when a
+# capture has stopped. The operator can also switch it in the web UI.
+# offload_dir = "D:/captures/videos"
+# auto_offload = true
 
 [profile]
 name = "default"

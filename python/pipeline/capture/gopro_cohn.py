@@ -54,8 +54,10 @@ from pipeline.capture.devices import (
     SettingSpec,
 )
 from pipeline.capture.gopro_profile import (
+    CONTROL_MODE_PRO,
     FLAT_MODE_VIDEO,
     PRESET_GROUP_VIDEO,
+    SETTING_CONTROL_MODE,
     ST_BATTERY_PERCENT,
     ST_ENCODING,
     ST_FLAT_MODE,
@@ -299,6 +301,13 @@ class GoProCohnDriver(CameraDriver):
 
         problems: list[str] = []
         try:
+            if data["settings"].get(str(SETTING_CONTROL_MODE), CONTROL_MODE_PRO) != CONTROL_MODE_PRO:
+                if not await self._enter_pro_controls():
+                    return ArmResult(
+                        False,
+                        ("camera is in Easy controls and did not switch to Pro controls (set it on the camera)",),
+                    )
+                data = await self._refresh()
             if data["status"].get(ST_FLAT_MODE) != FLAT_MODE_VIDEO:
                 if not await self._enter_video_mode():
                     return ArmResult(False, ("could not switch the camera to video mode",))
@@ -315,8 +324,21 @@ class GoProCohnDriver(CameraDriver):
         except httpx.HTTPError as exc:
             return ArmResult(False, (self._unreachable(exc),))
         if mismatches:
-            problems.append("settings did not take effect (is the camera in a locked-down control mode?)")
+            problems.append("settings did not take effect")
         return ArmResult(not problems and not mismatches, tuple(problems), mismatches)
+
+    async def _enter_pro_controls(self) -> bool:
+        """Switch the camera from Easy to Pro controls, which is what allows changing its settings."""
+        try:
+            await self._get("/gopro/camera/setting", {"setting": SETTING_CONTROL_MODE, "option": CONTROL_MODE_PRO})
+        except httpx.HTTPStatusError:
+            return False
+        for _ in range(25):
+            data = await self._refresh()
+            if data["settings"].get(str(SETTING_CONTROL_MODE)) == CONTROL_MODE_PRO:
+                return True
+            await asyncio.sleep(0.2)
+        return False
 
     async def _enter_video_mode(self) -> bool:
         await self._get("/gopro/camera/presets/set_group", {"id": PRESET_GROUP_VIDEO})

@@ -26,7 +26,7 @@ Behaviour knobs, all settable while the server runs:
 ``stop_after_s``       the camera stops recording by itself this long after start
 ``supported_options``  setting id -> allowed option values; others get HTTP 403
 ``ignore_settings``    setting changes are acknowledged but do not take effect
-                       (a camera in a locked-down "easy" control mode)
+``settings["175"]``     control mode: 0 (Easy) answers every other setting change with HTTP 403
 ``flat_mode``          active mode, status 89: 12 video, 13 time lapse, 16 photo
 ``require_auth``       expected ``Authorization`` header value, or None
 """
@@ -53,6 +53,7 @@ GROUP_TO_FLAT_MODE = {"1000": FLAT_VIDEO, "1001": FLAT_PHOTO, "1002": FLAT_TIME_
 SET_RESOLUTION = "2"
 SET_FPS = "3"
 SET_LENS = "121"
+SET_CONTROL_MODE = "175"
 
 
 class FakeGoPro:
@@ -71,8 +72,9 @@ class FakeGoPro:
             SET_RESOLUTION: {1, 4, 9, 12},
             SET_FPS: {0, 1, 5, 8, 9, 10, 13},
             SET_LENS: {0, 4, 7},
+            SET_CONTROL_MODE: {0, 1},
         }
-        self.settings: dict[str, int] = {SET_RESOLUTION: 9, SET_FPS: 8, SET_LENS: 0}
+        self.settings: dict[str, int] = {SET_RESOLUTION: 9, SET_FPS: 8, SET_LENS: 0, SET_CONTROL_MODE: 1}
         self.ignore_settings = False
         self.flat_mode = FLAT_VIDEO
         self.remaining_video_s = 20_000
@@ -171,7 +173,9 @@ class FakeGoPro:
             sid, option = query.get("setting"), int(query.get("option", "-1"))
             if sid not in self.supported_options or option not in self.supported_options[sid]:
                 return self._reply(handler, 403, {"error": "unsupported setting"})
-            if not self.ignore_settings:
+            if self.settings.get(SET_CONTROL_MODE) == 0 and sid != SET_CONTROL_MODE:
+                return self._reply(handler, 403, {"error": "settings are locked in Easy controls"})
+            if not self.ignore_settings or sid == SET_CONTROL_MODE:
                 self.settings[sid] = option
             return self._reply(handler, 200, {})
         if url.path == "/gopro/camera/presets/set_group":

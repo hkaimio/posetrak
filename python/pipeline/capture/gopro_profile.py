@@ -33,6 +33,10 @@ ST_FLAT_MODE: Final = "89"
 #: ``status[ST_FLAT_MODE]`` value of the video mode; a time lapse or photo mode
 #: accepts the shutter command and records the wrong thing.
 FLAT_MODE_VIDEO: Final = 12
+#: Setting id of the control mode and its Pro option. In the Easy control mode the camera
+#: refuses to change resolution, frame rate and most other settings.
+SETTING_CONTROL_MODE: Final = 175
+CONTROL_MODE_PRO: Final = 1
 #: Preset group that selects the video mode (``presets/set_group``).
 PRESET_GROUP_VIDEO: Final = 1000
 

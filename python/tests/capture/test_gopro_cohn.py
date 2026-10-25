@@ -28,6 +28,7 @@ from tests.capture.fake_gopro import (  # noqa: E402
     FLAT_PHOTO,
     FLAT_TIME_LAPSE,
     FLAT_VIDEO,
+    SET_CONTROL_MODE,
     SET_FPS,
     SET_LENS,
     SET_RESOLUTION,
@@ -230,6 +231,31 @@ def test_arm_switches_a_camera_out_of_the_wrong_mode(fake: FakeGoPro, wrong_mode
             assert res.ok, res
             assert fake.flat_mode == FLAT_VIDEO
             assert fake.commands_to("/gopro/camera/presets/set_group")
+
+    run(go())
+
+
+def test_arm_switches_a_camera_from_easy_to_pro_controls(fake: FakeGoPro) -> None:
+    fake.settings[SET_CONTROL_MODE] = 0
+
+    async def go():
+        async with driver_for(fake) as d:
+            res = await d.arm(PROFILE)
+            assert res.ok, res
+            assert fake.settings[SET_CONTROL_MODE] == 1 and fake.settings[SET_LENS] == 4
+
+    run(go())
+
+
+def test_arm_reports_a_camera_that_stays_in_easy_controls(fake: FakeGoPro) -> None:
+    fake.settings[SET_CONTROL_MODE] = 0
+    fake.supported_options[SET_CONTROL_MODE] = {0}
+
+    async def go():
+        async with driver_for(fake) as d:
+            res = await d.arm(PROFILE)
+            assert not res.ok and "Easy controls" in res.problems[0]
+            assert fake.settings[SET_RESOLUTION] != 1  # nothing was attempted in the locked mode
 
     run(go())
 

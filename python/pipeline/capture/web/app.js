@@ -6,7 +6,7 @@
 // checklist, alerts and the control lease. See api.py for the protocol.
 
 import { html, render, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "./vendor/htm-preact-standalone.js";
-import { formatDuration, formatStorage, initialState, permissions, reduce } from "./store.js";
+import { chosenSetup, formatDuration, formatStorage, initialState, permissions, reduce } from "./store.js";
 
 const LEASE_REFRESH_MS = 10_000;
 const RECONNECT_MS = [500, 1000, 2000, 4000];
@@ -290,7 +290,7 @@ function App() {
   const arm = () =>
     run(async () => {
       const picked = Object.fromEntries(Object.entries(overrides).filter(([, m]) => m));
-      const r = await call("POST", "/capture/arm", { setup: chosenSetup, modes: picked });
+      const r = await call("POST", "/capture/arm", { setup: chosen, modes: picked });
       if (!r.ready) {
         const problems = Object.entries(r.problems).map(([cam, list]) => `${cam}: ${list.join(", ")}`);
         const open = r.open_checklist.length ? [`checklist open: ${r.open_checklist.join(", ")}`] : [];
@@ -317,7 +317,7 @@ function App() {
     });
   const onTick = (id, done) => run(() => call("POST", `/checklist/${encodeURIComponent(id)}`, { done }));
 
-  const chosenSetup = setup ?? state.modes.selected ?? state.modes.default;
+  const chosen = chosenSetup(state, setup);
   const onMode = (label, mode) => setOverrides((o) => ({ ...o, [label]: mode }));
 
   const cameras = useMemo(() => Object.values(state.cameras).sort((a, b) => a.label.localeCompare(b.label)), [state.cameras]);
@@ -348,7 +348,7 @@ function App() {
     ${state.modes.setups.length > 1 &&
     html`
       <label class="setup-pick">setup
-        <select value=${chosenSetup ?? ""} disabled=${!perms.canArm} onChange=${(e) => setSetup(e.target.value)}>
+        <select value=${chosen ?? ""} disabled=${!perms.canArm} onChange=${(e) => setSetup(e.target.value)}>
           ${state.modes.setups.map((s) => html`<option key=${s} value=${s}>${s}</option>`)}
         </select>
       </label>`}

@@ -86,6 +86,7 @@ def test_static_files_need_no_token(tmp_path: Path) -> None:
     with TestClient(app) as c:
         assert c.get("/").status_code == 200 and "capture" in c.get("/").text
         assert c.get("/api/state").status_code == 401
+        assert c.get("/").headers["Cache-Control"] == "no-cache"
 
 
 # -- state ----------------------------------------------------------------------

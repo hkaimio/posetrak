@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { formatDuration, formatStorage, initialState, permissions, reduce } from "../../../pipeline/capture/web/store.js";
+import { chosenSetup, formatDuration, formatStorage, initialState, permissions, reduce } from "../../../pipeline/capture/web/store.js";
 
 const cam = (label, extra = {}) => ({ label, state: "ready", enabled: true, ...extra });
 const snapshot = (extra = {}) => ({
@@ -109,4 +109,13 @@ test("the snapshot carries the setups and modes, and a plan event updates the ch
 test("a snapshot without modes keeps the ones known", () => {
   const withModes = reduce(initialState(), snapshot({ modes: { setups: ["a"], default: "a", selected: "a", cameras: {} } }));
   assert.deepEqual(reduce(withModes, snapshot()).modes.setups, ["a"]);
+});
+
+test("the chosen setup falls back from the pick to the last arm, the default and the first setup", () => {
+  const state = (modes) => ({ ...initialState(), modes: { setups: ["a", "b"], default: null, selected: null, cameras: {}, ...modes } });
+  assert.equal(chosenSetup(state({}), null), "a");
+  assert.equal(chosenSetup(state({ default: "b" }), null), "b");
+  assert.equal(chosenSetup(state({ default: "b", selected: "a" }), null), "a");
+  assert.equal(chosenSetup(state({ default: "b", selected: "a" }), "b"), "b");
+  assert.equal(chosenSetup(state({ setups: [] }), null), null);
 });

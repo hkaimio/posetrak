@@ -47,6 +47,19 @@ logger = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).parent / "web"
 
 
+class _RevalidatedFiles(StaticFiles):
+    """Static files a browser must revalidate on every load.
+
+    Without a cache header a browser may reuse an old copy of the UI for hours, which
+    leaves it out of step with the API of a newer daemon.
+    """
+
+    async def get_response(self, path, scope):  # type: ignore[no-untyped-def]
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 class LeaseRequest(BaseModel):
     label: str | None = None
     takeover: bool = False
@@ -260,6 +273,6 @@ def create_app(
                 return
 
     if web_dir is not None and web_dir.is_dir():
-        app.mount("/", StaticFiles(directory=web_dir, html=True), name="web")
+        app.mount("/", _RevalidatedFiles(directory=web_dir, html=True), name="web")
 
     return app

@@ -94,6 +94,13 @@ export function permissions(state, clientId) {
   };
 }
 
+// The setup the next arm uses: the operator's pick, else the one of the last arm, else the
+// daemon's default, else the first (the picker shows the first one when nothing is chosen).
+export function chosenSetup(state, picked) {
+  const { setups, selected, default: fallback } = state.modes;
+  return picked ?? selected ?? fallback ?? setups[0] ?? null;
+}
+
 export function formatDuration(totalSeconds) {
   const s = Math.max(0, Math.floor(totalSeconds));
   const mm = String(Math.floor(s / 60)).padStart(2, "0");

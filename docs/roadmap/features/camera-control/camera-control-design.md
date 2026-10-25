@@ -323,8 +323,10 @@ same mode row serves a camera that is configured over the link and one that is s
 
 `capture_settings` holds the keys of the driver's settings vocabulary (for the Hero13
 those of `gopro_profile.translate`: resolution, fps, lens, bit_rate, performance, or a raw
-numeric setting id). When it is empty the driver derives what it can from width, height
-and fps. The settings that define a mode's *image* (resolution, fps, lens) are part of
+numeric setting id). The driver derives what it can from the mode's width, height and fps
+(for the Hero13 resolution and frame rate, not the lens) and `capture_settings` is applied on
+top, so a mode only lists what the standard fields cannot tell and may override a derived
+value. The settings that define a mode's *image* (resolution, fps, lens) are part of
 the mode identity and select its intrinsics; settings that do not (exposure, bit rate)
 may differ between captures within one mode.
 

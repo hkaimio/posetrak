@@ -162,7 +162,8 @@ class CameraDriver(ABC):
         """The settings that make the camera record in *mode*.
 
         The default is the mode's own ``capture_settings``. A driver that can derive
-        settings from the mode's size and frame rate does so when they are empty.
+        settings from the mode's size and frame rate does so and lets ``capture_settings``
+        override what it derived.
         """
         return dict(mode.capture_settings)
 

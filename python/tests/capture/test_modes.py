@@ -62,6 +62,14 @@ def test_hero13_driver_prefers_the_modes_own_settings() -> None:
     driver = object.__new__(GoProCohnDriver)
     assert driver.mode_settings(M4K) == M4K.capture_settings
     assert driver.mode_settings(BARE) == {"resolution": "4K", "fps": 60}
+    lens_only = ModeSpec("x", "lens", 3840, 2160, 120, {"lens": "linear"})
+    assert driver.mode_settings(lens_only) == {"resolution": "4K", "fps": 120, "lens": "linear"}
+    overridden = ModeSpec("x", "o", 3840, 2160, 120, {"fps": 100})
+    assert driver.mode_settings(overridden) == {"resolution": "4K", "fps": 100}
+    unknown_size = ModeSpec("x", "u", 0, 0, 0, {"resolution": "5K", "fps": 30, "lens": "wide"})
+    assert driver.mode_settings(unknown_size) == unknown_size.capture_settings
+    with pytest.raises(ProfileError):
+        driver.mode_settings(ModeSpec("x", "u", 0, 0, 0, {"lens": "wide"}))
     assert driver.settings_control == "driver" and "lens" in driver.supported_settings()
 
 

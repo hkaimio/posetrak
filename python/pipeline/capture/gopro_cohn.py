@@ -150,10 +150,21 @@ class GoProCohnDriver(CameraDriver):
         }
 
     def mode_settings(self, mode: ModeSpec) -> dict[str, Any]:
-        """The mode's own settings, or resolution and frame rate derived from its size."""
-        if mode.capture_settings:
-            return dict(mode.capture_settings)
-        return derive(mode.width_px, mode.height_px, mode.fps)
+        """Resolution and frame rate derived from the mode's size, with the mode's own settings on top.
+
+        The derived values are the base, so a mode only has to add what its size cannot
+        tell (the lens, the bit rate) and may state resolution or frame rate to override
+        the derivation. A size that maps to no Hero13 resolution is an error unless the
+        mode's settings state the resolution and frame rate themselves.
+        """
+        try:
+            settings = derive(mode.width_px, mode.height_px, mode.fps)
+        except ProfileError:
+            if not {"resolution", "fps"} <= mode.capture_settings.keys():
+                raise
+            settings = {}
+        settings.update(mode.capture_settings)
+        return settings
 
     def __init__(
         self,

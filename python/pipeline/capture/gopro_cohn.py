@@ -34,10 +34,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import ssl
 from base64 import b64encode
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -49,8 +51,12 @@ from pipeline.capture.devices import (
     CommandResult,
     DeviceState,
     DeviceStatus,
+    Downloaded,
     LinkState,
+    MediaFile,
     ModeSpec,
+    OffloadError,
+    ProgressCallback,
     SettingSpec,
 )
 from pipeline.capture.gopro_profile import (
@@ -367,6 +373,67 @@ class GoProCohnDriver(CameraDriver):
                 name, wanted = label(setting_id, option)
                 diffs[name] = (wanted, label(setting_id, actual)[1] if actual is not None else None)
         return diffs
+
+    # -- offload ---------------------------------------------------------------
+
+    supports_offload = True
+
+    async def list_media(self) -> list[MediaFile]:
+        try:
+            listing = (await self._get("/gopro/media/list")).json()
+        except httpx.HTTPError as exc:
+            raise OffloadError(f"{self.label}: could not list the media ({self._unreachable(exc)})") from exc
+        files = []
+        for folder in listing.get("media", []):
+            for item in folder.get("fs", []):
+                size, created = item.get("s"), item.get("cre")
+                files.append(
+                    MediaFile(
+                        f"{folder['d']}/{item['n']}",
+                        int(size) if size is not None else None,
+                        int(created) if created is not None else None,
+                    )
+                )
+        return files
+
+    async def media_info(self, file: MediaFile) -> dict[str, Any]:
+        try:
+            return (await self._get("/gopro/media/info", {"path": file.path})).json()
+        except httpx.HTTPError:
+            logger.warning("%s: no metadata for %s", self.label, file.path)
+            return {}
+
+    async def download(self, file: MediaFile, dest: Path, progress: ProgressCallback | None = None) -> Downloaded:
+        part = dest.with_name(dest.name + ".part")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256()
+        done = 0
+        if part.exists():
+            with part.open("rb") as old:
+                while chunk := old.read(1 << 20):
+                    digest.update(chunk)
+                    done += len(chunk)
+        client = self._clients[self._active]
+        headers = {"Range": f"bytes={done}-"} if done else {}
+        timeout = httpx.Timeout(self._request_timeout, read=30.0)
+        try:
+            async with self._lock, client.stream("GET", f"/videos/DCIM/{file.path}", headers=headers, timeout=timeout) as response:
+                response.raise_for_status()
+                if done and response.status_code != 206:  # the camera ignored the range: start over
+                    digest, done = hashlib.sha256(), 0
+                with part.open("ab" if done else "wb") as out:
+                    async for chunk in response.aiter_bytes(1 << 18):
+                        out.write(chunk)
+                        digest.update(chunk)
+                        done += len(chunk)
+                        if progress is not None:
+                            progress(done, file.size)
+        except httpx.HTTPError as exc:
+            raise OffloadError(f"{self.label}: copying {file.path} failed after {done} bytes ({type(exc).__name__})") from exc
+        if file.size is not None and done != file.size:
+            raise OffloadError(f"{self.label}: {file.path} is {done} bytes, the camera announced {file.size}")
+        part.replace(dest)
+        return Downloaded(dest, done, digest.hexdigest())
 
     # -- start and stop --------------------------------------------------------
 

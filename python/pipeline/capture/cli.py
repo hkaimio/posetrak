@@ -213,6 +213,91 @@ def import_credentials(config_path: Path, delete_files: bool) -> None:
         registry.close()
 
 
+@main.command("offload")
+@click.argument("labels", nargs=-1, required=True)
+@click.option(
+    "--dest", type=click.Path(path_type=Path), default=Path("offload"), show_default=True,
+    help="Directory to copy to; files go under <dest>/<label>/<camera folder>/.",
+)
+@click.option("--list", "list_only", is_flag=True, help="List the recordings on the cameras instead of copying them.")
+@click.option("--last", type=int, default=None, metavar="N", help="Only the N most recent recordings of each camera.")
+@click.option("--all-files", is_flag=True, help="Copy photos and other files too, not only videos.")
+@click.pass_obj
+def offload(config_path: Path, labels: tuple[str, ...], dest: Path, list_only: bool, last: int | None, all_files: bool) -> None:
+    """Copy the recordings of cameras over the network.
+
+    LABELS are camera labels from the camera registry. Each file is checked against the size
+    the camera announced and gets a JSON file with its SHA-256 and the camera's metadata
+    beside it. Files copied before are skipped and an interrupted copy resumes, so the
+    command can be repeated. Do not run it while the cameras are recording.
+    """
+    import asyncio
+    import datetime
+
+    from pipeline.capture.collect import is_video, offload_camera
+    from pipeline.capture.config import CameraConfig
+    from pipeline.capture.credentials import CredentialStore, RegistryCredentialStore
+    from pipeline.capture.daemon import build_driver, resolve_registry_cameras
+    from pipeline.capture.devices import OffloadError
+
+    cfg = _load_optional_config(config_path)
+    registry = _open_registry(cfg)
+    try:
+        try:
+            resolved = resolve_registry_cameras(registry, [CameraConfig(label) for label in labels])
+            store = RegistryCredentialStore(registry, CredentialStore(cfg.daemon.credentials_dir if cfg else None))
+            drivers = [build_driver(c, cfg, store) for c, _ in resolved]
+        except ConfigError as exc:
+            raise click.ClickException(str(exc)) from exc
+    finally:
+        registry.close()
+    for driver in drivers:
+        if not driver.supports_offload:
+            raise click.ClickException(f"{driver.label}: this camera type cannot be offloaded over the network")
+
+    def when(ts: int | None) -> str:
+        if ts is None:
+            return "?"
+        return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    async def run() -> None:
+        for driver in drivers:
+            await driver.connect()
+            try:
+                if driver.status.link != "up":
+                    raise OffloadError(f"{driver.label}: camera not reachable")
+                if list_only:
+                    files = [f for f in await driver.list_media() if all_files or is_video(f)]
+                    for f in sorted(files, key=lambda f: (f.created or 0, f.path))[-last if last else None :]:
+                        size = f"{f.size / 1e6:9.1f} MB" if f.size is not None else "         ? MB"
+                        click.echo(f"  {driver.label}  {f.path:<26} {size}  created {when(f.created)} (camera clock)")
+                    continue
+                shown = {"name": None}
+
+                def progress(file, done, total) -> None:  # noqa: ANN001
+                    if shown["name"] != file.path:
+                        shown["name"] = file.path
+                        click.echo(f"  {driver.label}  {file.path} ...", nl=False)
+                    if total is not None and done >= total:
+                        click.echo(f" {done / 1e6:.1f} MB")
+
+                results = await offload_camera(driver, dest, include_all=all_files, last=last, progress=progress)
+                for r in results:
+                    if r.skipped:
+                        click.echo(f"  {driver.label}  {r.file.path}: already copied")
+                if not results:
+                    click.echo(f"  {driver.label}: no recordings")
+            finally:
+                await driver.close()
+
+    try:
+        asyncio.run(run())
+    except OffloadError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not list_only:
+        click.echo(f"copied under {dest.resolve()}")
+
+
 @main.command("settings")
 def settings() -> None:
     """List the settings a capture mode can specify for a Hero13, with their allowed values.

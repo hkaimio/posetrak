@@ -77,6 +77,10 @@ class FakeGoPro:
         self.settings: dict[str, int] = {SET_RESOLUTION: 9, SET_FPS: 8, SET_LENS: 0, SET_CONTROL_MODE: 1}
         self.ignore_settings = False
         self.flat_mode = FLAT_VIDEO
+        #: recordings on the card: "100GOPRO/GX010001.MP4" -> (content, creation time, metadata)
+        self.media: dict[str, tuple[bytes, int, dict]] = {}
+        #: number of body bytes after which a download is cut off (once), to test resuming
+        self.cut_download_at: int | None = None
         self.remaining_video_s = 20_000
         self.battery_percent = 100
         self.system_hot = False
@@ -187,9 +191,46 @@ class FakeGoPro:
                     return self._reply(handler, 500, {"error": "busy"})
             self.flat_mode = mode
             return self._reply(handler, 200, {})
+        if url.path == "/gopro/media/list":
+            folders: dict[str, list[dict]] = {}
+            for path, (content, created, _) in self.media.items():
+                folder, name = path.split("/", 1)
+                folders.setdefault(folder, []).append({"n": name, "cre": str(created), "mod": str(created), "s": str(len(content))})
+            return self._reply(handler, 200, {"id": "1", "media": [{"d": d, "fs": fs} for d, fs in folders.items()]})
+        if url.path == "/gopro/media/info":
+            entry = self.media.get(query.get("path", ""))
+            if entry is None:
+                return self._reply(handler, 404, {"error": "no such file"})
+            return self._reply(handler, 200, entry[2])
+        if url.path.startswith("/videos/DCIM/"):
+            entry = self.media.get(url.path[len("/videos/DCIM/") :])
+            if entry is None:
+                return self._reply(handler, 404, {"error": "no such file"})
+            return self._send_file(handler, entry[0])
         if url.path == "/gopro/camera/presets/get":
             return self._reply(handler, 200, {"presetGroupArray": [], "serial": self.serial})
         self._reply(handler, 404, {"error": "not found"})
+
+    def _send_file(self, handler: BaseHTTPRequestHandler, content: bytes) -> None:
+        start = 0
+        range_header = handler.headers.get("Range")
+        if range_header and range_header.startswith("bytes="):
+            start = int(range_header[len("bytes=") :].split("-", 1)[0] or 0)
+        body = content[start:]
+        handler.send_response(206 if range_header else 200)
+        handler.send_header("Content-Type", "video/mp4")
+        handler.send_header("Content-Length", str(len(body)))
+        if range_header:
+            handler.send_header("Content-Range", f"bytes {start}-{len(content) - 1}/{len(content)}")
+        handler.end_headers()
+        if self.cut_download_at is not None and len(body) > self.cut_download_at:
+            cut, self.cut_download_at = self.cut_download_at, None
+            handler.wfile.write(body[:cut])
+            handler.wfile.flush()
+            handler.close_connection = True
+            handler.connection.close()
+            return
+        handler.wfile.write(body)
 
     @staticmethod
     def _reply(handler: BaseHTTPRequestHandler, code: int, body: dict) -> None:

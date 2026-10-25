@@ -18,6 +18,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from posetrak.db.capture_control import utc_now_iso
@@ -112,6 +113,38 @@ class SettingSpec:
     description: str = ""
 
 
+@dataclass(frozen=True)
+class MediaFile:
+    """A recording on a camera's storage."""
+
+    #: location on the camera, ``"100GOPRO/GX010001.MP4"``
+    path: str
+    #: size in bytes; None if the camera does not say
+    size: int | None = None
+    #: creation time on the camera's own clock, seconds since the epoch; None if unknown
+    created: int | None = None
+
+    @property
+    def name(self) -> str:
+        return self.path.rsplit("/", 1)[-1]
+
+
+@dataclass(frozen=True)
+class Downloaded:
+    """A file copied from a camera."""
+
+    path: Path
+    size: int
+    sha256: str
+
+
+class OffloadError(RuntimeError):
+    """Media could not be listed or copied from a camera."""
+
+
+#: ``(bytes done, bytes total or None)``
+ProgressCallback = Callable[[int, "int | None"], None]
+
 StatusCallback = Callable[[str, DeviceStatus], None]
 
 
@@ -153,6 +186,27 @@ class CameraDriver(ABC):
                 self._callback(self.label, status)
             except Exception:  # noqa: BLE001  (a bad listener must not break the driver)
                 logger.exception("%s: status callback failed", self.label)
+
+    #: True when the driver can list and copy the camera's recordings
+    supports_offload: bool = False
+
+    async def list_media(self) -> list[MediaFile]:
+        """The recordings on the camera."""
+        raise OffloadError(f"{self.label}: this camera type cannot be offloaded over the link")
+
+    async def media_info(self, file: MediaFile) -> dict[str, Any]:
+        """Metadata the camera keeps about a recording; empty if it has none."""
+        return {}
+
+    async def download(self, file: MediaFile, dest: Path, progress: ProgressCallback | None = None) -> Downloaded:
+        """Copy a recording to *dest*, resuming a partial copy left by an earlier attempt.
+
+        Raises
+        ------
+        OffloadError
+            If the copy fails or is not the size the camera announced.
+        """
+        raise OffloadError(f"{self.label}: this camera type cannot be offloaded over the link")
 
     def supported_settings(self) -> dict[str, SettingSpec]:
         """The settings this driver understands, by name (empty if it takes none)."""

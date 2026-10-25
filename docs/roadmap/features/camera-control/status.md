@@ -44,9 +44,14 @@ Implemented on the controller side (`python/pipeline/capture/`, run as `posetrak
 
 Credentials are kept in a registry table that sessions never get (`control_credentials`).
 
-Not built yet: mode detection from video files, collection and verify-on-collect, the other camera drivers
-(Hero11, Insta360, Android, iPhone), node peripherals (LED rings, sync beacon) and the Qt
-integration. The beacon and node firmware are developed separately in Rust.
+`posetrak-capture offload <label>...` copies the recordings of Hero13s over the network, with
+resume, size checking, a SHA-256 and the camera's metadata in a JSON file beside each copy.
+Matching the copied files to captures and registering them in the session (the rest of the
+collection step in the design) is not built.
+
+Not built yet: mode detection from video files, matching and registering offloaded files, the
+other camera drivers (Hero11, Insta360, Android, iPhone), node peripherals (LED rings, sync
+beacon) and the Qt integration. The beacon and node firmware are developed separately in Rust.
 
 Camera priority: Hero13, then Hero11 and Insta360 Ace Pro 2, then Android, then iPhone.
 

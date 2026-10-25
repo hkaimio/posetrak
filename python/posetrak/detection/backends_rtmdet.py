@@ -143,6 +143,50 @@ def _iou(a: np.ndarray, b: np.ndarray) -> float:
     return inter / union if union > 0 else 0.0
 
 
+class IouTracker:
+    """Greedy IoU matching of each frame's boxes to the previous frame's, one instance per camera."""
+
+    def __init__(self, conf: float, iou_thr: float) -> None:
+        self._conf, self._iou_thr = conf, iou_thr
+        self._next_id = 0
+        self._prev_boxes: list[np.ndarray] = []
+        self._prev_ids: list[int] = []
+
+    def update(self, boxes_xyxy: np.ndarray) -> list[PersonDetection]:
+        cur_boxes: list[np.ndarray] = []
+        cur_ids: list[int] = []
+        detections: list[PersonDetection] = []
+
+        avail_prev = list(range(len(self._prev_boxes)))
+        for box in boxes_xyxy:
+            best_j, best_iou = -1, 0.0
+            for j in avail_prev:
+                score = _iou(box, self._prev_boxes[j])
+                if score > best_iou:
+                    best_iou, best_j = score, j
+            if best_j >= 0 and best_iou >= self._iou_thr:
+                track_id = self._prev_ids[best_j]
+                avail_prev.remove(best_j)
+            else:
+                track_id = self._next_id
+                self._next_id += 1
+
+            cur_boxes.append(box)
+            cur_ids.append(track_id)
+
+            x1, y1, x2, y2 = box
+            cx, cy, w, h = (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1
+            detections.append(PersonDetection(
+                track_id=int(track_id),
+                bbox=np.array([cx, cy, w, h], dtype=np.float32),
+                confidence=float(self._conf),
+            ))
+
+        self._prev_boxes = cur_boxes
+        self._prev_ids = cur_ids
+        return detections
+
+
 @register_detector
 class YOLOXDetector:
     name = "yolox-x"
@@ -182,50 +226,22 @@ class YOLOXDetector:
             ),
             checkpoint_url=url,
         )
-        self._next_id = 0
-        self._prev_boxes: list[np.ndarray] = []
-        self._prev_ids: list[int] = []
+        self._tracker = self.new_tracker()
+
+    @property
+    def model(self):
+        """The rtmlib YOLOX model (``preprocess``, ``inference``, ``postprocess``)."""
+        return self._model
+
+    def new_tracker(self) -> IouTracker:
+        """A tracker with this detector's thresholds, for a camera of its own."""
+        return IouTracker(self._conf, self._iou_thr)
 
     def detect_and_track(
         self, frame: np.ndarray, frame_idx: int
     ) -> list[PersonDetection]:
-        boxes_xyxy = self._model(frame)   # (N, 4) float xyxy, may be empty
-
-        cur_boxes: list[np.ndarray] = []
-        cur_ids: list[int] = []
-        detections: list[PersonDetection] = []
-
-        avail_prev = list(range(len(self._prev_boxes)))
-        for box in boxes_xyxy:
-            best_j, best_iou = -1, 0.0
-            for j in avail_prev:
-                score = _iou(box, self._prev_boxes[j])
-                if score > best_iou:
-                    best_iou, best_j = score, j
-            if best_j >= 0 and best_iou >= self._iou_thr:
-                track_id = self._prev_ids[best_j]
-                avail_prev.remove(best_j)
-            else:
-                track_id = self._next_id
-                self._next_id += 1
-
-            cur_boxes.append(box)
-            cur_ids.append(track_id)
-
-            x1, y1, x2, y2 = box
-            cx, cy, w, h = (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1
-            detections.append(PersonDetection(
-                track_id=int(track_id),
-                bbox=np.array([cx, cy, w, h], dtype=np.float32),
-                confidence=float(self._conf),
-            ))
-
-        self._prev_boxes = cur_boxes
-        self._prev_ids = cur_ids
-        return detections
+        return self._tracker.update(self._model(frame))   # (N, 4) float xyxy, may be empty
 
     def reset_tracker(self) -> None:
         """Reset tracker state between cameras without reloading model weights."""
-        self._next_id = 0
-        self._prev_boxes = []
-        self._prev_ids = []
+        self._tracker = self.new_tracker()

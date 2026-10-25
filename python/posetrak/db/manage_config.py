@@ -315,6 +315,28 @@ BASELINE_CONFIG_VALUES: dict[str, object] = {
 }
 
 
+#: Checked-in default for skeletons that have hand (child-stage) groups, such as the bundled
+#: default skeletons: the baseline values plus the hierarchical form -- tracker_config_stages
+#: rows for the hand groups and the parent stage restricted to its own group. Tracking the
+#: whole skeleton in one stage, or with an unrestricted parent, costs several times the time
+#: and memory (docs/roadmap/features/tracker-performance/tracker-performance-design.md).
+HIERARCHICAL_CONFIG_ID = "factory-defaults-hierarchical"
+HIERARCHICAL_CONFIG_NAME = "(factory defaults, hierarchical hands)"
+HIERARCHICAL_PARENT_GROUPS = ["main"]
+HIERARCHICAL_STAGE_GROUPS = ("HandL", "HandR")
+
+
+def skeleton_has_hand_stages(conn: sqlite3.Connection, skeleton_id: str) -> bool:
+    """True when the skeleton declares a child-stage group (a ``freeflyer_joint`` in ``groups:``)."""
+    import yaml
+
+    row = conn.execute("SELECT yaml_content FROM skeletons WHERE id = ?", (skeleton_id,)).fetchone()
+    if row is None:
+        return False
+    groups = (yaml.safe_load(row[0]) or {}).get("groups") or []
+    return any(isinstance(g, dict) and g.get("freeflyer_joint") for g in groups)
+
+
 def seed_baseline_tracker_config(conn: sqlite3.Connection) -> str:
     """Insert the checked-in baseline tracker_configs row if not already present.
 
@@ -348,6 +370,38 @@ def seed_baseline_tracker_config(conn: sqlite3.Connection) -> str:
             (BASELINE_CONFIG_ID, BASELINE_CONFIG_NAME, None, created_at, 1, *values),
         )
     return BASELINE_CONFIG_ID
+
+
+def seed_hierarchical_tracker_config(conn: sqlite3.Connection) -> str:
+    """Insert the hierarchical default (:data:`HIERARCHICAL_CONFIG_ID`) and its stage rows if absent.
+
+    Same values as the baseline plus ``active_joint_groups`` and one tracker_config_stages row per
+    hand group (every override NULL: the stages inherit the parent row). Seeded on demand by
+    :func:`resolve_default_tracker_config` rather than with the baseline, so databases of runs
+    that never track a skeleton with hand groups do not gain a second default.
+    """
+    seed_baseline_tracker_config(conn)
+    created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    columns = _tuning_columns(conn)
+    values = [_encode(_hierarchical_values().get(col)) for col in columns]
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO tracker_configs (id, name, parent_id, created_at, is_named, "
+            + ", ".join(columns) + ") VALUES ("
+            + ", ".join(["?"] * (5 + len(columns))) + ")",
+            (HIERARCHICAL_CONFIG_ID, HIERARCHICAL_CONFIG_NAME, BASELINE_CONFIG_ID, created_at, 1, *values),
+        )
+        for group in HIERARCHICAL_STAGE_GROUPS:
+            conn.execute(
+                "INSERT OR IGNORE INTO tracker_config_stages (tracker_config_id, group_name)"
+                " VALUES (?, ?)",
+                (HIERARCHICAL_CONFIG_ID, group),
+            )
+    return HIERARCHICAL_CONFIG_ID
+
+
+def _hierarchical_values() -> dict[str, object]:
+    return {**BASELINE_CONFIG_VALUES, "active_joint_groups": HIERARCHICAL_PARENT_GROUPS}
 
 
 def refresh_baseline_tracker_config(conn: sqlite3.Connection) -> bool:
@@ -450,15 +504,18 @@ def resolve_default_tracker_config(
     *,
     trial_id: str | None = None,
     capture_id: str | None = None,
+    skeleton_ids: list[str] | None = None,
 ) -> str:
     """Resolve the effective default ``tracker_configs`` id for a trial or capture.
 
     Resolution order: the trial's own ``default_tracker_config_id`` (if
-    *trial_id* given), else its capture's, else the checked-in baseline
-    config (:data:`BASELINE_CONFIG_ID`) -- seeded into *session* on demand if
-    not already present, so this always resolves to a row that actually
-    exists in *session* even for a session DB the baseline was never
-    otherwise copied into (see the design doc's self-containment note).
+    *trial_id* given), else its capture's, else a checked-in default -- the
+    hierarchical one (:data:`HIERARCHICAL_CONFIG_ID`) when any of *skeleton_ids* has
+    hand groups, otherwise the baseline config (:data:`BASELINE_CONFIG_ID`) --
+    seeded into *session* on demand if not already present, so this always
+    resolves to a row that actually exists in *session* even for a session DB
+    the baseline was never otherwise copied into (see the design doc's
+    self-containment note).
 
     Parameters
     ----------
@@ -471,6 +528,9 @@ def resolve_default_tracker_config(
         Capture to resolve for directly. Ignored if *trial_id* is given and
         that trial has its own default set; otherwise used as the trial's
         fallback if *trial_id* was given, or resolved directly if not.
+    skeleton_ids:
+        Skeletons the run will track. Picks the hierarchical default over the
+        baseline when no scope sets its own default.
 
     Returns
     -------
@@ -504,6 +564,8 @@ def resolve_default_tracker_config(
         if crow is not None and crow["default_tracker_config_id"]:
             return crow["default_tracker_config_id"]
 
+    if skeleton_ids and any(skeleton_has_hand_stages(session, sid) for sid in skeleton_ids):
+        return seed_hierarchical_tracker_config(session)
     seed_baseline_tracker_config(session)
     return BASELINE_CONFIG_ID
 

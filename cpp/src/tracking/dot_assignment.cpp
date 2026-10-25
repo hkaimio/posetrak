@@ -5,6 +5,7 @@
 #include "posetrak/tracking/dot_assignment.hpp"
 
 #include "posetrak/tracking/assignment.hpp"
+#include <algorithm>
 #include <cmath>
 #include <utility>
 
@@ -74,12 +75,27 @@ bool corroborated(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
 }
 }  // namespace
 
+CostSupport KeypointClassModifier::apply(DotSlotRef const& slot,
+                                         UnlabeledCandidate const& candidate,
+                                         DotAssignmentContext const& context) const {
+    int slot_keypoint = -1;
+    if (auto const subject_it = context.subject_marker_keypoint.find(slot.subject_id);
+        subject_it != context.subject_marker_keypoint.end()) {
+        if (auto const marker_it = subject_it->second.find(slot.marker_id);
+            marker_it != subject_it->second.end())
+            slot_keypoint = marker_it->second;
+    }
+    return {1.0, candidate.keypoint_idx != slot_keypoint};
+}
+
 CostSupport TrackletContinuityModifier::apply(DotSlotRef const& slot,
                                               UnlabeledCandidate const& candidate,
                                               DotAssignmentContext const& context) const {
     if (!tracklet_continues(slot, candidate, context.prev_tracklet_ids))
         return {};
-    return {context.dot_tracklet_gate_multiplier, false};
+    return {candidate.keypoint_idx >= 0 ? context.kp_candidate_tracklet_multiplier
+                                        : context.dot_tracklet_gate_multiplier,
+            false};
 }
 
 CostSupport CandidateOwnershipModifier::apply(DotSlotRef const& slot,
@@ -88,6 +104,32 @@ CostSupport CandidateOwnershipModifier::apply(DotSlotRef const& slot,
     // subject_mask has 64 bits; a subject id beyond them owns nothing it can be denied.
     bool const owned = slot.subject_id >= 64 || ((candidate.subject_mask >> slot.subject_id) & 1U);
     return {1.0, !owned};
+}
+
+CostSupport TrackletAssignmentModifier::apply(DotSlotRef const& slot,
+                                              UnlabeledCandidate const& candidate,
+                                              DotAssignmentContext const& context) const {
+    if (context.tracklet_assignments == nullptr || candidate.tracklet_id < 0)
+        return {};
+    auto const verdict = context.tracklet_assignments->verdict(
+        candidate.camera_id, candidate.tracklet_id, candidate.frame_idx);
+    switch (verdict.kind) {
+        case TrackletVerdict::Kind::EXCLUDED:
+            return {1.0, true};
+        case TrackletVerdict::Kind::ASSIGNED:
+            if (verdict.assigned_marker == slot.marker_id)
+                return {context.dot_assigned_factor, false};
+            return {1.0, true};
+        case TrackletVerdict::Kind::NONE:
+            break;
+    }
+    for (int const forbidden : verdict.forbidden_markers) {
+        if (forbidden == slot.marker_id)
+            return {1.0, true};
+    }
+    if (verdict.suggested_marker == slot.marker_id)
+        return {context.dot_suggested_factor, false};
+    return {};
 }
 
 CostSupport ReacquisitionGateModifier::apply(DotSlotRef const& slot,
@@ -128,10 +170,76 @@ CostSupport CrossViewCorroborationModifier::apply(DotSlotRef const& slot,
     return {context.dot_corroboration_gate_multiplier, false};
 }
 
+namespace {
+// Shared by SegmentationMaskModifier::apply() and the winning-pair accumulator
+// update below: this candidate's running in-mask fraction for *slot*'s
+// subject, or 1.0 (fully trusted) if there's no history yet -- see
+// SegmentationMaskModifier's own doc comment for why "no history" must not
+// read as "untrusted".
+double tracklet_mask_fraction(DotSlotRef const& slot, UnlabeledCandidate const& candidate,
+                              DotAssignmentContext const& context) {
+    if (candidate.tracklet_id < 0 || context.tracklet_mask_state == nullptr)
+        return 1.0;
+    auto const subject_it = context.tracklet_mask_state->find(slot.subject_id);
+    if (subject_it == context.tracklet_mask_state->end())
+        return 1.0;
+    auto const camera_it = subject_it->second.find(slot.camera_id);
+    if (camera_it == subject_it->second.end())
+        return 1.0;
+    auto const tracklet_it = camera_it->second.find(candidate.tracklet_id);
+    if (tracklet_it == camera_it->second.end())
+        return 1.0;
+    // A handful of samples must back the fraction before it can exclude or
+    // penalise anything: with one sample it would be 0 or 1, letting a single
+    // bad frame (mask lag, blur) condemn an established tracklet.
+    constexpr int kMinTrackletSamples = 5;
+    auto const frac = tracklet_it->second.fraction(kMinTrackletSamples);
+    return frac.value_or(1.0);
+}
+}  // namespace
+
+CostSupport SegmentationMaskModifier::apply(DotSlotRef const& slot,
+                                            UnlabeledCandidate const& candidate,
+                                            DotAssignmentContext const& context) const {
+    auto const subject_it = context.seg_mask_subject.find(slot.subject_id);
+    if (subject_it == context.seg_mask_subject.end() || subject_it->second.mask_label <= 0)
+        return {};
+
+    double const fraction = tracklet_mask_fraction(slot, candidate, context);
+
+    auto const mask_it = context.seg_masks_by_camera.find(slot.camera_id);
+    if (mask_it != context.seg_masks_by_camera.end()) {
+        // Far from the subject in this frame: not its dot, whatever the tracklet's
+        // history -- a young tracklet (a flickering background light gets a new id
+        // every few frames) has none to judge it by. Only when the subject is in
+        // the mask at all; a frame where segmentation lost it says nothing.
+        if (context.dot_seg_mask_hard_distance_px > 0.0 &&
+            mask_it->second.has_label(subject_it->second.mask_label) &&
+            !mask_label_present_near(mask_it->second, candidate.position_distorted,
+                                     subject_it->second.mask_label,
+                                     context.dot_seg_mask_hard_distance_px))
+            return {1.0, true};
+        bool const in_mask_now =
+            mask_label_present_near(mask_it->second, candidate.position_distorted,
+                                    subject_it->second.mask_label, context.dot_seg_mask_dilate_px);
+        if (!in_mask_now && fraction < context.dot_seg_mask_min_tracklet_fraction)
+            return {1.0, true};
+    }
+
+    double const scale = context.dot_seg_mask_cost_scale_at_zero_fraction;
+    double const factor = 1.0 / (1.0 + (scale - 1.0) * (1.0 - fraction));
+    return {factor, false};
+}
+
 std::vector<std::unique_ptr<CostModifier>>
 default_cost_modifiers(DotAssignmentContext const& context) {
     std::vector<std::unique_ptr<CostModifier>> modifiers;
-    if (context.dot_tracklet_gate_multiplier > 1.0 && !context.prev_tracklet_ids.empty())
+    if (!context.subject_marker_keypoint.empty())
+        modifiers.push_back(std::make_unique<KeypointClassModifier>());
+    if ((context.dot_tracklet_gate_multiplier > 1.0 ||
+         (context.kp_candidate_tracklet_multiplier > 1.0 &&
+          !context.subject_marker_keypoint.empty())) &&
+        !context.prev_tracklet_ids.empty())
         modifiers.push_back(std::make_unique<TrackletContinuityModifier>());
     modifiers.push_back(std::make_unique<CandidateOwnershipModifier>());
     if (context.dot_cross_view_corroboration_px > 0.0 &&
@@ -139,6 +247,11 @@ default_cost_modifiers(DotAssignmentContext const& context) {
         modifiers.push_back(std::make_unique<CrossViewCorroborationModifier>());
     if (context.dot_reacquire_gap_frames > 0)
         modifiers.push_back(std::make_unique<ReacquisitionGateModifier>());
+    if (context.dot_seg_mask_enabled && !context.seg_mask_subject.empty() &&
+        context.tracklet_mask_state != nullptr)
+        modifiers.push_back(std::make_unique<SegmentationMaskModifier>());
+    if (context.tracklet_assignments != nullptr && !context.tracklet_assignments->empty())
+        modifiers.push_back(std::make_unique<TrackletAssignmentModifier>());
     return modifiers;
 }
 
@@ -218,8 +331,9 @@ CameraPairFundamental build_camera_fundamentals(std::unordered_map<int, Camera> 
 std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
     std::vector<SubjectDotPredictions> const& subjects,
     std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
-    DotAssignmentContext const& context) {
+    DotAssignmentContext const& context, AssignmentTrace* trace) {
     std::unordered_map<int, SubjectDotAssignment> result;
+    bool const tracing = trace != nullptr && trace->wants(context.frame_idx);
 
     double const gate_mahalanobis = context.gate_mahalanobis;
     int const frame_idx = context.frame_idx;
@@ -272,6 +386,12 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
         int const n_rows = static_cast<int>(candidates.size());
         int const n_cols = static_cast<int>(columns.size());
         std::vector<double> cost(static_cast<size_t>(n_rows) * static_cast<size_t>(n_cols));
+        // Likelihood terms of keypoint candidates (ln det S and the peak), added to the cost of the
+        // pairs that pass the gate after the matrix is complete; zero for a dot.
+        std::vector<double> extra(cost.size(), 0.0);
+        double min_extra = 0.0;
+        double max_extra = 0.0;
+        size_t const trace_start = tracing ? trace->entries.size() : 0;
         for (int r = 0; r < n_rows; ++r) {
             UnlabeledCandidate const& row_cand = candidates[static_cast<size_t>(r)];
             Eigen::Vector2d const cand_pos = row_cand.position;
@@ -279,21 +399,97 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
                 Column const& col = columns[static_cast<size_t>(c)];
                 MarkerPrediction const& pred = *col.prediction;
                 Eigen::Vector2d const diff = cand_pos - pred.position;
-                double mahal_sq = diff.transpose() * pred.covariance.inverse() * diff;
+                Eigen::Matrix2d covariance = pred.covariance;
+                double nll_extra = 0.0;
+                if (row_cand.keypoint_idx >= 0) {
+                    // A keypoint's detection error is not part of the state's uncertainty: add it
+                    // the way the filter's innovation covariance does for a fixed observation.
+                    double const noise =
+                        (context.pose_noise_std * row_cand.crop_scale + context.calib_noise_std) /
+                        std::max(row_cand.confidence, 0.1);
+                    covariance += Eigen::Matrix2d::Identity() * (noise * noise);
+                    // The negative log-likelihood of the detection: a wider covariance (a weak
+                    // maximum) pays for its width, a higher peak is rewarded.
+                    nll_extra = std::log(covariance.determinant()) -
+                                context.kp_candidate_peak_weight *
+                                    std::log(std::max(row_cand.confidence, 0.01));
+                }
+                double const raw_mahal_sq = diff.transpose() * covariance.inverse() * diff;
+                double mahal_sq = raw_mahal_sq;
+                char const* excluded_by = "";
 
                 DotSlotRef const slot{col.subject_id, camera_id, col.marker_id, &pred};
                 for (auto const& modifier : modifiers) {
                     CostSupport const support = modifier->apply(slot, row_cand, effective_context);
                     if (support.exclude) {
                         mahal_sq = kExcludedCost;
+                        excluded_by = modifier->name();
                         break;
                     }
                     if (support.factor != 1.0)
                         mahal_sq /= support.factor;
                 }
 
-                cost[static_cast<size_t>(r) * static_cast<size_t>(n_cols) +
-                     static_cast<size_t>(c)] = mahal_sq;
+                if (tracing) {
+                    trace->entries.push_back(AssignmentTraceEntry{
+                        camera_id,
+                        r,
+                        row_cand.tracklet_id,
+                        cand_pos.x(),
+                        cand_pos.y(),
+                        col.subject_id,
+                        col.marker_id,
+                        raw_mahal_sq,
+                        mahal_sq,
+                        excluded_by,
+                        false,
+                    });
+                }
+
+                // Flatten every hopeless (but not modifier-excluded) pairing to one shared
+                // cost before it reaches the solver. Without this, solve_assignment()'s
+                // padded-square formulation forces every real column (marker slot) to take
+                // *some* real row (candidate) -- there is no dummy-row equivalent of a
+                // dummy column, so a marker with genuinely no valid candidate this frame
+                // (out of view, occluded by the prop's own geometry) still has to be paired
+                // with whichever real candidate is least-bad for it. Minimising total cost
+                // over the whole matrix then lets the solver trade a *different*, perfectly
+                // good (gate-passing) pairing away in exchange for shaving a few points off
+                // that already-doomed pairing -- pure waste, since a pairing above the gate
+                // is dropped by the caller's own filter regardless of its exact cost, but it
+                // can steal the row a nearby marker's real, correct match needed (confirmed
+                // on real data: two markers with candidates matching to within 1e-4 lost
+                // their own slots this way to a third marker that had no valid candidate on
+                // that camera at all). Clamping removes the incentive: every hopeless pairing
+                // now costs the same regardless of which specific row it lands on, so the
+                // solver has nothing left to gain by disturbing a pairing that already beats
+                // the gate on its own merits.
+                if (mahal_sq > gate_mahalanobis && mahal_sq < kExcludedCost) {
+                    mahal_sq = gate_mahalanobis + 1.0;
+                }
+                size_t const cell =
+                    static_cast<size_t>(r) * static_cast<size_t>(n_cols) + static_cast<size_t>(c);
+                cost[cell] = mahal_sq;
+                if (nll_extra != 0.0 && mahal_sq <= gate_mahalanobis) {
+                    extra[cell] = nll_extra;
+                    min_extra = std::min(min_extra, nll_extra);
+                    max_extra = std::max(max_extra, nll_extra);
+                }
+            }
+        }
+
+        // The gate above tested the distance alone. The extra terms can be negative, and the solver
+        // takes non-negative costs below one gate: shift every pair that passed by the smallest
+        // extra and widen the gate by the spread, so the pairs that passed stay below the gate and
+        // the hopeless and excluded ones above it. Without keypoint candidates both are zero and
+        // the matrix is untouched.
+        double const solver_gate = gate_mahalanobis + (max_extra - min_extra);
+        if (solver_gate != gate_mahalanobis) {
+            for (size_t i = 0; i < cost.size(); ++i) {
+                if (cost[i] <= gate_mahalanobis)
+                    cost[i] += extra[i] - min_extra;
+                else if (cost[i] < kExcludedCost)
+                    cost[i] = solver_gate + 1.0;
             }
         }
 
@@ -304,7 +500,18 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
             return it != context.dot_camera_noise_scale.end() ? it->second : 1.0;
         }();
 
-        auto pairs = solve_assignment(cost, n_rows, n_cols, gate_mahalanobis);
+        auto pairs = solve_assignment(cost, n_rows, n_cols, solver_gate);
+        if (tracing) {
+            // Entries for this camera sit at [trace_start, trace_start + n_rows*n_cols)
+            // in the same row-major (r, c) order the loop above pushed them in, so a
+            // winning pair's entry is a direct index, no search needed.
+            for (auto const& pair : pairs) {
+                size_t const idx = trace_start +
+                                   static_cast<size_t>(pair.row) * static_cast<size_t>(n_cols) +
+                                   static_cast<size_t>(pair.col);
+                trace->entries[idx].in_final_assignment = true;
+            }
+        }
         for (auto const& pair : pairs) {
             Column const& col = columns[static_cast<size_t>(pair.col)];
             UnlabeledCandidate const& cand = candidates[static_cast<size_t>(pair.row)];
@@ -318,13 +525,40 @@ std::unordered_map<int, SubjectDotAssignment> resolve_dot_assignment(
             obs.position_distorted = cand.position_distorted;
             obs.confidence = cand.confidence;
             obs.tracklet_id = cand.tracklet_id;
+            // A keypoint candidate is a heatmap maximum of its crop: its noise scales with the crop
+            // like the fixed observation of the same keypoint (set again below for a dot).
+            obs.crop_scale = cand.keypoint_idx >= 0 ? cand.crop_scale : 0.0;
+
+            // Segmentation-mask trust bookkeeping (segmentation-mask-dot-assignment-
+            // design.md §3): record whether the candidate that actually won this
+            // slot was inside its subject's own mask label this frame, so a later
+            // step's SegmentationMaskModifier can read this tracklet's *recent*
+            // trustworthiness. Updated for the winning pair only -- a losing
+            // candidate's position says nothing about which subject, if any, it
+            // truly belongs to. Silently skipped (not a std::optional early-return)
+            // when segmentation isn't configured, no mask decoded this frame, or the
+            // candidate has no tracklet id to key the accumulator by.
+            if (context.tracklet_mask_state != nullptr && cand.tracklet_id >= 0) {
+                auto const seg_it = context.seg_mask_subject.find(col.subject_id);
+                if (seg_it != context.seg_mask_subject.end() && seg_it->second.mask_label > 0) {
+                    auto const mask_it = context.seg_masks_by_camera.find(camera_id);
+                    if (mask_it != context.seg_masks_by_camera.end()) {
+                        bool const in_mask = mask_label_present_near(
+                            mask_it->second, cand.position_distorted, seg_it->second.mask_label,
+                            context.dot_seg_mask_dilate_px);
+                        (*context.tracklet_mask_state)[col.subject_id][camera_id][cand.tracklet_id]
+                            .add(in_mask, context.dot_seg_mask_tracklet_window);
+                    }
+                }
+            }
+
             // Same reasoning as the ArUco corner and dot-detector write paths'
             // own noise_scale=0.0 convention: a dot candidate's centroid comes
             // from thresholding the full-resolution frame directly, not a
             // fixed-input-resolution network, so there is no crop-scaled
             // detection-algorithm error to describe -- calibration error (ec)
-            // alone should dominate Observation::measurement_noise_std().
-            obs.crop_scale = 0.0;
+            // alone should dominate Observation::measurement_noise_std(). (A keypoint candidate
+            // keeps the crop scale set above.)
 
             // Motion-blur streak (dot_blob_detector.py's elongated-blob
             // acceptance path): its centroid is genuinely less precise than
@@ -429,6 +663,13 @@ void append_unique_candidates(std::vector<UnlabeledCandidate>& dest,
         UnlabeledCandidate* duplicate_of = nullptr;
         for (size_t i = 0; i < n_existing && duplicate_of == nullptr; ++i) {
             auto& d = dest[i];
+            if (c.keypoint_idx >= 0 || d.keypoint_idx >= 0) {
+                if (d.keypoint_idx == c.keypoint_idx && d.frame_idx == c.frame_idx &&
+                    (d.position_distorted - c.position_distorted).norm() <=
+                        std::min(d.merge_radius_px, c.merge_radius_px))
+                    duplicate_of = &d;
+                continue;
+            }
             if (d.frame_idx == c.frame_idx && d.timestamp == c.timestamp &&
                 d.tracklet_id == c.tracklet_id &&
                 d.position_distorted.x() == c.position_distorted.x() &&
@@ -468,6 +709,15 @@ std::string find_dot_config_disagreement(std::vector<TrackerConfig const*> const
         POSETRAK_CHECK_DOT_FIELD(dot_cross_view_corroboration_px)
         POSETRAK_CHECK_DOT_FIELD(dot_corroboration_gate_multiplier)
         POSETRAK_CHECK_DOT_FIELD(dot_camera_noise_scale)
+        POSETRAK_CHECK_DOT_FIELD(dot_seg_mask_enabled)
+        POSETRAK_CHECK_DOT_FIELD(dot_seg_mask_dilate_px)
+        POSETRAK_CHECK_DOT_FIELD(dot_seg_mask_tracklet_window)
+        POSETRAK_CHECK_DOT_FIELD(dot_seg_mask_min_tracklet_fraction)
+        POSETRAK_CHECK_DOT_FIELD(dot_seg_mask_cost_scale_at_zero_fraction)
+        POSETRAK_CHECK_DOT_FIELD(dot_seg_mask_hard_distance_px)
+        POSETRAK_CHECK_DOT_FIELD(pose_noise_std)
+        POSETRAK_CHECK_DOT_FIELD(kp_candidate_peak_weight)
+        POSETRAK_CHECK_DOT_FIELD(kp_candidate_tracklet_multiplier)
 #undef POSETRAK_CHECK_DOT_FIELD
     }
     return {};
@@ -476,12 +726,19 @@ std::string find_dot_config_disagreement(std::vector<TrackerConfig const*> const
 std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     std::vector<DotAssignmentSubject> const& subjects,
     std::unordered_map<int, std::vector<UnlabeledCandidate>> const& candidates_by_camera,
-    TrackerConfig const& config, int frame_idx, double timestamp) {
+    TrackerConfig const& config, int frame_idx, double timestamp, AssignmentTrace* trace,
+    std::unordered_map<int, DecodedSegMask> const& seg_masks_by_camera,
+    TrackletMaskState* tracklet_mask_state, TrackletAssignments const* tracklet_assignments) {
     std::vector<SubjectDotPredictions> predictions;
     predictions.reserve(subjects.size());
     PrevDotPositions prev_positions;
     PrevDotTrackletIds prev_tracklet_ids;
     PrevDotResolvedFrame prev_resolved_frame;
+    std::unordered_map<int, SegMaskSubjectConfig> seg_mask_subject;
+    for (auto const& subject : subjects) {
+        if (subject.seg_mask.mask_label > 0)
+            seg_mask_subject[subject.subject_id] = subject.seg_mask;
+    }
     // Cameras with at least one candidate this step -- computed once, shared
     // by every subject, rather than re-filtered inside each subject's own
     // loop.
@@ -526,10 +783,17 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     context.frame_idx = frame_idx;
     context.timestamp = timestamp;
     context.calib_noise_std = config.calib_noise_std;
+    context.pose_noise_std = config.pose_noise_std;
+    for (auto const& subject : subjects) {
+        if (!subject.marker_keypoint.empty())
+            context.subject_marker_keypoint[subject.subject_id] = subject.marker_keypoint;
+    }
     context.streak_config = streak_config;
     context.prev_positions = std::move(prev_positions);
     context.streak_k_state = streak_k_state;
     context.dot_tracklet_gate_multiplier = config.dot_tracklet_gate_multiplier;
+    context.kp_candidate_peak_weight = config.kp_candidate_peak_weight;
+    context.kp_candidate_tracklet_multiplier = config.kp_candidate_tracklet_multiplier;
     context.prev_tracklet_ids = std::move(prev_tracklet_ids);
     context.dot_reacquire_gap_frames = config.dot_reacquire_gap_frames;
     context.dot_reacquire_max_px = config.dot_reacquire_max_px;
@@ -537,6 +801,17 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
     context.dot_cross_view_corroboration_px = config.dot_cross_view_corroboration_px;
     context.dot_corroboration_gate_multiplier = config.dot_corroboration_gate_multiplier;
     context.dot_camera_noise_scale = config.dot_camera_noise_scale;
+    context.dot_seg_mask_enabled = config.dot_seg_mask_enabled;
+    context.dot_seg_mask_dilate_px = config.dot_seg_mask_dilate_px;
+    context.dot_seg_mask_hard_distance_px = config.dot_seg_mask_hard_distance_px;
+    context.dot_seg_mask_tracklet_window = config.dot_seg_mask_tracklet_window;
+    context.dot_seg_mask_min_tracklet_fraction = config.dot_seg_mask_min_tracklet_fraction;
+    context.dot_seg_mask_cost_scale_at_zero_fraction =
+        config.dot_seg_mask_cost_scale_at_zero_fraction;
+    context.seg_mask_subject = std::move(seg_mask_subject);
+    context.seg_masks_by_camera = seg_masks_by_camera;
+    context.tracklet_mask_state = tracklet_mask_state;
+    context.tracklet_assignments = tracklet_assignments;
     // Fundamental matrices are pure geometry from the calibrated cameras, so any
     // subject's own Tracker gives the same answer -- same "first subject" precedent
     // as streak_k_state above (every dot-bearing subject here is assumed built
@@ -546,7 +821,7 @@ std::unordered_map<int, SubjectDotAssignment> resolve_shared_dot_assignment(
         context.camera_fundamentals =
             build_camera_fundamentals(subjects.front().tracker->cameras());
     }
-    return resolve_dot_assignment(predictions, candidates_by_camera, context);
+    return resolve_dot_assignment(predictions, candidates_by_camera, context, trace);
 }
 
 }  // namespace posetrak

@@ -23,14 +23,17 @@
 #include "posetrak/tracking/dot_predict_profile.hpp"
 #include "posetrak/tracking/frame_step_profile.hpp"
 #include "posetrak/tracking/hierarchical_solver.hpp"
+#include "posetrak/tracking/keypoint_choice_phase.hpp"
 #include "posetrak/tracking/multi_person_tracker.hpp"
 #include "posetrak/tracking/tracker.hpp"
+#include "posetrak/tracking/tracklet_assignment.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 
@@ -823,24 +826,29 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
                 fmt::print("Running RTS backward smoother...\n");
             }
             auto smoothed = tracker.smooth();
+            tracker.release_smoother_cache();
 
-            // smoothed[0] is the frame-0 update's untracked warm-up result when it
-            // actually ran (frame0_tracked) -- it has no filtered-row counterpart,
-            // since that frame's posterior is deliberately never exported (see the
-            // "Note" above the frame-0 update block). Skip it here so smoothed frame N
-            // lines up with tracking_results.csv's frame N instead of being off by one
-            // (a real, previously-shipped bug: every smoothed row was mislabeled).
-            auto const smoothed_begin =
-                frame0_tracked && !smoothed.empty() ? smoothed.begin() + 1 : smoothed.begin();
+            // Label each smoothed frame with the step its timestamp belongs to (see
+            // finalize_person_context()): the warm-up frame has no step, and steps
+            // without observations or without an update leave no row to count.
+            struct StepFrame {
+                int step;
+                SmoothedFrame const* frame;
+            };
+            std::vector<StepFrame> out_frames;
+            for (auto const& sf : smoothed) {
+                int const step = smoothed_step(sf.timestamp, config.start_time, dt);
+                if (step >= 1 && sf.tracked)
+                    out_frames.push_back({step, &sf});
+            }
 
             // smoothed_state_vectors.csv  (diagnostic, same format as state_vectors.csv)
             {
                 auto path = config.output_dir / "smoothed_state_vectors.csv";
                 std::ofstream f(path);
                 f << generate_state_header(*layout) << "\n";
-                int step = 1;
-                for (auto it = smoothed_begin; it != smoothed.end(); ++it) {
-                    export_state_vector(f, step++, it->timestamp, it->state, *layout);
+                for (auto const& [step, sf] : out_frames) {
+                    export_state_vector(f, step, sf->timestamp, sf->state, *layout);
                 }
             }
 
@@ -850,9 +858,8 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
                 std::ofstream f(path);
                 f << "frame,timestamp,joint_name,angle_x,angle_y,angle_z,"
                      "velocity_x,velocity_y,velocity_z\n";
-                int step = 1;
-                for (auto it = smoothed_begin; it != smoothed.end(); ++it) {
-                    write_smoothed_joint_angles_frame(f, step++, it->timestamp, it->state, *layout);
+                for (auto const& [step, sf] : out_frames) {
+                    write_smoothed_joint_angles_frame(f, step, sf->timestamp, sf->state, *layout);
                 }
             }
 
@@ -862,9 +869,8 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
                 std::ofstream f(path);
                 f << "frame,timestamp,pos_x,pos_y,pos_z,quat_w,quat_x,quat_y,quat_z,"
                      "vel_x,vel_y,vel_z,omega_x,omega_y,omega_z\n";
-                int step = 1;
-                for (auto it = smoothed_begin; it != smoothed.end(); ++it) {
-                    write_smoothed_root_pose_frame(f, step++, it->timestamp, it->state);
+                for (auto const& [step, sf] : out_frames) {
+                    write_smoothed_root_pose_frame(f, step, sf->timestamp, sf->state);
                 }
             }
 
@@ -953,6 +959,19 @@ static int run_track(std::string const& config_path, bool verbose, bool quiet, b
 // ---------------------------------------------------------------------------
 // 'track --session-db' subcommand: run the tracker from a session DB.
 // ---------------------------------------------------------------------------
+// Record a thrown error on the runs the tracker had created. Failing to record must not hide
+// the original error, so a failure here is only reported.
+static void mark_runs_failed(std::string const& db_path, std::vector<std::string> const& run_ids,
+                             std::string const& message) {
+    for (auto const& run_id : run_ids) {
+        try {
+            finish_tracking_run(db_path, run_id, "failed", message);
+        } catch (std::exception const& e) {
+            fmt::print(stderr, "Could not mark run {} failed: {}\n", run_id, e.what());
+        }
+    }
+}
+
 static int run_track_from_db(std::string const& db_path, std::string const& sequence_id,
                              std::string const& skeleton_id, std::string const& config_id,
                              std::string const& output_dir, bool verbose, bool quiet,
@@ -961,8 +980,27 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                              std::vector<std::string> const& active_joint_groups,
                              double override_start_time = std::numeric_limits<double>::quiet_NaN(),
                              double override_end_time = std::numeric_limits<double>::quiet_NaN(),
-                             std::optional<Eigen::Vector3d> const& seed_position = std::nullopt) {
+                             std::optional<Eigen::Vector3d> const& seed_position = std::nullopt,
+                             int trace_assignment_start = -1, int trace_assignment_end = -1,
+                             std::string const& seg_run_id = "", int seg_mask_label = 0,
+                             std::string const& tracklet_assignments_path = "",
+                             int seg_revision = -1, std::string const& kp_choice_model_path = "",
+                             double kp_confidence_scale = 5.0,
+                             std::string const& kp_choice_dump_path = "") {
+    std::vector<std::string> run_ids;  // runs to mark failed when tracking throws
     try {
+        // The mask gate reads every mask at one revision, fixed here before anything else so a
+        // save made by the segmentation panel while the run goes on cannot change what the rest
+        // of the run reads (segmentation-versioning-design.md §2.3).
+        if (!seg_run_id.empty() && seg_revision < 0) {
+            auto const newest = SessionReader(db_path).newest_closed_seg_revision(seg_run_id);
+            if (!newest.has_value()) {
+                fmt::print(stderr, "Error: segmentation {} has no saved mask revision\n",
+                           seg_run_id);
+                return 1;
+            }
+            seg_revision = *newest;
+        }
         PersonSpec spec;
         spec.sequence_id = sequence_id;
         spec.skeleton_id = skeleton_id;
@@ -983,6 +1021,76 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
         opts.quiet = quiet;
 
         auto ctx = build_person_context(spec, opts, verbose);
+        run_ids.push_back(ctx->result_writer->run_id());
+
+        // Segmentation-mask-based dot-assignment trust (segmentation-mask-
+        // dot-assignment-design.md): seg_run_id/seg_mask_label are this
+        // subject's own identity, supplied at invocation time and never
+        // persisted (the resolved-from-name mask_label a Python caller looked
+        // up via seg_quality_runs.persons_json, not a name itself -- C++ does
+        // no name resolution). Empty seg_run_id disables the whole mechanism;
+        // ctx->tracker_config.dot_seg_mask_enabled (a DB-configured tracker
+        // tunable) still gates whether SegmentationMaskModifier is actually
+        // registered even when a subject identity is supplied here.
+        SegMaskSubjectConfig seg_mask_subject_config;
+        std::unique_ptr<SessionReader> seg_mask_reader;
+        std::unordered_map<int, std::string> camera_shot_video_ids;
+        TrackletMaskState tracklet_mask_state;
+        if (!seg_run_id.empty() && seg_mask_label > 0) {
+            seg_mask_subject_config.seg_run_id = seg_run_id;
+            seg_mask_subject_config.mask_label = seg_mask_label;
+            seg_mask_reader = std::make_unique<SessionReader>(db_path);
+            camera_shot_video_ids =
+                seg_mask_reader->load_camera_shot_video_ids(ctx->sync_config_id);
+            ctx->result_writer->record_segmentation(seg_run_id, seg_mask_label, seg_revision);
+            if (!quiet) {
+                fmt::print("Segmentation: {} label {} revision {}\n", seg_run_id, seg_mask_label,
+                           seg_revision);
+            }
+        }
+
+        // Decisions about whole dot tracklets made outside the tracker (a review of the capture,
+        // or an automatic pass over the tracklets), as a CSV keyed by camera label and marker
+        // name -- see tracklet_assignment.hpp.
+        TrackletAssignmentFile tracklet_assignments;
+        if (!tracklet_assignments_path.empty()) {
+            std::unordered_map<std::string, int> camera_ids;
+            for (auto const& [name, camera] : ctx->cameras_by_name)
+                camera_ids[name] = camera.id();
+            std::unordered_map<std::string, int> marker_ids;
+            auto const& markers = ctx->skeleton.markers();
+            for (size_t i = 0; i < markers.size(); ++i)
+                marker_ids[markers[i].name] = static_cast<int>(i);
+            tracklet_assignments =
+                load_tracklet_assignments(tracklet_assignments_path, camera_ids, marker_ids);
+            if (!quiet) {
+                fmt::print("Tracklet assignments: {} rules from {} rows ({} rows skipped)\n",
+                           tracklet_assignments.assignments.size(), tracklet_assignments.rows_read,
+                           tracklet_assignments.rows_skipped);
+            }
+        }
+
+        // The windowed choice of keypoint candidates is a phase of its own between loading and the
+        // first filter step; its picks replace the fixed observations of the bound markers.
+        if (ctx->tracker_config.kp_candidates_enabled && ctx->tracker_config.kp_choice.window) {
+            KeypointChoiceInputs choice;
+            choice.db_path = db_path;
+            choice.sequence_id = ctx->full_sequence_id;
+            choice.person_id = person_id;
+            choice.confidence_scale = kp_confidence_scale;
+            if (!kp_choice_model_path.empty())
+                choice.model = load_keypoint_choice_model(kp_choice_model_path);
+            else if (!quiet)
+                fmt::print("Keypoint choice: no --kp-choice-model, so no neighbour support\n");
+            choice.seg_run_id = seg_run_id;
+            choice.seg_mask_label = seg_mask_label;
+            choice.seg_revision = seg_revision;
+            choice.camera_shot_video_ids = camera_shot_video_ids;
+            choice.rules = &tracklet_assignments.assignments;
+            choice.dump_path = kp_choice_dump_path;
+            choice.quiet = quiet;
+            run_keypoint_choice_phase(*ctx, choice);
+        }
 
         step_person_context_frame0(*ctx);
         for (int step = 1; step < ctx->num_steps; ++step) {
@@ -991,7 +1099,7 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
             // step -- every other step (including every step of a dot-free
             // sequence, e.g. the sword's own ArUco corners) keeps calling the
             // untouched step_person_context() below.
-            if (ctx->has_dot_track) {
+            if (ctx->uses_candidate_assignment()) {
                 using Clock = std::chrono::steady_clock;
                 using Ms = std::chrono::duration<double, std::milli>;
 
@@ -1002,15 +1110,62 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
                 frame_step_profile::add_bucket_candidates_ms(Ms(Clock::now() - t_bucket0).count());
                 if (!candidates_by_camera.empty()) {
                     step_person_context_predict(*ctx, step);
-                    std::vector<DotAssignmentSubject> subjects = {
-                        DotAssignmentSubject{0, ctx->tracker.get()}};
+                    std::vector<DotAssignmentSubject> subjects = {DotAssignmentSubject{
+                        0, ctx->tracker.get(), seg_mask_subject_config, ctx->kp_marker_keypoint}};
                     double const t_effective = t_start + ctx->dt / 2.0;
                     auto const t_assign0 = Clock::now();
+                    // AssignmentTrace::wants() gates on frame_idx (== step here), so this
+                    // costs nothing extra on a step outside [trace_assignment_start,
+                    // trace_assignment_end] -- see resolve_dot_assignment()'s own doc
+                    // comment. A fresh trace per step, not one accumulated across the
+                    // whole run, since write_assignment_trace() below persists and
+                    // clears it every step regardless.
+                    AssignmentTrace trace;
+                    trace.start_frame = trace_assignment_start;
+                    trace.end_frame = trace_assignment_end;
+
+                    // This step's segmentation masks, one per camera with candidates,
+                    // decoded fresh every step at the run's pinned revision
+                    // (segmentation-mask-dot-assignment-design.md §5: no cached
+                    // derivative to go stale when a segmentation is re-edited). Each
+                    // camera's own first candidate's frame_idx stands in for "this
+                    // camera's native frame this step" -- candidates within one bucket
+                    // window are already expected to share a frame_idx in the normal
+                    // one-tracker-step-per-video-frame case.
+                    std::unordered_map<int, DecodedSegMask> seg_masks_by_camera;
+                    if (seg_mask_reader) {
+                        for (auto const& [camera_id, cam_candidates] : candidates_by_camera) {
+                            if (cam_candidates.empty())
+                                continue;
+                            auto const svid_it = camera_shot_video_ids.find(camera_id);
+                            if (svid_it == camera_shot_video_ids.end() || svid_it->second.empty())
+                                continue;
+                            auto blob = seg_mask_reader->load_seg_mask_blob(
+                                seg_run_id, svid_it->second, cam_candidates.front().frame_idx,
+                                seg_revision);
+                            if (!blob.has_value())
+                                continue;
+                            DecodedSegMask mask;
+                            auto const cam_it = ctx->cameras_by_id.find(camera_id);
+                            if (cam_it == ctx->cameras_by_id.end())
+                                continue;
+                            mask.native_w = cam_it->second.intrinsics().width;
+                            mask.native_h = cam_it->second.intrinsics().height;
+                            if (decode_seg_mask(*blob, mask))
+                                seg_masks_by_camera[camera_id] = std::move(mask);
+                        }
+                    }
+
                     auto assignment = resolve_shared_dot_assignment(
-                        subjects, candidates_by_camera, ctx->tracker_config, step, t_effective);
+                        subjects, candidates_by_camera, ctx->tracker_config, step, t_effective,
+                        &trace, seg_masks_by_camera, &tracklet_mask_state,
+                        &tracklet_assignments.assignments);
                     frame_step_profile::add_dot_assignment_total_ms(
                         Ms(Clock::now() - t_assign0).count());
                     frame_step_profile::add_step();
+                    if (!trace.entries.empty()) {
+                        ctx->result_writer->write_assignment_trace(step, trace.entries);
+                    }
                     std::vector<Observation> resolved;
                     if (auto it = assignment.find(0); it != assignment.end()) {
                         resolved = it->second.resolved;
@@ -1040,10 +1195,12 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
             }
         }
 
+        finish_tracking_run(db_path, run_ids.front(), "complete");
         return 0;
 
     } catch (std::exception const& e) {
         fmt::print(stderr, "Error: {}\n", e.what());
+        mark_runs_failed(db_path, run_ids, e.what());
         return 1;
     }
 }
@@ -1057,13 +1214,13 @@ static int run_track_from_db(std::string const& db_path, std::string const& sequ
 // run_track_from_db() separately (each person's CSVs land in
 // <output_dir>/person_<index>/).
 // ---------------------------------------------------------------------------
-static int run_multi_person_track_from_db(std::string const& db_path,
-                                          std::vector<PersonSpec> const& specs,
-                                          std::string const& output_dir, bool verbose, bool quiet,
-                                          bool smooth_output, bool debug_output, bool debug_init,
-                                          double min_confidence,
-                                          std::vector<std::string> const& active_joint_groups,
-                                          double override_start_time, double override_end_time) {
+static int run_multi_person_track_from_db(
+    std::string const& db_path, std::vector<PersonSpec> const& specs, std::string const& output_dir,
+    bool verbose, bool quiet, bool smooth_output, bool debug_output, bool debug_init,
+    double min_confidence, std::vector<std::string> const& active_joint_groups,
+    double override_start_time, double override_end_time,
+    std::string const& kp_choice_model_path = "", double kp_confidence_scale = 5.0) {
+    std::vector<std::string> run_ids;  // runs to mark failed when tracking throws
     try {
         BuildPersonContextOptions opts;
         opts.db_path = db_path;
@@ -1083,6 +1240,23 @@ static int run_multi_person_track_from_db(std::string const& db_path,
         }
 
         MultiPersonTracker tracker(resolved_specs, opts, verbose);
+        for (auto const& person_ctx : tracker.persons())
+            run_ids.push_back(person_ctx->result_writer->run_id());
+        // The windowed choice of keypoint candidates, without masks, for every person that asks.
+        for (auto const& person_ctx : tracker.persons()) {
+            if (!person_ctx->tracker_config.kp_candidates_enabled ||
+                !person_ctx->tracker_config.kp_choice.window)
+                continue;
+            KeypointChoiceInputs choice;
+            choice.db_path = db_path;
+            choice.sequence_id = person_ctx->full_sequence_id;
+            choice.person_id = person_ctx->spec.person_id;
+            choice.confidence_scale = kp_confidence_scale;
+            if (!kp_choice_model_path.empty())
+                choice.model = load_keypoint_choice_model(kp_choice_model_path);
+            choice.quiet = quiet;
+            run_keypoint_choice_phase(*person_ctx, choice);
+        }
         tracker.run();
 
         // Hierarchical solver child stages, per person (existence-based toggle -- see
@@ -1100,10 +1274,13 @@ static int run_multi_person_track_from_db(std::string const& db_path,
             }
         }
 
+        for (auto const& run_id : run_ids)
+            finish_tracking_run(db_path, run_id, "complete");
         return 0;
 
     } catch (std::exception const& e) {
         fmt::print(stderr, "Error: {}\n", e.what());
+        mark_runs_failed(db_path, run_ids, e.what());
         return 1;
     }
 }
@@ -1136,6 +1313,15 @@ int main(int argc, char* argv[]) {
     double db_start_time = std::numeric_limits<double>::quiet_NaN();
     double db_end_time = std::numeric_limits<double>::quiet_NaN();
     std::vector<double> db_seed_position;  // see PersonSpec::seed_position
+    int db_trace_assignment_start = -1;
+    int db_trace_assignment_end = -1;
+    std::string db_seg_run_id;
+    int db_seg_mask_label = 0;
+    int db_seg_revision = -1;
+    std::string db_tracklet_assignments;
+    std::string db_kp_choice_model;
+    std::string db_kp_choice_dump;
+    double db_kp_confidence_scale = 5.0;
     // Per-subject seeds for --person mode: repeated 4-value groups (person index, x, y, z).
     std::vector<double> db_subject_seeds;
     // Multi-person mode: repeated 4-value groups (sequence, skeleton, tracker_config,
@@ -1180,6 +1366,54 @@ int main(int argc, char* argv[]) {
                           "first frame where min_cameras_for_init cameras are active)");
     track_cmd->add_option("--end-time", db_end_time,
                           "Override sequence end time in seconds (default: from sequence record)");
+    track_cmd->add_option(
+        "--trace-assignment-start", db_trace_assignment_start,
+        "First tracker step (inclusive) to record a full dot-assignment decision trace for, "
+        "into tracking_assignment_trace -- every candidate considered for a marker slot that "
+        "step, its Mahalanobis cost, which CostModifier (if any) excluded it, and whether it "
+        "won the Hungarian solve. Off by default (no rows written); requires "
+        "--trace-assignment-end too. Single-subject DB mode only.");
+    track_cmd->add_option("--trace-assignment-end", db_trace_assignment_end,
+                          "Last tracker step (inclusive) to trace -- see --trace-assignment-start. "
+                          "Keep the range narrow: this is per-candidate-per-slot detail, not a "
+                          "per-step summary.");
+    track_cmd->add_option(
+        "--seg-run-id", db_seg_run_id,
+        "seg_quality_runs ID whose masks gate the shared dot-assignment phase's trust in a "
+        "candidate's tracklet (SegmentationMaskModifier) -- see segmentation-mask-dot-"
+        "assignment-design.md. Requires --seg-mask-label too; off by default. The tracker "
+        "config's own dot_seg_mask_enabled must also be set for this to have any effect. "
+        "Single-subject DB mode only.");
+    track_cmd->add_option(
+        "--seg-mask-label", db_seg_mask_label,
+        "This subject's own label (1..N) within --seg-run-id's masks -- resolve this from the "
+        "subject's name against seg_quality_runs.persons_json before invoking the tracker; "
+        "C++ does no name resolution of its own.");
+    track_cmd->add_option(
+        "--seg-revision", db_seg_revision,
+        "Mask revision of --seg-run-id to read every mask at (seg_mask_revisions.revision, a "
+        "closed one). Defaults to the newest closed revision at the start of the run. The "
+        "revision used is recorded in tracking_run_persons.seg_revision; pass a recorded one to "
+        "reproduce a run after the masks were edited.");
+    track_cmd->add_option(
+        "--tracklet-assignments", db_tracklet_assignments,
+        "CSV file of decisions about whole dot tracklets (camera_label,tracklet_id,first_frame,"
+        "last_frame,kind,marker_name; kind assign|forbid|reject|other|suggest) that the shared "
+        "dot assignment follows -- see tracklet_assignment.hpp. Single-subject DB mode only.");
+    track_cmd->add_option(
+        "--kp-choice-model", db_kp_choice_model,
+        "CSV file of the pose model's skeleton-neighbour distance limits and keypoint classes "
+        "(lines 'pair,<landmark>,<landmark>,<limit in box heights>' and 'class,<landmark>,"
+        "<class>') for the windowed choice of keypoint candidates. Without it the choice has no "
+        "neighbour support.");
+    track_cmd->add_option("--kp-choice-dump", db_kp_choice_dump,
+                          "Diagnostics: write every keypoint candidate of the windowed choice with "
+                          "its consensus flag, "
+                          "whether it was removed and whether it was picked to this CSV file.");
+    track_cmd->add_option(
+        "--kp-confidence-scale", db_kp_confidence_scale,
+        "The pose model's confidence scale: stored candidate peaks are heatmap peaks times this "
+        "(5.0 for SOMA-77). The peak weight of the windowed choice applies to the heatmap peak.");
     track_cmd
         ->add_option("--seed-position", db_seed_position,
                      "Externally-supplied initial root position (x y z, meters), bypassing "
@@ -1263,7 +1497,8 @@ int main(int argc, char* argv[]) {
             }
             return run_multi_person_track_from_db(
                 db_path, specs, db_output_dir, verbose, quiet, smooth_output, debug_output,
-                debug_init, db_min_confidence, db_active_joint_groups, db_start_time, db_end_time);
+                debug_init, db_min_confidence, db_active_joint_groups, db_start_time, db_end_time,
+                db_kp_choice_model, db_kp_confidence_scale);
         } else if (!db_path.empty()) {
             // DB mode: validate required DB args
             if (db_sequence_id.empty() || db_skeleton_id.empty() || db_config_id.empty()) {
@@ -1277,10 +1512,18 @@ int main(int argc, char* argv[]) {
                 seed_position =
                     Eigen::Vector3d(db_seed_position[0], db_seed_position[1], db_seed_position[2]);
             }
+            if (!db_seg_run_id.empty() != (db_seg_mask_label > 0)) {
+                fmt::print(stderr,
+                           "Error: --seg-run-id and --seg-mask-label must be given together\n");
+                return 1;
+            }
             return run_track_from_db(
                 db_path, db_sequence_id, db_skeleton_id, db_config_id, db_output_dir, verbose,
                 quiet, smooth_output, debug_output, debug_init, db_min_confidence, db_person_id,
-                db_active_joint_groups, db_start_time, db_end_time, seed_position);
+                db_active_joint_groups, db_start_time, db_end_time, seed_position,
+                db_trace_assignment_start, db_trace_assignment_end, db_seg_run_id,
+                db_seg_mask_label, db_tracklet_assignments, db_seg_revision, db_kp_choice_model,
+                db_kp_confidence_scale, db_kp_choice_dump);
         } else {
             if (track_config.empty()) {
                 fmt::print(stderr, "Error: config file required when not using --session-db\n");

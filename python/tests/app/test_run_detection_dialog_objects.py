@@ -182,6 +182,7 @@ def test_on_run_with_person_selected_uses_detection_job(
     from app.pose.main import DetectionJob
 
     monkeypatch.setattr(DetectionJob, "start", lambda self: None)
+    monkeypatch.setattr("app.pose.pose_model_gui.prepare_pose_model", lambda parent, requested: (requested, None))
 
     conn, _object_id = capture_db_with_object
     dlg = _make_dialog(conn, tmp_path)
@@ -190,3 +191,4 @@ def test_on_run_with_person_selected_uses_detection_job(
     dlg._on_run()
 
     assert isinstance(dlg._job, DetectionJob)
+    assert dlg._job._pose_model_name == "soma77-vitpose-h"      # the recommended model is preselected

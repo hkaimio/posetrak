@@ -271,10 +271,11 @@ CREATE TABLE IF NOT EXISTS pose_observation_sequences (
 --   stays the display/CSV-export field regardless, mirroring the linked
 --   row's name when set.
 CREATE TABLE IF NOT EXISTS sequence_persons (
-    sequence_id       TEXT    NOT NULL REFERENCES pose_observation_sequences(id),
-    person_id         INTEGER NOT NULL,
-    person_name       TEXT    NOT NULL,
-    capture_person_id TEXT    REFERENCES capture_persons(id),
+    sequence_id       TEXT    NOT NULL REFERENCES pose_observation_sequences(id), -- the sequence
+    person_id         INTEGER NOT NULL,  -- index inside the sequence's blobs; 0 for the single person a finalised sequence holds
+    person_name       TEXT    NOT NULL,  -- display / CSV-export name, mirrors the linked person's name when set
+    capture_person_id TEXT    REFERENCES capture_persons(id), -- the capture's person; NULL for rows that predate the person model
+    subject_id        TEXT,              -- capture_subjects.id of that person (the same value as capture_person_id); NULL if unknown. Object sequences have no row here, see manage_subject.subject_id_for_sequence
     PRIMARY KEY (sequence_id, person_id)
 );
 
@@ -282,8 +283,12 @@ CREATE TABLE IF NOT EXISTS sequence_persons (
 -- kp_blob: little-endian float32 array shaped [n_keypoints, 3] (x, y, confidence)
 -- camera_instance_id -- references registry: camera_instances(id)
 -- noise_scale: measurement noise scale factor (bbox_w / pose_input_width)
--- source: 'body' | 'hand_l' | 'hand_r' — matches detection_keypoints.region_type's
---   spelling ('full_body' rows become source='body' here). Multiple sources can
+-- source: 'body' | 'hand_l' | 'hand_r' | 'kp_candidates' — matches detection_keypoints.region_type's
+--   spelling ('full_body' rows become source='body' here). 'kp_candidates' rows hold the several heatmap maxima
+--   per keypoint of a candidate detection run (blob: int32 n, int32 n_fields, float32[n, n_fields] with
+--   keypoint_idx, x, y, peak, rank, tracklet_id; not the [n_keypoints, 3] layout above; peak times the pose model's
+--   confidence scale, like the confidence of the body row), their keypoint_idx
+--   named by the sequence's pose_sequence_keypoints rows with obs_source 'kp_candidates'. Multiple sources can
 --   coexist for the same (sequence, camera, frame, person); the C++ loader merges
 --   them into one dense per-marker array, each source keeping its own noise_scale.
 -- detection_run_id: the detection run that produced this row. Usually matches the
@@ -318,49 +323,98 @@ CREATE TABLE IF NOT EXISTS pose_observation_edits (
 CREATE UNIQUE INDEX IF NOT EXISTS pose_observation_edits_unique
     ON pose_observation_edits (sequence_id, camera_instance_id, video_frame);
 
--- Keypoint-slot manifest (marker-based-mocap design doc §4.3; the
--- extensibility seam sketched in docs/data-model-and-storage.md §3). A
--- sequence with no rows here keeps today's implied-by-pose_model layout;
--- a sequence with rows (marker-based-mocap object sequences) declares its
--- own per-slot name/source, e.g. "hilt:c0" / "aruco".
+-- Keypoint manifest: names the slots of the keypoint blobs of one pose_observation_sequences row, per observation
+-- source. Written by finalisation for every new sequence (a body pose model's keypoints, the hand21 keypoints of each
+-- refined hand source, an object's marker corners). The reader binds a slot to the skeleton marker whose landmark
+-- equals the row's name. A source of a sequence without rows here has the COCO-133 layout implied by
+-- pose_observation_sequences.pose_model (every sequence finalised before this table was filled).
 CREATE TABLE IF NOT EXISTS pose_sequence_keypoints (
+    -- the sequence the slot belongs to: pose_observation_sequences.id
     sequence_id   TEXT NOT NULL REFERENCES pose_observation_sequences(id),
+    -- the pose_observations.source whose kp_blob the row indexes: 'body', 'hand_l', 'hand_r' or 'kp_candidates' (the
+    -- keypoint_idx column of a candidate blob; same names as the sequence's 'body' rows) (the '.refined' variant
+    -- of a hand source uses its plain source's rows). 'body' also stands for the primary row of a sequence that has no
+    -- body, such as the 'markers' row of an object sequence.
+    obs_source    TEXT NOT NULL DEFAULT 'body',
+    -- slot (0-based) in that kp_blob, an array of float32 (x, y, confidence)
     keypoint_idx  INTEGER NOT NULL,
+    -- landmark the slot is matched against skeleton Marker.landmark with: '<model>:<keypoint>' ('soma77:LeftHand',
+    -- 'coco133:left_elbow', 'hand21:left_index_1'), or '<marker>:c<0-3>' for a marker corner. A name without a model
+    -- prefix (older SOMA sequences) also matches the landmark '<source>:<name>'.
     name          TEXT NOT NULL,
+    -- model or detector the slot comes from: 'soma77', 'coco133', 'hand21' or 'aruco'
     source        TEXT NOT NULL,
-    PRIMARY KEY (sequence_id, keypoint_idx)
+    PRIMARY KEY (sequence_id, obs_source, keypoint_idx)
 );
 
--- A single tracker execution record
--- tracker_config_id  -- references registry: tracker_configs(id)
--- skeleton_id        -- references registry: skeletons(id)
--- active_camera_ids  -- JSON array of camera instance ID strings
--- marker_names       -- JSON array of marker name strings (column index in state blobs)
+-- A single tracker execution record: one row per tracker execution, written by posetrak-tracker when it creates the run and updated when it ends.
 CREATE TABLE IF NOT EXISTS tracking_runs (
+    -- uuid of the run
     id                       TEXT PRIMARY KEY,
+    -- the pose observations (one person or object) the run tracked: pose_observation_sequences.id
     observation_sequence_id  TEXT NOT NULL REFERENCES pose_observation_sequences(id),
+    -- the tracker configuration used, a copy kept in this database: registry tracker_configs.id
     tracker_config_id        TEXT NOT NULL, -- references registry: tracker_configs(id)
+    -- the skeleton tracked, a copy kept in this database: registry skeletons.id (per-person overrides are in tracking_run_persons)
     skeleton_id              TEXT NOT NULL, -- references registry: skeletons(id)
+    -- the extrinsic calibration (camera poses) the run used
     extrinsic_calibration_id TEXT NOT NULL REFERENCES extrinsic_calibrations(id),
+    -- the sync configuration (camera frame to time mapping) the run used
     sync_config_id           TEXT NOT NULL REFERENCES sync_configs(id),
+    -- when the run was made: UTC timestamp, ISO 8601 with a trailing Z
     ran_at                   TEXT NOT NULL,
+    -- version and build time of the tracker binary that produced the run
     posetrak_version         TEXT NOT NULL,
+    -- JSON array of the camera labels that took part in the run (the order is the camera index in the result blobs)
     active_camera_ids        TEXT NOT NULL,
+    -- JSON array of the marker names of the skeleton (the column order of the marker-indexed blobs)
     marker_names             TEXT NOT NULL,
+    -- free text about the run; NULL when there is none
     notes                    TEXT,
-    trial_id                 TEXT REFERENCES trials(id)
+    -- the trial the run belongs to: trials.id; NULL when it was run on a sequence outside a trial
+    trial_id                 TEXT REFERENCES trials(id),
+    -- display name the user gave the run, shown in the session tree and searched by it; NULL until the run is named
+    name                     TEXT,
+    -- 'running' while the tracker works, 'complete' after its last stage, 'failed' when it
+    -- stopped with an error; a 'running' row with no recent run_progress is shown as
+    -- interrupted and set 'failed' by "posetrak runs cleanup". Rows from before this
+    -- column are 'complete'.
+    status                   TEXT NOT NULL DEFAULT 'complete'
+                             CHECK (status IN ('running', 'complete', 'failed')),
+    -- when the run ended: UTC timestamp, ISO 8601 with a trailing Z; NULL while running
+    -- and for runs from before the column
+    completed_at             TEXT,
+    -- error text of a failed run; NULL for any other status
+    failure                  TEXT
 );
 
--- Per-person skeleton override within a run (supports multi-person tracking)
--- skeleton_id -- references registry: skeletons(id)
--- capture_object_id -- NULL for an actual person; set for a tracked object
---   (marker-based-mocap design doc §4.2).
+-- Who a tracking run tracked (one row per tracked person or object in the run) and
+-- the skeleton used for them. The tracker writes the row when it creates the run;
+-- older runs were backfilled by migration v59.
 CREATE TABLE IF NOT EXISTS tracking_run_persons (
-    run_id     TEXT    NOT NULL REFERENCES tracking_runs(id),
-    person_id  INTEGER NOT NULL,
-    skeleton_id TEXT   NOT NULL, -- references registry: skeletons(id)
-    capture_object_id TEXT REFERENCES capture_objects(id),
+    run_id      TEXT    NOT NULL REFERENCES tracking_runs(id), -- the tracking run
+    person_id   INTEGER NOT NULL,  -- subject index used in this run's tracking_results rows
+    skeleton_id TEXT    NOT NULL,  -- registry skeletons.id used for this subject (per-person override)
+    capture_object_id TEXT REFERENCES capture_objects(id), -- set when the subject is a tracked object; NULL for a person
+    subject_id  TEXT,              -- capture_subjects.id of the tracked person or object; NULL if it could not be resolved
+    seg_quality_run_id TEXT REFERENCES seg_quality_runs(id), -- segmentation run whose masks gated this subject's candidates; NULL without a mask gate
+    seg_mask_label INTEGER,        -- the subject's label (1-255) in those masks; NULL when seg_quality_run_id is NULL
+    seg_revision INTEGER,          -- mask revision read; NULL when the masks are unversioned or there is no gate
     PRIMARY KEY (run_id, person_id)
+);
+
+-- When a running job (a tracking_runs or detection_runs row) last made progress, so
+-- a job whose process died can be told from one that is still working: a 'running'
+-- row whose updated_at is older than posetrak.db.run_status.STALE_AFTER_S is
+-- interrupted. Written by the tracker with each batch of results and by the
+-- detection writers with each batch of detections; the row is deleted when the job
+-- ends or is cleaned up. No row means the job has not reported yet (its start time
+-- is used instead).
+CREATE TABLE IF NOT EXISTS run_progress (
+    -- tracking_runs.id or detection_runs.id of the running job (no foreign key: it names a row of either table)
+    run_id     TEXT PRIMARY KEY,
+    -- UTC time of the newest batch written, ISO 8601 with a trailing Z
+    updated_at TEXT NOT NULL
 );
 
 -- Per-frame tracking results
@@ -426,6 +480,143 @@ CREATE TABLE IF NOT EXISTS tracking_obs_results (
     PRIMARY KEY (run_id, person_id, tracker_step)
 );
 
+-- Assignment-decision trace: every (candidate, marker slot) pair the shared
+-- dot-assignment phase (dot_assignment.cpp, resolve_dot_assignment()) costed
+-- for a frame, not just the winner tracking_obs_results records -- the "why
+-- was detection N (not) assigned to slot X in frame F" instrumentation.
+-- Opt-in and scoped to a requested
+-- step range at tracking time (--trace-assignment-start/--trace-assignment-end
+-- on posetrak-tracker track); a run made without those flags writes no rows
+-- here at all. camera_idx/marker_idx index into the owning tracking_runs
+-- row's own active_camera_ids/marker_names JSON arrays, the same convention
+-- tracking_obs_results.obs_blob's two axes already use.
+CREATE TABLE IF NOT EXISTS tracking_assignment_trace (
+    run_id              TEXT    NOT NULL REFERENCES tracking_runs(id), -- the tracking run
+    person_id           INTEGER NOT NULL,  -- subject index within the run (as in tracking_results)
+    tracker_step        INTEGER NOT NULL,  -- tracker step the assignment was solved for
+    camera_idx          INTEGER NOT NULL,  -- index into the run's active_camera_ids
+    candidate_row       INTEGER NOT NULL,  -- index into that camera/step's raw candidate list
+    tracklet_id         INTEGER NOT NULL,  -- detector tracklet id of the candidate; -1 if it has none
+    candidate_x         REAL    NOT NULL,  -- candidate position x, undistorted pixels
+    candidate_y         REAL    NOT NULL,  -- candidate position y, undistorted pixels
+    marker_idx          INTEGER NOT NULL,  -- index into the run's marker_names: the slot this row costs the candidate against
+    mahal_cost          REAL    NOT NULL,  -- raw squared Mahalanobis distance, before modifiers
+    final_cost          REAL    NOT NULL,  -- cost after modifiers (== mahal_cost if none fired); 1e9 when a modifier excluded the pair
+    excluded_by         TEXT    NOT NULL DEFAULT '',  -- name of the CostModifier that excluded the pair (e.g. segmentation_mask), or ''
+    in_final_assignment INTEGER NOT NULL DEFAULT 0     -- 1 iff this pair won its camera's Hungarian solve
+);
+CREATE INDEX IF NOT EXISTS idx_tracking_assignment_trace_lookup
+    ON tracking_assignment_trace (run_id, person_id, tracker_step);
+
+-- The heatmap maximum a tracking run took for each keypoint of each frame when it chose keypoint candidates
+-- over a time window (tracker_configs.kp_candidate_choice = 'window'): the picks the run's filter used as its
+-- fixed observations, so an editor shows them without recomputing the choice. One row per (run, person,
+-- camera), written by posetrak-tracker when the choice phase has finished. A run with the per-step assignment
+-- or without candidates writes none.
+CREATE TABLE IF NOT EXISTS tracking_kp_picks (
+    -- the tracking run
+    run_id                      TEXT    NOT NULL REFERENCES tracking_runs(id),
+    -- subject index within the run (as in tracking_results)
+    person_id                   INTEGER NOT NULL,
+    -- the camera of the picks; references registry: camera_instances(id)
+    camera_instance_id          TEXT    NOT NULL,
+    -- number of frames of the camera the person has candidates for, within the loaded window
+    n_frames                    INTEGER NOT NULL,
+    -- width of the picks arrays: the highest keypoint index of the sequence's candidate manifest plus one
+    n_keypoints                 INTEGER NOT NULL,
+    -- little-endian int32[n_frames]: video frame (capture_videos frame index) of each row, ascending
+    video_frames                BLOB    NOT NULL,
+    -- little-endian int32[n_frames, n_keypoints], row-major: detection tracklet id of the candidate picked
+    -- for the keypoint in that frame; -1 = no pick (no candidate left, or the keypoint is not bound to a
+    -- marker of the skeleton); -2 = picked but the candidate has no tracklet
+    tracklet_ids                BLOB    NOT NULL,
+    -- int8[n_frames, n_keypoints], row-major: heatmap rank of the picked candidate (0 = the strongest
+    -- maximum of its keypoint in that frame); -1 = no pick
+    ranks                       BLOB    NOT NULL,
+    -- keypoint-frames of this camera with at least one candidate before the strict mask filter
+    n_candidate_keypoint_frames INTEGER NOT NULL,
+    -- of those, the keypoint-frames the strict mask filter left without a candidate; 0 when the filter is off
+    n_filter_emptied            INTEGER NOT NULL,
+    -- keypoint-frames with a pick
+    n_picked                    INTEGER NOT NULL,
+    PRIMARY KEY (run_id, person_id, camera_instance_id)
+);
+
+-- Automatic proposals of which marker slot each dot tracklet is, made without the
+-- tracker from the stored poses of a tracking run (posetrak.markers.autolabel).
+-- One row per tracklet lying on the subject, assigned or not. Written
+-- by the proposal pass, one proposal_set per execution, and only read by the
+-- review tools; a re-run adds a new set, it never rewrites an old one.
+CREATE TABLE IF NOT EXISTS dot_assignment_proposals (
+    -- unique id of the proposal (generate_id)
+    id                 TEXT    PRIMARY KEY,
+    -- the detection run whose dot candidates carry the tracklet
+    detection_run_id   TEXT    NOT NULL REFERENCES detection_runs(id),
+    -- capture_subjects.id of the person or object the slot belongs to; NULL if the capture has a single subject
+    subject_id         TEXT,
+    -- the camera that saw the tracklet; references registry: camera_instances(id)
+    camera_instance_id TEXT    NOT NULL,
+    -- detector tracklet id, unique per detection run and camera
+    tracklet_id        INTEGER NOT NULL,
+    -- first video frame (of that camera's video) of the tracklet
+    first_frame        INTEGER NOT NULL,
+    -- last video frame of the tracklet
+    last_frame         INTEGER NOT NULL,
+    -- the proposed marker: a Marker name of the skeleton, e.g. wrist_rad_L; NULL for a tracklet on
+    -- the person that no slot fitted (confidence 'none'), kept so that it can be assigned by hand
+    slot_name          TEXT,
+    -- median distance in distorted pixels between the tracklet and the slot's predicted position
+    cost_px            REAL    NOT NULL,
+    -- extra cost in pixels of the next best free slot; large means unambiguous
+    margin_px          REAL    NOT NULL,
+    -- cross-camera check: 'corroborated', 'conflict' or 'alone'
+    support            TEXT    NOT NULL,
+    -- 'high', 'medium' or 'review': how far the proposal can be trusted without a human; 'none' without a slot
+    confidence         TEXT    NOT NULL,
+    -- the tracking run whose stored poses predicted the slots; NULL if unknown
+    pose_run_id        TEXT    REFERENCES tracking_runs(id),
+    -- groups the rows of one execution of the proposal pass
+    proposal_set       TEXT    NOT NULL,
+    -- UTC time the row was written
+    created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_dot_assignment_proposals_lookup
+    ON dot_assignment_proposals (detection_run_id, camera_instance_id, tracklet_id);
+
+-- Human decisions about dot tracklets, made in the dot-assignment review and kept per
+-- trial like keypoint edits. 'assign' says the tracklet is slot_name, 'forbid' that it
+-- is not slot_name (many forbids may apply to one tracklet), 'reject' that it is not
+-- a marker at all (clutter, a reflection) and 'other' that it is a marker of another subject
+-- (a prop, another person) and so belongs to no slot of this one; both have slot_name NULL. The frame range limits an edit to part of a
+-- tracklet, whose identity can jump between dots; NULL range means the whole tracklet.
+-- A later row overrides an earlier one for the same tracklet, slot and frames.
+CREATE TABLE IF NOT EXISTS dot_assignment_edits (
+    -- unique id of the edit (generate_id)
+    id                 TEXT    PRIMARY KEY,
+    -- the trial the edit belongs to
+    trial_id           TEXT    NOT NULL REFERENCES trials(id),
+    -- the detection run whose tracklet ids the edit refers to
+    detection_run_id   TEXT    NOT NULL REFERENCES detection_runs(id),
+    -- capture_subjects.id the slot belongs to; NULL if the capture has a single subject
+    subject_id         TEXT,
+    -- the camera that saw the tracklet; references registry: camera_instances(id)
+    camera_instance_id TEXT    NOT NULL,
+    -- detector tracklet id, unique per detection run and camera
+    tracklet_id        INTEGER NOT NULL,
+    -- video frame range the edit covers, inclusive; both NULL for the whole tracklet
+    first_frame        INTEGER,
+    -- last frame of the range, inclusive; NULL with first_frame
+    last_frame         INTEGER,
+    -- 'assign', 'forbid', 'reject' or 'other'
+    kind               TEXT    NOT NULL CHECK (kind IN ('assign', 'forbid', 'reject', 'other')),
+    -- Marker name the edit is about; NULL for 'reject' and 'other'
+    slot_name          TEXT,
+    -- UTC time the edit was made; the latest edit wins
+    created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_dot_assignment_edits_lookup
+    ON dot_assignment_edits (trial_id, detection_run_id, camera_instance_id, tracklet_id);
+
 -- Hierarchical body/hand solver: one row per (run, person, skeleton group)
 -- the solver treats as its own filter pass (e.g. "main", "HandL", "HandR").
 -- Every stage read-modify-writes the same tracking_results/
@@ -446,34 +637,69 @@ CREATE TABLE IF NOT EXISTS tracking_run_stages (
     PRIMARY KEY (run_id, person_id, group_name)
 );
 
--- Detection runs: one row per execution of the pose extraction pipeline.
--- Tracks which detector/pose model was used, over which time range.
--- trial_id: optional link to the trial this run belongs to.
+-- Detection runs: one row per execution of a detection pipeline (person pose, coded
+-- markers or reflective dots). Written by `detect run`, the GUI detection dialogs and the
+-- import commands; append-only: a finished run is never rewritten (a new stage reads it
+-- and writes a new run).
 CREATE TABLE IF NOT EXISTS detection_runs (
+    -- uuid of the run
     id                  TEXT PRIMARY KEY,
+    -- captures.id (historical column name)
     shot_id             TEXT NOT NULL REFERENCES captures(id),
+    -- sync_configs.id that maps video frames to capture time
     sync_config_id      TEXT NOT NULL REFERENCES sync_configs(id),
+    -- trials.id the run belongs to; NULL when the run is not tied to a trial
     trial_id            TEXT REFERENCES trials(id),
+    -- start of the covered range on the capture timeline, seconds
     time_start_s        REAL NOT NULL,
+    -- end of that range, seconds
     time_end_s          REAL NOT NULL,
+    -- box source: person detector name ('yolox-x'), 'segmentation' (boxes from mask labels),
+    -- 'detection-run' (boxes copied from source_detection_run_id), or 'aruco:<dictionary>'
     detector_model      TEXT NOT NULL,
+    -- pose model name ('rtmpose-l-133kp', 'soma77-vitpose-h'); '' for marker runs
     pose_model          TEXT NOT NULL,
+    -- version of the person detector; NULL or '' when unknown
     detector_version    TEXT,
+    -- version of the pose model; NULL or '' when unknown
     pose_version        TEXT,
+    -- person detector confidence threshold the run was made with
     detector_conf       REAL NOT NULL DEFAULT 0.3,
+    -- keypoint confidence threshold recorded with the run
     pose_conf_threshold REAL NOT NULL DEFAULT 0.3,
+    -- pose model input width, pixels; NULL for marker runs
     pose_input_width    INTEGER,
+    -- pose model input height, pixels; NULL for marker runs
     pose_input_height   INTEGER,
+    -- 'running', 'complete' or 'failed'
     status              TEXT NOT NULL DEFAULT 'running',
+    -- UTC ISO-8601 time the run started
     created_at          TEXT NOT NULL,
+    -- UTC ISO-8601 time the run ended; NULL while it is running
     completed_at        TEXT,
-    detector_type       TEXT NOT NULL DEFAULT 'pose',  -- 'pose', 'aruco', 'blob', ...
-    config_json         TEXT,  -- detector-specific config; see marker-mocap-design.md §4.1
-    capture_object_id   TEXT REFERENCES capture_objects(id)  -- NULL for person (pose) runs
+    -- 'pose' (every run before markers existed), 'aruco' (coded-marker and dot runs), 'blob', ...
+    detector_type       TEXT NOT NULL DEFAULT 'pose',
+    -- detector and estimator options as JSON: pose runs record the estimator options (flip test,
+    -- crop enlargement, refinement, decoding, mask gate, hand pass); marker runs the dictionary,
+    -- marker ids and dot settings (marker-mocap-design.md §4.1); NULL for older runs
+    config_json         TEXT,
+    -- capture_objects.id of the object a marker run tracks; NULL for person (pose) runs
+    capture_object_id   TEXT REFERENCES capture_objects(id),
+    -- seg_quality_runs.id whose masks gave the boxes or gated the heatmaps; NULL when no mask was used
+    -- (and for every run made before this column existed)
+    seg_quality_run_id  TEXT REFERENCES seg_quality_runs(id),
+    -- mask revision of that segmentation run that was read; NULL while masks are not versioned
+    seg_revision        INTEGER,
+    -- detection_runs.id whose person boxes this run copied instead of detecting them; NULL otherwise
+    source_detection_run_id TEXT REFERENCES detection_runs(id)
 );
 
 -- Raw keypoints produced by pose estimation, keyed by detection run.
--- keypoints: float32 blob shaped [n_kp, 3] (x, y, confidence) in distorted px.
+-- keypoints: float32 blob shaped [n_kp, 3] (x, y, confidence) in distorted px; for region_type 'kp_candidates'
+--   the candidate blob instead (int32 n, int32 n_fields = 6, float32[n, 6]: keypoint_idx, x, y, peak, rank,
+--   tracklet_id; x, y in distorted px, rank 0 = strongest maximum of the keypoint, tracklet_id -1 = unlinked and
+--   unique per (detection run, camera) otherwise), written by detection runs made with candidates.
+-- region_type: 'full_body' | 'hand_l' | 'hand_r' | 'kp_candidates' | 'dots' | 'markers'.
 -- noise_scale: bbox_w / pose_input_width, used when converting to pose_observations.
 CREATE TABLE IF NOT EXISTS detection_keypoints (
     detection_run_id    TEXT NOT NULL REFERENCES detection_runs(id),
@@ -515,31 +741,40 @@ CREATE INDEX IF NOT EXISTS idx_person_detections_run_video
 -- whose range it covers (containment: shot_id matches, and
 -- time_start_s <= trial.time_start_s AND time_end_s >= trial.time_end_s).
 -- See docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md.
--- trial_id is optional provenance (which trial this was created from), not
--- a scoping constraint. mask_dir: optional path to a directory containing
--- per-video NPZ debug mask files. persons_json: JSON array of person
--- names, index i = mask label i+1 (same convention tracking_runs.
--- marker_names/active_camera_ids already use for an ordered string list
--- in one column) -- the ordinal->name mapping baked into this
--- segmentation's own mask labels at creation time, so a *different*
--- caller reusing this segmentation later (gap 2, RunDetectionDialog)
--- doesn't have to assume today's capture_persons order still matches
--- whatever order was in effect when the masks were made. NULL for
--- segmentations created before this column existed, or via the offline
--- add_seg_quality.py tool (no interactive person labeling there).
+-- Columns:
+--   id             -- UUID of the segmentation run.
+--   shot_id        -- captures.id the masks belong to (the capture, despite the name).
+--   trial_id       -- trials.id it was created from; optional provenance, not a scoping
+--                     constraint. NULL when created outside a trial.
+--   time_start_s   -- start of the range the segmentation covers, capture timeline,
+--                     seconds. Editing may extend it; seg_masks holds the real extent.
+--   time_end_s     -- end of that range, seconds.
+--   created_at     -- ISO 8601 UTC creation time.
+--   quality_source -- how the masks were made: 'cutie' (offline batch),
+--                     'cutie-interactive' (interactive editor), or another tool's name.
+--   erosion_px     -- mask erosion (pixels) applied when scoring keypoints against it.
+--   mask_dir       -- optional directory of per-video NPZ debug mask files; NULL if none.
+--   notes          -- free-text notes; NULL if none.
+--   persons_json   -- LEGACY, no longer read or written. It was a JSON array of names
+--                     (index i = mask label i+1). Label meanings now come from the
+--                     capture_subjects registry plus seg_quality_run_subjects (see
+--                     docs/roadmap/features/subject-identity/subject-identity-design.md);
+--                     migration v60 moved every name in it into the registry. The
+--                     column stays only so old data remains readable.
+--   name           -- optional display name; NULL shows a timestamp instead.
 CREATE TABLE IF NOT EXISTS seg_quality_runs (
-    id             TEXT PRIMARY KEY,
-    shot_id        TEXT NOT NULL REFERENCES captures(id),
-    trial_id       TEXT REFERENCES trials(id),
-    time_start_s   REAL NOT NULL,
-    time_end_s     REAL NOT NULL,
-    created_at     TEXT NOT NULL,
-    quality_source TEXT NOT NULL DEFAULT 'cutie',
-    erosion_px     INTEGER NOT NULL DEFAULT 5,
-    mask_dir       TEXT,
-    notes          TEXT,
-    persons_json   TEXT,
-    name           TEXT
+    id             TEXT PRIMARY KEY,                      -- UUID of the run
+    shot_id        TEXT NOT NULL REFERENCES captures(id), -- capture the masks belong to
+    trial_id       TEXT REFERENCES trials(id),            -- trial it was created from; optional
+    time_start_s   REAL NOT NULL,                         -- covered range start, seconds
+    time_end_s     REAL NOT NULL,                         -- covered range end, seconds
+    created_at     TEXT NOT NULL,                         -- ISO 8601 UTC
+    quality_source TEXT NOT NULL DEFAULT 'cutie',         -- how the masks were made
+    erosion_px     INTEGER NOT NULL DEFAULT 5,            -- mask erosion, pixels
+    mask_dir       TEXT,                                  -- optional NPZ debug directory
+    notes          TEXT,                                  -- free-text notes
+    persons_json   TEXT,                                  -- LEGACY, unused (see above)
+    name           TEXT                                   -- optional display name
 );
 
 -- User-marked "split points": frames where a single Cutie tracking pass
@@ -620,51 +855,173 @@ CREATE TABLE IF NOT EXISTS frame_cache_entries (
 -- capture_person_id -- see sequence_persons.capture_person_id above; same
 --   nullable, additive-not-replacing relationship to person_name.
 CREATE TABLE IF NOT EXISTS detection_track_assignments (
-    detection_run_id  TEXT    NOT NULL REFERENCES detection_runs(id),
-    shot_video_id     TEXT    NOT NULL,
-    track_id          INTEGER NOT NULL,
-    person_name       TEXT    NOT NULL,
-    capture_person_id TEXT    REFERENCES capture_persons(id),
-    first_frame       INTEGER NOT NULL,
-    last_frame        INTEGER NOT NULL,
+    detection_run_id  TEXT    NOT NULL REFERENCES detection_runs(id), -- the detection run the track belongs to
+    shot_video_id     TEXT    NOT NULL,  -- capture_videos.id (one camera) the track was seen in
+    track_id          INTEGER NOT NULL,  -- person_tracks.track_id: the detector's track id, or the mask label in a segmentation-driven run
+    person_name       TEXT    NOT NULL,  -- name the track was assigned to (display)
+    capture_person_id TEXT    REFERENCES capture_persons(id), -- the capture's person it was assigned to; NULL for old rows
+    subject_id        TEXT,              -- capture_subjects.id it was assigned to; NULL if unknown
+    first_frame       INTEGER NOT NULL,  -- first video frame of the assigned segment
+    last_frame        INTEGER NOT NULL,  -- last video frame of the assigned segment (inclusive)
     PRIMARY KEY (detection_run_id, shot_video_id, track_id, first_frame)
 );
--- Segmentation masks for interactive Cutie init widget.
--- One row per (seg_quality_run, camera, frame).  Indexed PNG blob, label 0=bg, 1..N=person.
+-- Revisions of a segmentation run. A run's masks are append-only: each explicit save of the
+-- segmentation panel (also closing the panel, or the end of a propagation job) closes one
+-- revision, and derived results (detection runs, tracking runs) record the revision they read.
+-- Written by the segmentation panel and the migration to schema 68. See
+-- docs/roadmap/features/segmentation-versioning/segmentation-versioning-design.md.
+-- Columns:
+--   seg_quality_run_id -- seg_quality_runs.id the revision belongs to.
+--   revision           -- 0 for the masks the run had when versioning started (or when it was
+--                         created by a tool that does not version), then 1, 2, ... in order. A
+--                         revision opens only after the previous one is closed, so the closed
+--                         revisions of a run are always a prefix 0..n.
+--   created_at         -- ISO 8601 UTC time the revision was opened.
+--   closed_at          -- ISO 8601 UTC time the revision was saved; NULL while it is open for
+--                         editing. Rows of an open revision are invisible to every reader but the
+--                         panel that owns it.
+--   note               -- free text (for example 'recovered after a crash'); NULL if none.
+CREATE TABLE IF NOT EXISTS seg_mask_revisions (
+    seg_quality_run_id TEXT    NOT NULL REFERENCES seg_quality_runs(id), -- the segmentation run
+    revision           INTEGER NOT NULL,  -- 0, 1, 2, ...
+    created_at         TEXT    NOT NULL,  -- ISO 8601 UTC, opened
+    closed_at          TEXT,              -- ISO 8601 UTC, saved; NULL while open
+    note               TEXT,              -- free text; NULL if none
+    PRIMARY KEY (seg_quality_run_id, revision)
+);
+-- At most one open revision per segmentation run: one editor at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_seg_mask_revisions_open
+    ON seg_mask_revisions (seg_quality_run_id) WHERE closed_at IS NULL;
+
+-- Segmentation masks for the interactive Cutie init widget, append-only by revision.
+-- A row holds the mask a frame has from its revision on, until a later row of the same frame.
+-- Only frames changed by a revision have a row in it. Written by the segmentation panel and by
+-- tools that create a segmentation (revision 0).
+-- Columns:
+--   seg_quality_run_id -- seg_quality_runs.id the mask belongs to.
+--   shot_video_id      -- capture_videos.id: the camera view the mask is for.
+--   frame_idx          -- video frame number of the mask, 0-based.
+--   revision           -- seg_mask_revisions.revision that wrote the row.
+--   mask_blob          -- indexed (greyscale) PNG at reduced resolution, label 0 = background,
+--                         1..255 = the subject's mask label. NULL records that the frame has
+--                         no mask from this revision on (a deletion).
+-- The mask of a frame at revision r is the row with the largest revision <= r for that frame;
+-- no row, or a NULL blob, means no mask.
 CREATE TABLE IF NOT EXISTS seg_masks (
-    seg_quality_run_id TEXT    NOT NULL REFERENCES seg_quality_runs(id),
-    shot_video_id      TEXT    NOT NULL REFERENCES capture_videos(id),
-    frame_idx          INTEGER NOT NULL,
-    mask_blob          BLOB    NOT NULL,
-    PRIMARY KEY (seg_quality_run_id, shot_video_id, frame_idx)
+    seg_quality_run_id TEXT    NOT NULL REFERENCES seg_quality_runs(id), -- the segmentation run
+    shot_video_id      TEXT    NOT NULL REFERENCES capture_videos(id),   -- camera view
+    frame_idx          INTEGER NOT NULL,  -- video frame number, 0-based
+    revision           INTEGER NOT NULL DEFAULT 0, -- seg_mask_revisions.revision that wrote the row
+    mask_blob          BLOB,              -- indexed PNG, 0 = background, 1..255 = subject label; NULL = no mask from this revision on
+    PRIMARY KEY (seg_quality_run_id, shot_video_id, frame_idx, revision)
 );
 
--- Capture-control event log: one row per camera per capture, recording when
--- the start and stop commands were sent, executed and confirmed. See
--- docs/roadmap/features/camera-control/camera-control-design.md §4.
---
--- All timestamps are ISO-8601 UTC on the controller clock.
---   start_cmd_ts / stop_cmd_ts   command sent by the controller
---   start_ack_ts                 camera (or its bridge) executed the command
---   start_confirm_ts / stop_confirm_ts
---                                positive confirmation that the camera is
---                                recording / has stopped; NULL when the camera
---                                type cannot confirm
--- confidence: 'confirmed' | 'commanded' | 'manual'
--- status:     'ok' | 'failed' | 'operator_override'
--- camera_instance_id references registry: camera_instances(id).
+-- The masks as they are now: per frame the newest row among closed revisions, frames without a
+-- mask (NULL blob) left out. For readers that show or count current masks; a result that must
+-- be reproduced reads at a recorded revision instead (posetrak.db.seg_revisions).
+CREATE VIEW IF NOT EXISTS seg_masks_latest AS
+SELECT m.seg_quality_run_id, m.shot_video_id, m.frame_idx, m.revision, m.mask_blob
+FROM seg_masks m
+WHERE m.mask_blob IS NOT NULL
+  AND m.revision = (
+      SELECT MAX(m2.revision)
+      FROM seg_masks m2
+      JOIN seg_mask_revisions r2
+        ON r2.seg_quality_run_id = m2.seg_quality_run_id AND r2.revision = m2.revision
+      WHERE m2.seg_quality_run_id = m.seg_quality_run_id
+        AND m2.shot_video_id = m.shot_video_id
+        AND m2.frame_idx = m.frame_idx
+        AND r2.closed_at IS NOT NULL);
 
+-- Every segmentation run starts with a closed revision 0, so masks written for it by tools that
+-- do not version (revision defaults to 0) are visible to readers.
+CREATE TRIGGER IF NOT EXISTS trg_seg_quality_runs_revision0
+AFTER INSERT ON seg_quality_runs
+BEGIN
+    INSERT INTO seg_mask_revisions (seg_quality_run_id, revision, created_at, closed_at)
+    VALUES (NEW.id, 0, NEW.created_at, NEW.created_at);
+END;
+
+-- Capture-scoped identity for persons and objects: a permanent integer label
+-- per subject, used directly as its segmentation-mask label. Kept in step
+-- with capture_persons/capture_objects by the triggers below. See
+-- docs/roadmap/features/subject-identity/subject-identity-design.md and
+-- migrations/028_capture_subjects.sql.
+CREATE TABLE IF NOT EXISTS capture_subjects (
+    id         TEXT PRIMARY KEY,  -- equals capture_persons.id or capture_objects.id of the subject
+    capture_id TEXT NOT NULL,     -- captures.id; no FK, rows are created only by the triggers below
+    kind       TEXT NOT NULL CHECK (kind IN ('person', 'object')), -- which table the subject lives in
+    label      INTEGER NOT NULL CHECK (label BETWEEN 1 AND 255),   -- permanent mask label: MAX+1 per capture, never reused
+    name       TEXT NOT NULL,     -- current name; follows renames of the person or object
+    deleted    INTEGER NOT NULL DEFAULT 0, -- 1 once the person or object was deleted; the row and its label stay so old masks keep a readable name
+    UNIQUE (capture_id, label)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_capture_subjects_live_name
+    ON capture_subjects (capture_id, name) WHERE deleted = 0;
+
+CREATE TABLE IF NOT EXISTS seg_quality_run_subjects (
+    seg_quality_run_id TEXT    NOT NULL REFERENCES seg_quality_runs(id), -- the segmentation
+    label              INTEGER NOT NULL, -- mask label (pixel value) in that segmentation
+    subject_id         TEXT    REFERENCES capture_subjects(id), -- subject the label means there; NULL = explicitly unassigned
+    PRIMARY KEY (seg_quality_run_id, label)
+);
+
+-- A deleted subject's row stays (its label is never reused: the next label is
+-- MAX over all rows, deleted included).
+CREATE TRIGGER IF NOT EXISTS trg_capture_persons_subject_ins
+AFTER INSERT ON capture_persons
+BEGIN
+    INSERT INTO capture_subjects (id, capture_id, kind, label, name)
+    VALUES (NEW.id, NEW.capture_id, 'person',
+            COALESCE((SELECT MAX(label) FROM capture_subjects
+                      WHERE capture_id = NEW.capture_id), 0) + 1,
+            NEW.name);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_capture_objects_subject_ins
+AFTER INSERT ON capture_objects
+BEGIN
+    INSERT INTO capture_subjects (id, capture_id, kind, label, name)
+    VALUES (NEW.id, NEW.capture_id, 'object',
+            COALESCE((SELECT MAX(label) FROM capture_subjects
+                      WHERE capture_id = NEW.capture_id), 0) + 1,
+            NEW.name);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_capture_persons_subject_rename
+AFTER UPDATE OF name ON capture_persons
+BEGIN
+    UPDATE capture_subjects SET name = NEW.name WHERE id = NEW.id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_capture_objects_subject_rename
+AFTER UPDATE OF name ON capture_objects
+BEGIN
+    UPDATE capture_subjects SET name = NEW.name WHERE id = NEW.id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_capture_persons_subject_del
+AFTER DELETE ON capture_persons
+BEGIN
+    UPDATE capture_subjects SET deleted = 1 WHERE id = OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_capture_objects_subject_del
+AFTER DELETE ON capture_objects
+BEGIN
+    UPDATE capture_subjects SET deleted = 1 WHERE id = OLD.id;
+END;
+
+-- Capture-control event log: one row per camera per capture, recording when the start and stop
+-- commands were sent, executed and confirmed. Written by the capture daemon
+-- (pipeline.capture); see docs/roadmap/features/camera-control/camera-control-design.md.
+-- All timestamps are ISO-8601 UTC on the controller's clock, which is not the cameras' clock.
 CREATE TABLE IF NOT EXISTS capture_events (
-    capture_id         TEXT NOT NULL REFERENCES captures(id),
-    camera_instance_id TEXT NOT NULL,
-    start_cmd_ts       TEXT,
-    start_ack_ts       TEXT,
-    start_confirm_ts   TEXT,
-    stop_cmd_ts        TEXT,
-    stop_ack_ts        TEXT,
-    stop_confirm_ts    TEXT,
-    confidence         TEXT NOT NULL CHECK (confidence IN ('confirmed', 'commanded', 'manual')),
-    status             TEXT NOT NULL CHECK (status IN ('ok', 'failed', 'operator_override')),
-    notes              TEXT,
+    capture_id         TEXT NOT NULL REFERENCES captures(id), -- the capture the commands belonged to
+    camera_instance_id TEXT NOT NULL,  -- registry camera_instances.id of the camera
+    start_cmd_ts       TEXT,  -- start command sent by the controller; NULL if never sent
+    start_ack_ts       TEXT,  -- camera (or its bridge) acknowledged executing the start; NULL if not
+    start_confirm_ts   TEXT,  -- positive confirmation that the camera is recording; NULL when the camera type cannot confirm
+    stop_cmd_ts        TEXT,  -- stop command sent by the controller; NULL if never sent
+    stop_ack_ts        TEXT,  -- camera (or its bridge) acknowledged executing the stop; NULL if not
+    stop_confirm_ts    TEXT,  -- positive confirmation that the camera has stopped; NULL when the camera type cannot confirm
+    confidence         TEXT NOT NULL CHECK (confidence IN ('confirmed', 'commanded', 'manual')), -- how far the times can be trusted: confirmed by the camera, only commanded, or operated by hand
+    status             TEXT NOT NULL CHECK (status IN ('ok', 'failed', 'operator_override')), -- outcome for this camera
+    notes              TEXT,  -- free text, for example the reason of a failure; NULL if none
     PRIMARY KEY (capture_id, camera_instance_id)
 );

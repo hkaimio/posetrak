@@ -214,18 +214,48 @@ the pose/detection pipeline:
   row and copy the old run's rows onto it via `INSERT...SELECT` instead of
   mutating the original in place.
 
+- **Segmentation masks are append-only by revision.** `seg_masks` rows belong to a revision
+  (`seg_mask_revisions`; one open revision per segmentation run, written by the segmentation panel).
+  Never `INSERT OR REPLACE` into a closed revision. Readers that show or count the masks as they are
+  read the `seg_masks_latest` view; a job whose result must be reproducible (detection from masks, the
+  tracker's mask gate) resolves `posetrak.db.seg_revisions.newest_closed_revision` once at its start,
+  reads through `mask_at` / `masks_at` (C++: `SessionReader::load_seg_mask_blob` with a revision) and
+  records the revision (`detection_runs.seg_revision`, `tracking_run_persons.seg_revision`).
+
 **Objects and marker detection.** A tracked rigid prop is a `capture_objects` row
 (`marker_body_definition_id` names its geometry), the counterpart of `capture_persons`.
 `detection_runs.detector_type` is `'pose'` (default; every pre-existing row) or `'aruco'`
 (marker runs; reflective-dot detection currently rides in an `'aruco'` run, with its
 parameters under `dot_detection` in `config_json`). `detection_runs.capture_object_id` is
 NULL for person runs. `tracking_run_persons.capture_object_id` is set when a subject of a
-tracking run is an object; `person_id` is a subject index either way. A sequence whose
-`kp_blob` is not a person pose model's layout carries a `pose_sequence_keypoints` manifest
-(`keypoint_idx`, `name`, `source`); a sequence with no manifest rows keeps the layout
-implied by `pose_model`. `SessionReader` matches manifest `name` against `Marker::landmark`.
+tracking run is an object; `person_id` is a subject index either way. Every new sequence
+carries a `pose_sequence_keypoints` manifest per observation source (`obs_source`, `keypoint_idx`,
+`name` = model-qualified landmark such as `soma77:LeftHand`, `source`; the pose models are in
+`posetrak/detection/pose_models.py`); a source with no manifest rows (older sequences) keeps the
+COCO-133 layout implied by `pose_model`. `SessionReader` binds a source by its own manifest only,
+matching manifest `name` against `Marker::landmark`. Default skeletons are composed from layers
+(`posetrak skeleton compose`, `python -m posetrak.skeleton.compose` regenerates them).
 See `docs/data-model-and-storage.md` §3 and
 `docs/roadmap/features/marker-based-mocap/productization-architecture-and-plan.md`.
+
+### Database schema documentation
+
+The SQL schema files (`python/posetrak/db/sql/session_schema.sql`,
+`registry_schema.sql`) are the reference for what every column means, and the
+schema is complex enough that it must be readable from there alone.
+
+**Whenever you create or modify a table, document every column of that
+table**, not just the ones you touched. Give each column a comment on its own
+line (`-- ...`) or on the comment line directly above it saying what it holds:
+the unit or coordinate frame, what `NULL` means, and which table and column an
+id refers to. Legacy or unused columns say so and what replaced them. A table
+comment above the `CREATE TABLE` explains what a row is and who writes it.
+
+Enforcement is a ratchet: `python/tests/db/test_schema_documentation.py` lists
+the fully documented tables (`DOCUMENTED_TABLES`) and fails if any of their
+columns loses its comment. Add the table to that list in the same change that
+documents it; never remove one. A migration file is a historical record and is
+not edited to add comments; document the table in the schema file.
 
 ### Design principle: automation vs. prior human edits
 

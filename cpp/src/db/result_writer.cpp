@@ -87,6 +87,7 @@ ResultWriter::ResultWriter(std::string const& db_path, std::string const& sequen
         throw std::runtime_error("ResultWriter: failed to open DB '" + db_path + "': " + err);
     }
 
+    sqlite3_busy_timeout(db_, kSessionDbBusyTimeoutMs);
     sqlite3_exec(db_, "PRAGMA foreign_keys=ON;", nullptr, nullptr, nullptr);
 
     run_id_ = generate_uuid_v4();
@@ -112,8 +113,8 @@ ResultWriter::ResultWriter(std::string const& db_path, std::string const& sequen
         "INSERT INTO tracking_runs"
         " (id, observation_sequence_id, tracker_config_id, skeleton_id,"
         "  extrinsic_calibration_id, sync_config_id, ran_at, posetrak_version,"
-        "  active_camera_ids, marker_names)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        "  active_camera_ids, marker_names, status)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running')";
 
     rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
@@ -139,6 +140,34 @@ ResultWriter::ResultWriter(std::string const& db_path, std::string const& sequen
         throw std::runtime_error(std::string("ResultWriter: INSERT tracking_runs failed: ") +
                                  sqlite3_errmsg(db_));
     }
+
+    touch_progress();
+
+    // Record who was tracked: one tracking_run_persons row with the run's
+    // capture subject (subject-identity-design.md). The subject is the
+    // sequence's detection run's object, else the sequence's person -- both
+    // plain SQL lookups, no name matching. Best effort: provenance must never
+    // block a run, so a database without these tables (or a failure here) is
+    // silently skipped.
+    sqlite3_stmt* trp = nullptr;
+    char const* trp_sql =
+        "INSERT OR IGNORE INTO tracking_run_persons"
+        " (run_id, person_id, skeleton_id, capture_object_id, subject_id)"
+        " SELECT ?1, ?2, ?3, dr.capture_object_id,"
+        "        COALESCE(dr.capture_object_id,"
+        "                 (SELECT sp.subject_id FROM sequence_persons sp"
+        "                  WHERE sp.sequence_id = ?4 AND sp.person_id = ?2))"
+        " FROM pose_observation_sequences pos"
+        " LEFT JOIN detection_runs dr ON dr.id = pos.detection_run_id"
+        " WHERE pos.id = ?4";
+    if (sqlite3_prepare_v2(db_, trp_sql, -1, &trp, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(trp, 1, run_id_.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int(trp, 2, person_id_);
+        sqlite3_bind_text(trp, 3, skeleton_id.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(trp, 4, sequence_id.c_str(), -1, SQLITE_STATIC);
+        sqlite3_step(trp);
+    }
+    sqlite3_finalize(trp);
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +186,7 @@ ResultWriter::ResultWriter(std::string const& db_path, std::string const& run_id
         throw std::runtime_error("ResultWriter: failed to open DB '" + db_path + "': " + err);
     }
 
+    sqlite3_busy_timeout(db_, kSessionDbBusyTimeoutMs);
     sqlite3_exec(db_, "PRAGMA foreign_keys=ON;", nullptr, nullptr, nullptr);
 
     // Load camera_labels_/marker_names_ from the parent's tracking_runs row so
@@ -267,13 +297,19 @@ void ResultWriter::write_frame(int step, double timestamp, Eigen::VectorXd const
 
 void ResultWriter::write_smoothed_frame(int step, double timestamp, Eigen::VectorXd const& state,
                                         Eigen::MatrixXd const& covariance) {
+    if (covariance.size() > 0)
+        write_smoothed_frame(step, timestamp, state, Eigen::VectorXd(covariance.diagonal()));
+    else
+        write_smoothed_frame(step, timestamp, state, Eigen::VectorXd());
+}
+
+void ResultWriter::write_smoothed_frame(int step, double timestamp, Eigen::VectorXd const& state,
+                                        Eigen::VectorXd const& cov_diag) {
     auto state_blob = encode_vector(state);
 
     std::vector<uint8_t> cov_diag_blob;
-    if (covariance.size() > 0) {
-        Eigen::VectorXd diag = covariance.diagonal();
-        cov_diag_blob = encode_vector(diag);
-    }
+    if (cov_diag.size() > 0)
+        cov_diag_blob = encode_vector(cov_diag);
 
     pending_.emplace_back(step, timestamp, std::move(state_blob), std::move(cov_diag_blob), 0, 0,
                           0.0, 0.0, 0, 1);
@@ -360,6 +396,8 @@ void ResultWriter::flush_pending() {
         throw std::runtime_error("ResultWriter: INSERT tracking_results failed: " + fail_msg);
     }
 
+    touch_progress();
+
     rc = sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, &errmsg);
     if (rc != SQLITE_OK) {
         std::string err = errmsg ? errmsg : "unknown";
@@ -368,6 +406,81 @@ void ResultWriter::flush_pending() {
     }
 
     pending_.clear();
+}
+
+// Dates the newest activity of the run so a run whose process died can be told from one that
+// is still working (run_progress, session_schema.sql). Runs inside the caller's transaction, or
+// on its own when there is none.
+void ResultWriter::touch_progress() {
+    last_progress_ = std::chrono::steady_clock::now();
+    sqlite3_stmt* stmt = nullptr;
+    char const* sql =
+        "INSERT INTO run_progress (run_id, updated_at) VALUES (?, ?)"
+        " ON CONFLICT(run_id) DO UPDATE SET updated_at = excluded.updated_at";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        throw std::runtime_error(std::string("ResultWriter: prepare INSERT run_progress: ") +
+                                 sqlite3_errmsg(db_));
+    }
+    std::string const now = utc_iso_timestamp();
+    sqlite3_bind_text(stmt, 1, run_id_.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, now.c_str(), -1, SQLITE_STATIC);
+    int const rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        throw std::runtime_error(std::string("ResultWriter: INSERT run_progress failed: ") +
+                                 sqlite3_errmsg(db_));
+    }
+}
+
+// Long phases that do not go through flush_pending() (patching a child stage's rows) report
+// progress at most this often, so a busy run is not slowed by the extra write.
+void ResultWriter::touch_progress_if_due() {
+    if (std::chrono::steady_clock::now() - last_progress_ >= std::chrono::seconds(30))
+        touch_progress();
+}
+
+void finish_tracking_run(std::string const& db_path, std::string const& run_id,
+                         std::string const& status, std::string const& failure) {
+    sqlite3* db = nullptr;
+    if (sqlite3_open_v2(db_path.c_str(), &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+                        nullptr) != SQLITE_OK) {
+        std::string err = db ? sqlite3_errmsg(db) : "unknown error";
+        if (db)
+            sqlite3_close(db);
+        throw std::runtime_error("finish_tracking_run: failed to open DB '" + db_path +
+                                 "': " + err);
+    }
+    sqlite3_busy_timeout(db, kSessionDbBusyTimeoutMs);
+
+    std::string const now = utc_iso_timestamp();
+    sqlite3_stmt* stmt = nullptr;
+    char const* update_sql =
+        "UPDATE tracking_runs SET status = ?, completed_at = ?, failure = ? WHERE id = ?";
+    int rc = sqlite3_prepare_v2(db, update_sql, -1, &stmt, nullptr);
+    if (rc == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, status.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, now.c_str(), -1, SQLITE_STATIC);
+        if (failure.empty())
+            sqlite3_bind_null(stmt, 3);
+        else
+            sqlite3_bind_text(stmt, 3, failure.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 4, run_id.c_str(), -1, SQLITE_STATIC);
+        rc = sqlite3_step(stmt);
+    }
+    std::string err = rc == SQLITE_DONE ? "" : sqlite3_errmsg(db);
+    sqlite3_finalize(stmt);
+    if (rc == SQLITE_DONE) {
+        stmt = nullptr;
+        if (sqlite3_prepare_v2(db, "DELETE FROM run_progress WHERE run_id = ?", -1, &stmt,
+                               nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, run_id.c_str(), -1, SQLITE_STATIC);
+            sqlite3_step(stmt);
+        }
+        sqlite3_finalize(stmt);
+    }
+    sqlite3_close(db);
+    if (rc != SQLITE_DONE)
+        throw std::runtime_error("finish_tracking_run: UPDATE tracking_runs failed: " + err);
 }
 
 // ---------------------------------------------------------------------------
@@ -475,6 +588,81 @@ void ResultWriter::write_obs_results(int step, std::vector<ObservationResult> co
 
 // ---------------------------------------------------------------------------
 
+void ResultWriter::write_assignment_trace(int step,
+                                          std::vector<AssignmentTraceEntry> const& entries) {
+    if (entries.empty())
+        return;
+
+    char* errmsg = nullptr;
+    int rc = sqlite3_exec(db_, "BEGIN;", nullptr, nullptr, &errmsg);
+    if (rc != SQLITE_OK) {
+        std::string err = errmsg ? errmsg : "unknown";
+        sqlite3_free(errmsg);
+        throw std::runtime_error("ResultWriter: BEGIN failed: " + err);
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql =
+        "INSERT INTO tracking_assignment_trace"
+        " (run_id, person_id, tracker_step, camera_idx, candidate_row, tracklet_id,"
+        "  candidate_x, candidate_y, marker_idx, mahal_cost, final_cost, excluded_by,"
+        "  in_final_assignment)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+    rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+        throw std::runtime_error(
+            std::string("ResultWriter: prepare INSERT tracking_assignment_trace: ") +
+            sqlite3_errmsg(db_));
+    }
+
+    bool failed = false;
+    std::string fail_msg;
+    for (auto const& e : entries) {
+        sqlite3_bind_text(stmt, 1, run_id_.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 2, person_id_);
+        sqlite3_bind_int(stmt, 3, step);
+        sqlite3_bind_int(stmt, 4, e.camera_id);
+        sqlite3_bind_int(stmt, 5, e.candidate_row);
+        sqlite3_bind_int(stmt, 6, e.tracklet_id);
+        sqlite3_bind_double(stmt, 7, e.candidate_x);
+        sqlite3_bind_double(stmt, 8, e.candidate_y);
+        sqlite3_bind_int(stmt, 9, e.marker_id);
+        sqlite3_bind_double(stmt, 10, e.mahal_cost);
+        sqlite3_bind_double(stmt, 11, e.final_cost);
+        sqlite3_bind_text(stmt, 12, e.excluded_by.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 13, e.in_final_assignment ? 1 : 0);
+
+        int step_rc = sqlite3_step(stmt);
+        sqlite3_reset(stmt);
+        sqlite3_clear_bindings(stmt);
+
+        if (step_rc != SQLITE_DONE) {
+            failed = true;
+            fail_msg = sqlite3_errmsg(db_);
+            break;
+        }
+    }
+
+    sqlite3_finalize(stmt);
+
+    if (failed) {
+        sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+        throw std::runtime_error("ResultWriter: INSERT tracking_assignment_trace failed: " +
+                                 fail_msg);
+    }
+
+    rc = sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, &errmsg);
+    if (rc != SQLITE_OK) {
+        std::string err = errmsg ? errmsg : "unknown";
+        sqlite3_free(errmsg);
+        throw std::runtime_error("ResultWriter: COMMIT failed: " + err);
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 void ResultWriter::patch_obs_results(int step, std::vector<ObservationResult> const& observations,
                                      std::vector<uint8_t> const& pair_diff_reconstructed,
                                      std::vector<std::string> const& parent_owned_markers) {
@@ -492,6 +680,7 @@ void ResultWriter::patch_obs_results(int step, std::vector<ObservationResult> co
     // Make sure a row this same writer may have just batched is visible to the
     // SELECT below.
     flush_pending();
+    touch_progress_if_due();
 
     int n_cams = static_cast<int>(camera_labels_.size());
     int n_markers = static_cast<int>(marker_names_.size());
@@ -596,6 +785,7 @@ void ResultWriter::patch_frame(int step, bool is_smoothed, std::vector<int> cons
     // Make sure a row this same writer may have just batched is visible to the
     // SELECT below.
     flush_pending();
+    touch_progress_if_due();
 
     sqlite3_stmt* select_stmt = nullptr;
     const char* select_sql =
@@ -679,6 +869,67 @@ void ResultWriter::patch_frame(int step, bool is_smoothed, std::vector<int> cons
 }
 
 // ---------------------------------------------------------------------------
+
+void ResultWriter::record_segmentation(std::string const& seg_run_id, int mask_label,
+                                       int revision) {
+    sqlite3_stmt* stmt = nullptr;
+    char const* sql =
+        "UPDATE tracking_run_persons"
+        " SET seg_quality_run_id = ?, seg_mask_label = ?, seg_revision = ?"
+        " WHERE run_id = ? AND person_id = ?";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        throw std::runtime_error(
+            std::string("ResultWriter: prepare UPDATE tracking_run_persons: ") +
+            sqlite3_errmsg(db_));
+    }
+    sqlite3_bind_text(stmt, 1, seg_run_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, mask_label);
+    sqlite3_bind_int(stmt, 3, revision);
+    sqlite3_bind_text(stmt, 4, run_id_.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 5, person_id_);
+    int const rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        throw std::runtime_error(std::string("ResultWriter: UPDATE tracking_run_persons failed: ") +
+                                 sqlite3_errmsg(db_));
+    }
+}
+
+void ResultWriter::write_kp_picks(KeypointPicks const& picks) {
+    sqlite3_stmt* stmt = nullptr;
+    char const* sql =
+        "INSERT OR REPLACE INTO tracking_kp_picks"
+        " (run_id, person_id, camera_instance_id, n_frames, n_keypoints, video_frames,"
+        "  tracklet_ids, ranks, n_candidate_keypoint_frames, n_filter_emptied, n_picked)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        throw std::runtime_error(std::string("ResultWriter: prepare INSERT tracking_kp_picks: ") +
+                                 sqlite3_errmsg(db_));
+    }
+    sqlite3_bind_text(stmt, 1, run_id_.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, person_id_);
+    sqlite3_bind_text(stmt, 3, picks.camera_instance_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 4, picks.n_frames);
+    sqlite3_bind_int(stmt, 5, picks.n_keypoints);
+    // A zero-length blob needs a non-null pointer to be stored as a BLOB rather than NULL.
+    auto bind_blob = [&](int index, void const* data, size_t bytes) {
+        static char const empty = 0;
+        sqlite3_bind_blob(stmt, index, bytes ? data : &empty, static_cast<int>(bytes),
+                          SQLITE_STATIC);
+    };
+    bind_blob(6, picks.video_frames.data(), picks.video_frames.size() * sizeof(std::int32_t));
+    bind_blob(7, picks.tracklet_ids.data(), picks.tracklet_ids.size() * sizeof(std::int32_t));
+    bind_blob(8, picks.ranks.data(), picks.ranks.size() * sizeof(std::int8_t));
+    sqlite3_bind_int64(stmt, 9, picks.n_candidate_keypoint_frames);
+    sqlite3_bind_int64(stmt, 10, picks.n_filter_emptied);
+    sqlite3_bind_int64(stmt, 11, picks.n_picked);
+    int const rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        throw std::runtime_error(std::string("ResultWriter: INSERT tracking_kp_picks failed: ") +
+                                 sqlite3_errmsg(db_));
+    }
+}
 
 void ResultWriter::set_stage_status(std::string const& group_name, std::string const& status,
                                     bool set_started, bool set_completed) {

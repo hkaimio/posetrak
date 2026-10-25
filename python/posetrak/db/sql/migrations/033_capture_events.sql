@@ -2,7 +2,7 @@
 --
 -- SPDX-License-Identifier: Apache-2.0
 
--- 028_capture_events.sql
+-- 033_capture_events.sql
 -- Capture-control event log: one row per camera per capture, recording when
 -- the start and stop commands were sent, executed and confirmed. See
 -- docs/roadmap/features/camera-control/camera-control-design.md §4.

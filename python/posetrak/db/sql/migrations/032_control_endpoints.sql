@@ -2,7 +2,7 @@
 --
 -- SPDX-License-Identifier: Apache-2.0
 
--- 027_control_endpoints.sql
+-- 032_control_endpoints.sql
 -- How a physical camera is controlled remotely during capture. See
 -- docs/roadmap/features/camera-control/camera-control-design.md §4.
 --

@@ -66,9 +66,13 @@ Tracker::Tracker(std::shared_ptr<const Skeleton> skeleton,
 
 std::map<std::string, Eigen::Vector3d>
 Tracker::triangulate_markers(std::vector<Observation> const& observations) const {
+    // Only absolute pixel positions can be triangulated: a PAIR_DIFF observation carries a
+    // pixel offset to the marker's parent and a VELOCITY one a frame-to-frame pixel delta,
+    // and either would pull the DLT solution far from the marker.
     std::map<int, std::vector<Observation>> obs_by_marker;
     for (auto const& obs : observations) {
-        obs_by_marker[obs.marker_id].push_back(obs);
+        if (obs.mode == MeasurementMode::POSITION)
+            obs_by_marker[obs.marker_id].push_back(obs);
     }
 
     std::map<std::string, Eigen::Vector3d> marker_positions;
@@ -994,6 +998,8 @@ Tracker::predict_dot_slot_predictions(int camera_id) const {
                 continue;
             dot_marker_ids.push_back(static_cast<int>(i));
         }
+        dot_marker_ids.insert(dot_marker_ids.end(), candidate_slot_markers_.begin(),
+                              candidate_slot_markers_.end());
         result = ukf_->predict_marker_slots(dot_marker_ids, camera_id, *pending_prior_state_,
                                             pending_prior_cov_, cameras_, *fk_);
     }
@@ -1042,6 +1048,8 @@ Tracker::predict_dot_slot_predictions_all_cameras(std::vector<int> const& camera
             continue;
         dot_marker_ids.push_back(static_cast<int>(i));
     }
+    dot_marker_ids.insert(dot_marker_ids.end(), candidate_slot_markers_.begin(),
+                          candidate_slot_markers_.end());
     return ukf_->predict_marker_slots_all_cameras(dot_marker_ids, camera_ids, *pending_prior_state_,
                                                   pending_prior_cov_, cameras_, *fk_);
 }
@@ -1067,6 +1075,15 @@ TrackingResult Tracker::update_step(std::vector<Observation> const& observations
 
     // Step 2: Check if we have observations
     if (!has_sufficient_observations(annotated)) {
+        // The filter's state continues through this frame as its own prediction, so the
+        // smoother needs the frame too (see FrameSmootherData).
+        if (smoothing_enabled_) {
+            smoother_cache_.push_back(FrameSmootherData{
+                timestamp, ukf_->state(), ukf_->covariance(), prior_state, prior_cov,
+                predict_result.cross_cov_future.get(), /*tracked=*/false});
+        } else {
+            predict_result.cross_cov_future.get();
+        }
         return TrackingResult{timestamp, ukf_->state(), ukf_->covariance(),         {},
                               0,         true,          "Insufficient observations"};
     }
@@ -1214,6 +1231,10 @@ void Tracker::reset() {
 }
 
 // ─── RTS smoothing ────────────────────────────────────────────────────────────
+
+void Tracker::release_smoother_cache() {
+    std::vector<FrameSmootherData>().swap(smoother_cache_);
+}
 
 void Tracker::enable_smoothing(bool enable) {
     smoothing_enabled_ = enable;

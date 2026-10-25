@@ -16,6 +16,7 @@ from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -23,6 +24,8 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStatusBar,
     QToolBar,
+    QVBoxLayout,
+    QWidget,
 )
 from PySide6.QtCore import Qt
 
@@ -35,6 +38,7 @@ from posetrak.db.db import (
     open_session,
     seed_bundled_defaults,
 )
+from app.ui.about import show_about
 from app.ui.session_tree import SessionTreeWidget
 
 _MAX_RECENT = 8
@@ -128,7 +132,16 @@ class MainWindow(QMainWindow):
         self._tree.object_track_selected.connect(self._show_object_track)
         self._tree.tracking_run_selected.connect(self._show_tracking_run)
         self._tree.selection_changed.connect(self._save_tree_selection)
-        splitter.addWidget(self._tree)
+        self._tree_search = QLineEdit()
+        self._tree_search.setPlaceholderText("Search by name or id…")
+        self._tree_search.setClearButtonEnabled(True)
+        self._tree_search.textChanged.connect(self._tree.set_filter)
+        tree_pane = QWidget()
+        tree_layout = QVBoxLayout(tree_pane)
+        tree_layout.setContentsMargins(0, 0, 0, 0)
+        tree_layout.addWidget(self._tree_search)
+        tree_layout.addWidget(self._tree, 1)
+        splitter.addWidget(tree_pane)
 
         self._content = QStackedWidget()
         placeholder = QLabel("Open a session database to see its contents.")
@@ -205,6 +218,12 @@ class MainWindow(QMainWindow):
         reload_act.setShortcut("F5")
         reload_act.triggered.connect(self._tree.reload)
         session_menu.addAction(reload_act)
+
+        # ---- Help menu ----
+        help_menu = bar.addMenu("&Help")
+        about_act = QAction("&About PoseTrak…", self)
+        about_act.triggered.connect(lambda: show_about(self))
+        help_menu.addAction(about_act)
 
     def _build_toolbar(self) -> None:
         tb = QToolBar("Main", self)

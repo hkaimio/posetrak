@@ -123,6 +123,11 @@ void ObservationSet::add_sequence(ObservationSequence const& sequence) {
     sequences_[sequence.camera_name] = sequence;
 }
 
+void ObservationSet::add_sequence(ObservationSequence&& sequence) {
+    std::string const name = sequence.camera_name;
+    sequences_[name] = std::move(sequence);
+}
+
 ObservationSequence const* ObservationSet::get_sequence(std::string const& camera_name) const {
     auto it = sequences_.find(camera_name);
     return (it != sequences_.end()) ? &it->second : nullptr;

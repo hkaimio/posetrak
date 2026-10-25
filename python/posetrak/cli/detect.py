@@ -22,8 +22,9 @@ from posetrak.cli._output import fail, print_jsonl, print_record, print_table
 from posetrak.db.db import open_session, resolve_id_prefix
 from posetrak.db.manage_capture_object import list_capture_objects
 from posetrak.detection.backends_rtmdet import YOLOXDetector
-from posetrak.detection.backends_rtmpose import RTMPoseEstimator
 from posetrak.detection.pipeline import DetectionPipeline
+from posetrak.detection.kp_candidates import CandidateOptions
+from posetrak.detection.pose_model_choice import POSE_MODELS, create_estimator, resolve_pose_model
 
 
 # ---------------------------------------------------------------------------
@@ -42,9 +43,11 @@ def detect_group() -> None:
 
 
 # Options that only make sense for one kind of run. ``detect run`` rejects them for the others
-# rather than ignoring them silently.
-_POSE_OPTIONS = ("detector", "pose_model", "conf")
-_MARKER_OPTIONS = ("object_ref", "trial", "frame_step", "min_marker_perimeter_rate", "parallel", "max_workers")
+# rather than ignoring them silently. --trial is shared by pose and marker runs, so it is not
+# in either tuple.
+_POSE_OPTIONS = ("detector", "pose_model", "conf", "segmentation", "from_run", "refine_hands", "accept_licences",
+                 "decode", "candidates", "mask_gate_margin")
+_MARKER_OPTIONS = ("object_ref", "frame_step", "min_marker_perimeter_rate", "parallel", "max_workers")
 _CODED_OPTIONS = ("marker_ids", "dictionary")
 _DOT_OPTIONS = (
     "dot_threshold", "dot_threshold_by_camera", "dot_background_mode", "dot_bg_subtract",
@@ -56,22 +59,53 @@ _DOT_OPTIONS = (
 @detect_group.command("run")
 @click.option("--capture", required=True, help="Capture ID (prefix accepted).")
 @click.option("--sync", required=True, help="Sync config ID (prefix accepted).")
-@click.option("--start", type=float, required=True, help="Start time in seconds (global).")
-@click.option("--end", type=float, required=True, help="End time in seconds (global).")
+@click.option("--start", type=float, default=None,
+              help="Start time in seconds (global). Defaults to --trial's own start.")
+@click.option("--end", type=float, default=None,
+              help="End time in seconds (global). Defaults to --trial's own end.")
 @click.option(
     "--type", "run_type", type=click.Choice(["pose", "aruco", "dots"]), default="pose", show_default=True,
     help="pose: person detection and pose estimation. aruco: coded markers, optionally with "
          "reflective dots on the cameras named by --dots-camera. dots: reflective dots only.",
 )
 @click.option("--detector", default="yolox-x", show_default=True, help="Person detector model (--type pose).")
-@click.option("--pose-model", default="rtmpose-l-133kp", show_default=True,
-              help="Pose estimation model (--type pose).")
+@click.option("--pose-model", type=click.Choice(POSE_MODELS), default=POSE_MODELS[0], show_default=True,
+              help="Pose estimation model (--type pose). The SOMA-77 weights are downloaded on first use "
+                   "after you accept their licences; without them the run uses rtmpose-l-133kp and says why.")
 @click.option("--conf", default=0.3, show_default=True, type=float,
               help="Person detector confidence threshold (--type pose).")
 @click.option("--object", "object_ref", default=None,
               help="Bind a marker run to this capture object (name or ID prefix). Without it the "
                    "run is not bound to any object (--type aruco then needs --marker-ids).")
-@click.option("--trial", default=None, help="Trial ID (prefix accepted) to record on a marker run.")
+@click.option("--trial", default=None,
+              help="Trial ID (prefix accepted) to record on the run. Also supplies --start/--end's "
+                   "default when they are omitted.")
+@click.option("--segmentation", default=None,
+              help="Seg quality run ID (prefix accepted) to source person bboxes from instead of "
+                   "running the YOLO detector (--type pose only). Masks give tighter crops and the "
+                   "run is finalised automatically (segmentation labels are already stable "
+                   "per-person identities, unlike YOLO tracks). See "
+                   "docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md.")
+@click.option("--from-run", "from_run", default=None,
+              help="Detection run ID (prefix accepted) whose person boxes and track ids are reused instead of "
+                   "running the YOLO detector (--type pose only): a new pose model on boxes already found. "
+                   "The source run's track assignments are copied and the run finalised.")
+@click.option("--mask-gate-margin", "mask_gate_margin", type=click.FloatRange(min=0.0), default=40.0, show_default=True,
+              help="With --segmentation and SOMA-77: the pose model's heatmaps are multiplied with the person's mask grown "
+                   "by this many pixels, so a maximum on another person is not a candidate. 0 turns the gate off.")
+@click.option("--refine-hands/--no-refine-hands", default=None,
+              help="Re-detect each tracked wrist's hand in a tight crop on the frame already decoded and add "
+                   "refined finger keypoints, for every pose model that names a wrist and an elbow. "
+                   "Default: on for SOMA-77 runs and for COCO-133 runs with --segmentation, off otherwise.")
+@click.option("--candidates", "candidates", is_flag=True, default=False,
+              help="Also store up to six heatmap maxima per keypoint, linked into tracklets, so that a tracking run "
+                   "can choose among them (SOMA-77 runs only; about four times the keypoint data of the run; see "
+                   "docs/roadmap/features/keypoint-candidates/keypoint-candidates-design.md).")
+@click.option("--accept-licences", "accept_licences", is_flag=True, default=False,
+              help="Accept the NVIDIA Open Model License and the DINOv3 License for the SOMA-77 weights without "
+                   "being asked (their texts are still named). Needed to download the weights without a terminal.")
+@click.option("--decode", type=click.Choice(["thread", "process"]), default=None,
+              help="Decode the camera videos on threads or in child processes (default: the pipeline's choice).")
 @click.option("--marker-ids", default=None,
               help="Comma-separated ids of every coded marker the scene may show, for an aruco run "
                    "that is not bound to an object. Fixes the corner-slot layout of the run: an id "
@@ -119,14 +153,21 @@ def cmd_run(
     ctx: click.Context,
     capture: str,
     sync: str,
-    start: float,
-    end: float,
+    start: float | None,
+    end: float | None,
     run_type: str,
     detector: str,
     pose_model: str,
     conf: float,
     object_ref: str | None,
     trial: str | None,
+    segmentation: str | None,
+    from_run: str | None,
+    refine_hands: bool | None,
+    candidates: bool,
+    mask_gate_margin: float,
+    accept_licences: bool,
+    decode: str | None,
     marker_ids: str | None,
     dictionary: str,
     min_marker_perimeter_rate: float | None,
@@ -165,6 +206,12 @@ def cmd_run(
 
         posetrak -s session.db detect run --type dots --capture <id> --sync <id> \\
             --start 34 --end 100 --dots-camera gopro13_01 --dot-background-mode blacklist
+
+    Person pose sourced from an existing Cutie segmentation instead of YOLO, tied to a trial
+    (--start/--end default to the trial's own range):
+
+        posetrak -s session.db detect run --trial <id> --segmentation <seg_run_id> \\
+            --capture <id> --sync <id>
     """
     session_path: str | None = ctx.obj.get("session")
     if session_path is None:
@@ -178,8 +225,20 @@ def cmd_run(
     try:
         capture_id = resolve_id_prefix(session, "captures", capture)
         sync_id = resolve_id_prefix(session, "sync_configs", sync)
+        trial_id = resolve_id_prefix(session, "trials", trial) if trial else None
     except ValueError as exc:
         fail(str(exc))
+
+    if trial_id is not None:
+        trial_row = session.execute(
+            "SELECT time_start_s, time_end_s FROM trials WHERE id = ?", (trial_id,)
+        ).fetchone()
+        if start is None:
+            start = trial_row["time_start_s"]
+        if end is None:
+            end = trial_row["time_end_s"]
+    if start is None or end is None:
+        fail("--start/--end are required unless --trial supplies them.")
 
     flags = {p.name: p.opts[0] for p in ctx.command.params}
 
@@ -194,7 +253,18 @@ def cmd_run(
     if run_type == "pose":
         reject(_MARKER_OPTIONS + _CODED_OPTIONS + _DOT_OPTIONS + ("dots_camera",),
                "only for --type aruco or dots.")
-        _run_pose_detection(session, capture_id, sync_id, start, end, detector, pose_model, conf)
+        if segmentation is not None and from_run is not None:
+            fail("--segmentation and --from-run are alternative box sources; give one.")
+        if segmentation is not None:
+            reject(("detector", "conf"), "not used when --segmentation sources bboxes instead of YOLO.")
+        if from_run is not None:
+            reject(("detector", "conf"), "not used when --from-run reuses the boxes of a run.")
+        _run_pose_detection(
+            session, capture_id, sync_id, start, end, detector, pose_model, conf,
+            trial_id=trial_id, segmentation=segmentation, from_run=from_run, refine_hands=refine_hands,
+            accept_licences=accept_licences, decode=decode, candidates=candidates,
+            mask_gate_margin=mask_gate_margin,
+        )
         return
 
     reject(_POSE_OPTIONS, "only for --type pose.")
@@ -209,7 +279,6 @@ def cmd_run(
 
     try:
         object_id = _resolve_capture_object(session, capture_id, object_ref) if object_ref else None
-        trial_id = resolve_id_prefix(session, "trials", trial) if trial else None
         ids = [m.strip() for m in marker_ids.split(",") if m.strip()] if marker_ids else []
         if run_type == "aruco" and object_id is None and not ids:
             raise ValueError("--type aruco needs --object, or --marker-ids for a run bound to no object.")
@@ -276,27 +345,86 @@ def cmd_run(
         fail(f"Detection run {result.detection_run_id} ended with status '{result.status}'.")
 
 
+def _licence_prompt(assume_yes: bool):
+    """The callback that shows the licence texts of the SOMA-77 weights and asks for acceptance."""
+
+    def accept(texts) -> bool:
+        for licence, text in texts:
+            click.echo(f"\n=== {licence.name}  ({licence.url}) ===", err=True)
+            if assume_yes:
+                click.echo("(text not repeated: --accept-licences)", err=True)
+            else:
+                click.echo_via_pager(text)
+        if assume_yes:
+            return True
+        if not sys.stdin.isatty():
+            click.echo("Not a terminal: pass --accept-licences to accept the licences above.", err=True)
+            return False
+        return click.confirm("Accept both licences and download the SOMA-77 weights (about 3.4 GB)?", err=True)
+
+    return accept
+
+
 def _run_pose_detection(
     session, capture_id: str, sync_id: str, start: float, end: float,
     detector: str, pose_model: str, conf: float,
+    trial_id: str | None, segmentation: str | None, from_run: str | None, refine_hands: bool | None,
+    accept_licences: bool, decode: str | None, candidates: bool = False, mask_gate_margin: float = 40.0,
 ) -> None:
     """Run person detection and pose estimation; print the run ID to stdout."""
     click.echo(f"Capture:     {capture_id}", err=True)
     click.echo(f"Sync config: {sync_id}", err=True)
     click.echo(f"Time range:  {start:.2f} – {end:.2f} s", err=True)
-    click.echo(f"Detector:    {detector}  (conf={conf})", err=True)
-    click.echo(f"Pose model:  {pose_model}", err=True)
+
+    model, reason = resolve_pose_model(
+        pose_model, accept=_licence_prompt(accept_licences),
+        progress=lambda message: click.echo(message, err=True),
+    )
+    click.echo(f"Pose model:  {model}", err=True)
+    if reason:
+        click.echo(f"             not {pose_model}: {reason}", err=True)
+
+    persons_ordered = source_run_id = None
+    try:
+        if segmentation is not None:
+            from posetrak.db.manage_person import persons_ordered_for_seg_run
+            from posetrak.detection.box_sources import MaskBoxSource
+
+            seg_run_id = resolve_id_prefix(session, "seg_quality_runs", segmentation)
+            persons_ordered = persons_ordered_for_seg_run(session, seg_run_id)
+            box_source = MaskBoxSource(session, seg_run_id, persons_ordered, gate_margin_px=mask_gate_margin)
+            click.echo(f"Bbox source: segmentation {seg_run_id} revision {box_source.revision}", err=True)
+        elif from_run is not None:
+            from posetrak.detection.box_sources import RunBoxSource
+
+            source_run_id = resolve_id_prefix(session, "detection_runs", from_run)
+            box_source = RunBoxSource(session, source_run_id)
+            click.echo(f"Bbox source: detection run {source_run_id}", err=True)
+        else:
+            from posetrak.detection.box_sources import YoloxBoxSource
+
+            box_source = YoloxBoxSource(YOLOXDetector(model_name=detector, device=None, conf=conf))
+            click.echo(f"Detector:    {detector}  (conf={conf})", err=True)
+    except ValueError as exc:
+        fail(str(exc))
     click.echo("", err=True)
 
-    det = YOLOXDetector(
-        model_name=detector,
-        device=None,  # auto-detect
-        conf=conf,
-    )
-    est = RTMPoseEstimator(
-        model_name=pose_model,
-        device=None,  # auto-detect
-    )
+    try:
+        estimator = create_estimator(model, device=None, candidates=CandidateOptions() if candidates else None)
+    except ValueError as exc:
+        fail(str(exc))
+    if refine_hands is None:
+        # The default skeletons track no SOMA-77 finger keypoints, so SOMA-77 runs need the pass for any
+        # finger pose (docs/roadmap/features/hand-detection-refinement/hand-refinement-without-segmentation-design.md).
+        refine_hands = segmentation is not None or "soma" in model
+    hand_pass = None
+    if refine_hands:
+        from posetrak.detection.hand_refinement import HandPass
+
+        if HandPass.supports(model):
+            hand_pass = HandPass(pose_model=model)
+        else:
+            click.echo(f"Hand refinement skipped: {model} names no wrist and elbow.", err=True)
 
     def on_progress(done: int, total: int, cam_id: str) -> None:
         click.echo(f"\r  {cam_id}  {done}/{total} frames", nl=False, err=True)
@@ -307,15 +435,39 @@ def _run_pose_detection(
         sync_config_id=sync_id,
         time_start_s=start,
         time_end_s=end,
-        detector=det,
-        estimator=est,
+        box_source=box_source,
+        estimator=estimator,
+        hand_pass=hand_pass,
+        decode_mode=decode,
+        trial_id=trial_id,
     )
+    if not pipeline.cameras:
+        fail("No cameras with sync data for this time range.")
 
     result = pipeline.run(on_progress=on_progress)
     click.echo("", err=True)  # newline after progress
 
+    if result.status == "complete":
+        from app.pose.finalise import (
+            auto_assign_and_finalise, conf_scale_for_model, finalise_from_source_run,
+        )
+
+        scale = conf_scale_for_model(model)
+        if persons_ordered is not None:
+            # A segmentation label is already a stable identity, so no stitching decision is left to make.
+            auto_assign_and_finalise(
+                session=session, detection_run_id=result.detection_run_id, shot_id=capture_id,
+                sync_config_id=sync_id, persons_ordered=persons_ordered, pose_model=model, confidence_scale=scale,
+            )
+        elif source_run_id is not None:
+            if not finalise_from_source_run(session, result.detection_run_id, source_run_id, model,
+                                            confidence_scale=scale):
+                click.echo("The source run has no track assignments; the run is not finalised.", err=True)
+
     # Print the run ID to stdout (bare, machine-readable)
     click.echo(result.detection_run_id)
+    if result.status != "complete":
+        fail(f"Detection run {result.detection_run_id} ended with status '{result.status}'.")
 
 
 @detect_group.command("import-2d")
@@ -383,6 +535,149 @@ def cmd_import_2d(
     if result.skipped_no_timestamp:
         click.echo(f"Skipped {result.skipped_no_timestamp} points on frames without a sync timestamp.", err=True)
     click.echo(result.detection_run_id)
+
+
+# ---------------------------------------------------------------------------
+# detect assign
+# ---------------------------------------------------------------------------
+
+
+@detect_group.command("assign")
+@click.argument("run_id")
+@click.option("--persons", type=click.IntRange(min=1), default=None,
+              help="Number of persons in the run. Default: the number of --subjects, else the number of persons "
+                   "seen together for a fifth of the time.")
+@click.option("--subjects", default=None, metavar="NAME[,NAME...]",
+              help="Names of the capture's persons, given in order of first appearance to the persons no existing "
+                   "assignment row names.")
+@click.option("--fill-only", "fill_only", is_flag=True, default=False,
+              help="The run already has assignment rows (from the stitcher): keep every one of them and assign only "
+                   "the boxes they do not cover. The rows also name the persons: one row per person is enough.")
+@click.option("--replace", "replace", is_flag=True, default=False,
+              help="The run already has assignment rows: read them as seeds that name the persons, then replace "
+                   "all of them.")
+@click.option("--finalise", "do_finalise", is_flag=True, default=False,
+              help="Also build the person sequences, as saving the assignments in the stitcher does.")
+@click.option("--dry-run", is_flag=True, default=False, help="Print the report; write nothing.")
+@click.option("--report", "report_path", type=click.Path(dir_okay=False, path_type=Path), default=None,
+              help="Where to write the report for the stitcher (default: next to the session database).")
+@click.pass_context
+def cmd_assign(ctx: click.Context, run_id: str, persons: int | None, subjects: str | None, fill_only: bool,
+               replace: bool, do_finalise: bool, dry_run: bool, report_path: Path | None) -> None:
+    """Assign the track fragments of a detection run to persons from the cameras' geometry.
+
+    The boxes' trunk keypoints are matched across the calibrated cameras into 3D persons that are followed in
+    time, and every box takes the person it projects to. The step writes the same assignment rows as the
+    stitcher, and prints a report: the cameras' agreement (a bad calibration shows there), and the stretches to
+    check, where persons are in contact or the person was carried over a gap by weak cues. The report is also
+    written as JSON, next to the session database, for the stitcher. Where persons touch, segmentation is the
+    better source of identity.
+
+    A run that already has assignment rows is left alone unless --fill-only or --replace says what may happen
+    to them.
+    """
+    from posetrak.detection.assign_run import (
+        AssignError, assign_run, format_report, report_path as default_report_path, save_report, write_assignment,
+    )
+
+    session_path: str | None = ctx.obj.get("session")
+    if session_path is None:
+        fail("--session / POSETRAK_SESSION_DB is required for 'detect assign'.")
+    if fill_only and replace:
+        fail("--fill-only and --replace exclude each other.")
+    try:
+        session = open_session(Path(session_path))
+        full_id = resolve_id_prefix(session, "detection_runs", run_id)
+    except (FileNotFoundError, ValueError) as exc:
+        fail(str(exc))
+    names = [n.strip() for n in subjects.split(",") if n.strip()] if subjects else None
+    if names and persons is not None and persons < len(names):
+        fail(f"--persons {persons} is fewer than the {len(names)} --subjects.")
+    existing = "fill" if fill_only else "replace" if replace else "refuse"
+    try:
+        result = assign_run(session, full_id, persons=persons, subjects=names, existing=existing)
+    except AssignError as exc:
+        fail(str(exc))
+    labels = {r["id"]: r["label"] for r in session.execute(
+        "SELECT cv.id, ci.label FROM capture_videos cv JOIN camera_instances ci ON ci.id = cv.camera_instance_id "
+        "JOIN detection_runs dr ON dr.shot_id = cv.shot_id WHERE dr.id = ?", (full_id,))}
+    click.echo(format_report(result, labels))
+    if dry_run:
+        return
+    write_assignment(session, full_id, result, existing)
+    out = report_path or default_report_path(session_path, full_id)
+    save_report(result, out)
+    click.echo(f"Wrote {len(result.rows)} assignment rows and the report {out}.", err=True)
+    if do_finalise:
+        from app.pose.finalise import TrackAssignment, conf_scale_for_model, finalise_to_db
+
+        run = session.execute("SELECT shot_id, sync_config_id, pose_model FROM detection_runs WHERE id = ?",
+                              (full_id,)).fetchone()
+        rows = [*result.kept, *result.rows]
+        try:
+            finalise_to_db(
+                session=session, detection_run_id=full_id, shot_id=run["shot_id"],
+                sync_config_id=run["sync_config_id"],
+                assignments=[TrackAssignment(r.svid, r.tid, r.person, r.first, r.last) for r in rows],
+                pose_model=run["pose_model"], confidence_scale=conf_scale_for_model(run["pose_model"]))
+        except RuntimeError as exc:
+            fail(str(exc))
+        click.echo("Built the person sequences.", err=True)
+
+
+# ---------------------------------------------------------------------------
+# detect stale
+# ---------------------------------------------------------------------------
+
+
+@detect_group.command("stale")
+@click.argument("run_id")
+@click.option("--tolerance", type=float, default=1.0, show_default=True,
+              help="Largest box-edge movement, in pixels of the pose model's input, that does not make a frame stale.")
+@click.option("--refresh", is_flag=True, default=False,
+              help="Create a new detection run: unchanged frames copied from RUN_ID, stale frames run again "
+                   "on the current masks. RUN_ID itself is left as it is.")
+@click.pass_context
+def cmd_stale(ctx: click.Context, run_id: str, tolerance: float, refresh: bool) -> None:
+    """List the frames of a mask-sourced detection run whose boxes changed after the masks were edited.
+
+    Compares the person boxes the run used with those of the newest saved mask revision. With --refresh
+    the new run's id is printed to stdout.
+    """
+    session_path: str | None = ctx.obj.get("session")
+    if session_path is None:
+        fail("--session / POSETRAK_SESSION_DB is required for 'detect stale'.")
+    from posetrak.detection.stale import refresh_run, stale_frames
+
+    try:
+        session = open_session(Path(session_path))
+        full_id = resolve_id_prefix(session, "detection_runs", run_id)
+        stale = stale_frames(session, full_id, tolerance=tolerance)
+    except (FileNotFoundError, ValueError) as exc:
+        fail(str(exc))
+    for s in stale:
+        click.echo(f"{s.shot_video_id}\t{s.video_frame}\tlabels {','.join(map(str, s.labels))}", err=True)
+    click.echo(f"{len(stale)} stale frames.", err=True)
+    if not refresh:
+        return
+    if not stale:
+        fail("Nothing to refresh.")
+    new_id = refresh_run(
+        session, full_id, stale,
+        on_progress=lambda done, total, cam: click.echo(f"\r  {cam}  {done}/{total} frames", nl=False, err=True))
+    click.echo("", err=True)
+    run = session.execute("SELECT shot_id, sync_config_id, pose_model FROM detection_runs WHERE id = ?", (new_id,)).fetchone()
+    from posetrak.db.manage_person import persons_ordered_for_seg_run
+
+    seg_id = session.execute("SELECT seg_quality_run_id FROM detection_runs WHERE id = ?", (new_id,)).fetchone()[0]
+    if session.execute("SELECT 1 FROM detection_track_assignments WHERE detection_run_id = ? LIMIT 1", (full_id,)).fetchone():
+        from app.pose.finalise import auto_assign_and_finalise, conf_scale_for_model
+
+        auto_assign_and_finalise(
+            session=session, detection_run_id=new_id, shot_id=run["shot_id"], sync_config_id=run["sync_config_id"],
+            persons_ordered=persons_ordered_for_seg_run(session, seg_id), pose_model=run["pose_model"],
+            confidence_scale=conf_scale_for_model(run["pose_model"]))
+    click.echo(new_id)
 
 
 # ---------------------------------------------------------------------------

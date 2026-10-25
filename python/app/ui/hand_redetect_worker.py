@@ -36,6 +36,8 @@ from __future__ import annotations
 import collections
 import logging
 import sqlite3
+from pathlib import Path
+from posetrak.db.db import _connect
 import threading
 
 import numpy as np
@@ -194,8 +196,7 @@ class HandRedetectWorker(QThread):
         from app.pose.db_cache import clear_disabled_hand_edits, write_hand_refinement
 
         try:
-            conn = sqlite3.connect(self._db_path)
-            conn.row_factory = sqlite3.Row  # clear_disabled_hand_edits needs dict-style access
+            conn = _connect(Path(self._db_path))  # Row factory: clear_disabled_hand_edits needs dict-style access
         except Exception:
             _log.exception("hand-redetect worker: failed to open DB")
             return

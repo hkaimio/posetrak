@@ -234,6 +234,79 @@ def test_finalise_object_copies_dot_candidates_alongside_markers(session):
     assert manifest_sources == {"aruco"}
 
 
+def test_finalise_object_dot_mask_filter_drops_candidates_outside_dilated_mask(
+    session, monkeypatch,
+):
+    """dot_mask_seg_run_id drops a dot candidate that falls outside the
+    dilated segmentation mask for its (camera, frame) -- a heuristic aid
+    for a handheld prop's dots sitting at/near the segmented person. A
+    frame with no stored mask at all keeps every candidate (a "don't
+    know", not "outside")."""
+    import cv2
+
+    class _FakeCapture:
+        def __init__(self, _path):
+            pass
+
+        def get(self, prop):
+            return 100.0  # square 100x100 "native" frame, matches the mask 1:1
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(cv2, "VideoCapture", _FakeCapture)
+
+    body_id = import_marker_body_str(session, _MARKER_BODY_YAML, name="Test Bokken")
+    object_id = create_capture_object(session, _SHOT_ID, "bokken-A", body_id)
+    run_id = _write_marker_run(
+        session, ["3", "7"], marker_body_definition_id=body_id, capture_object_id=object_id,
+    )
+
+    dot_writer = DotCandidateWriter(session, run_id, _SVID)
+    # Frame 0: (50,50) inside the mask, (36,50) inside a 5px dilation of it,
+    # (34,50) just outside that same dilation, (5,5) far outside.
+    dot_writer.add_frame(0, [
+        _fake_blob(50.0, 50.0), _fake_blob(36.0, 50.0),
+        _fake_blob(34.0, 50.0), _fake_blob(5.0, 5.0),
+    ])
+    # Frame 1: no mask stored for it at all -- must keep everything.
+    dot_writer.add_frame(1, [_fake_blob(5.0, 5.0)])
+    dot_writer.finalise()
+
+    seg_run_id = generate_id()
+    session.execute(
+        "INSERT INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at, "
+        "quality_source, erosion_px) VALUES (?, ?, 0.0, 1.0, '2026-01-01T00:00:00Z', 'cutie', 5)",
+        (seg_run_id, _SHOT_ID),
+    )
+    mask = np.zeros((100, 100), dtype=np.uint8)
+    mask[40:60, 40:60] = 1  # person silhouette, rows/cols [40,60)
+    mask_png = cv2.imencode(".png", mask)[1].tobytes()
+    session.execute(
+        "INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
+        "VALUES (?, ?, 0, ?)",
+        (seg_run_id, _SVID, mask_png),
+    )
+    session.commit()
+
+    seq_id = finalise_object_to_db(
+        session, run_id, dot_mask_seg_run_id=seg_run_id, dot_mask_dilate_px=5.0,
+    )
+
+    dot_obs = session.execute(
+        "SELECT video_frame, kp_blob FROM pose_observations "
+        "WHERE sequence_id=? AND source='dots' ORDER BY video_frame", (seq_id,),
+    ).fetchall()
+
+    blob0 = decode_dot_candidates(bytes(dot_obs[0]["kp_blob"]))
+    assert blob0.shape == (2, 9)
+    assert np.allclose(sorted(blob0[:, :2].tolist()), [[36.0, 50.0], [50.0, 50.0]])
+
+    blob1 = decode_dot_candidates(bytes(dot_obs[1]["kp_blob"]))
+    assert blob1.shape == (1, 9)
+    assert np.allclose(blob1[0, :2], [5.0, 5.0])
+
+
 def test_read_observations_with_edits_ignores_dot_candidates(session):
     """A sequence with both 'markers' and 'dots' pose_observations rows for
     the same camera must not crash the generic keypoint reader: 'dots' rows

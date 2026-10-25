@@ -211,6 +211,16 @@ posetrak detect import-2d --capture ID --sync ID [--trial ID] [--object NAME|ID]
   # left); blender_export_2d_tracks.py's output imports as it is. Several tracks of one camera get
   # separate tracklet ids. Bound to an object with --object, the run finalises like a dots run.
 
+posetrak detect assign RUN [--persons N] [--subjects NAME[,NAME...]] [--fill-only | --replace]                        [--finalise] [--dry-run] [--report FILE]
+  # Assigns a run's detector track fragments to persons from the calibrated cameras' geometry
+  # (design: track-person-assignment). Writes the rows the stitcher writes and prints a report:
+  # per camera how many boxes agree with another camera (a bad calibration shows here), and the
+  # stretches to check (contacts, hand-overs, splits, unassigned boxes). The report is also saved
+  # as JSON next to the session database; the stitcher lists its stretches. A run that already
+  # has rows is refused unless --fill-only (keep every row, assign the rest) or --replace
+  # (rewrite them) is given; in both the rows name the persons they overlap, so one hand-made
+  # row per person names it. --finalise also builds the person sequences.
+
 posetrak detect list [--capture ID]
 posetrak detect show ID
 ```

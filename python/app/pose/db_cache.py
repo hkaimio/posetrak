@@ -16,7 +16,15 @@ import cv2
 import numpy as np
 
 from posetrak.db.db import generate_id
-from posetrak.db.observation_merge import BODY_SOURCE, infer_body_width, merge_observation_sources
+from posetrak.detection import stage_timing as st
+from posetrak.detection.kp_candidates import PersonLinker, TrackletIds, decode_kp_candidates_blob, encode_kp_candidates_blob
+from posetrak.db.observation_merge import (
+    BODY_SOURCE,
+    infer_body_width,
+    merge_observation_sources,
+    pad_to_common_width,
+)
+from posetrak.db.run_status import touch_progress
 
 _CROP_JPEG_QUALITY = 75
 _CROP_TARGET_HEIGHT = 240
@@ -64,6 +72,9 @@ def create_detection_run(
     pose_input_height: int = 0,
     detector_type: str = "pose",
     config_json: str | None = None,
+    seg_quality_run_id: str | None = None,
+    seg_revision: int | None = None,
+    source_detection_run_id: str | None = None,
 ) -> str:
     run_id = generate_id()
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -73,13 +84,13 @@ def create_detection_run(
         " detector_model, pose_model, detector_version, pose_version, "
         " detector_conf, pose_conf_threshold, "
         " pose_input_width, pose_input_height, status, created_at, "
-        " detector_type, config_json) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'running',?,?,?)",
+        " detector_type, config_json, seg_quality_run_id, seg_revision, source_detection_run_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'running',?,?,?,?,?,?)",
         (run_id, shot_id, sync_config_id, trial_id, time_start_s, time_end_s,
          detector_model, pose_model, detector_version, pose_version,
          detector_conf, pose_conf_threshold,
          pose_input_width, pose_input_height, now,
-         detector_type, config_json),
+         detector_type, config_json, seg_quality_run_id, seg_revision, source_detection_run_id),
     )
     session.commit()
     return run_id
@@ -174,6 +185,7 @@ def mark_run_complete(session: sqlite3.Connection, run_id: str, status: str = "c
         "UPDATE detection_runs SET status=?, completed_at=? WHERE id=?",
         (status, now, run_id),
     )
+    session.execute("DELETE FROM run_progress WHERE run_id = ?", (run_id,))
     session.commit()
 
 
@@ -222,6 +234,21 @@ def _encode_crop(img: "np.ndarray", bbox: tuple) -> "tuple[bytes, int, int, int,
     return buf.tobytes(), crop.shape[1], crop.shape[0], x1, y1, src_w, src_h
 
 
+KP_CANDIDATES_REGION = "kp_candidates"
+
+
+def _first_free_tracklet_id(session: sqlite3.Connection, run_id: str, shot_video_id: str) -> TrackletIds:
+    """Tracklet ids of a camera continue after the ones the run already holds (a refreshed or resumed run)."""
+    highest = -1
+    for (blob,) in session.execute(
+            "SELECT keypoints FROM detection_keypoints WHERE detection_run_id=? AND shot_video_id=? AND region_type=?",
+            (run_id, shot_video_id, KP_CANDIDATES_REGION)):
+        table = decode_kp_candidates_blob(bytes(blob))
+        if len(table):
+            highest = max(highest, int(table[:, 5].max()))
+    return TrackletIds(highest + 1)
+
+
 class DetectionBatchWriter:
     """Accumulates detection rows and flushes to DB in batches."""
 
@@ -231,11 +258,15 @@ class DetectionBatchWriter:
         detection_run_id: str,
         shot_video_id: str,
         pose_input_width: int,
+        candidates=None,      # CandidateOptions: also write and link the keypoint candidates of the pose results
     ) -> None:
         self._session = session
         self._run_id = detection_run_id
         self._svid = shot_video_id
         self._pose_input_width = pose_input_width
+        self._candidates = candidates
+        self._linkers: dict[int, PersonLinker] = {}
+        self._tracklet_ids = _first_free_tracklet_id(session, detection_run_id, shot_video_id) if candidates else None
         self._det_rows: list[tuple] = []
         self._kp_rows: list[tuple] = []
         self._crop_rows: list[tuple] = []
@@ -251,6 +282,8 @@ class DetectionBatchWriter:
         img: np.ndarray | None = None,  # BGR frame for crop storage
     ) -> None:
         kp_by_track = {pr.track_id: pr.keypoints for pr in pose_results}
+        pose_noise_scale = {pr.track_id: pr.noise_scale for pr in pose_results if pr.noise_scale is not None}
+        candidates_by_track = {pr.track_id: pr.candidates for pr in pose_results if pr.candidates is not None}
 
         for det in detections:
             self._det_rows.append((
@@ -263,10 +296,9 @@ class DetectionBatchWriter:
 
             if det.track_id in kp_by_track:
                 kp = kp_by_track[det.track_id]
-                noise_scale = (
-                    float(det.bbox[2]) / self._pose_input_width
-                    if self._pose_input_width > 0 else None
-                )
+                noise_scale = pose_noise_scale.get(det.track_id)
+                if noise_scale is None and self._pose_input_width > 0:
+                    noise_scale = float(det.bbox[2]) / self._pose_input_width
                 self._kp_rows.append((
                     self._run_id, self._svid, video_frame,
                     det.track_id, "full_body",
@@ -274,8 +306,12 @@ class DetectionBatchWriter:
                     noise_scale,
                 ))
 
+            if self._candidates is not None and det.track_id in candidates_by_track:
+                self._add_candidates(video_frame, det, candidates_by_track[det.track_id], pose_noise_scale.get(det.track_id))
+
             if img is not None:
-                result = _encode_crop(img, det.bbox)
+                with st.stage("preview_encode"):
+                    result = _encode_crop(img, det.bbox)
                 if result is not None:
                     jpeg, wpx, hpx, src_x, src_y, src_w, src_h = result
                     self._crop_rows.append((
@@ -290,7 +326,30 @@ class DetectionBatchWriter:
         if len(self._det_rows) >= _BATCH_SIZE:
             self._flush()
 
+    def _add_candidates(self, video_frame: int, det, table: np.ndarray, noise_scale: float | None) -> None:
+        """Link a person's candidates to the earlier frames' and queue the ``kp_candidates`` row."""
+        linker = self._linkers.get(det.track_id)
+        if linker is None:
+            linker = self._linkers[det.track_id] = PersonLinker(
+                self._tracklet_ids, self._candidates.max_gap_frames, self._candidates.gate_box_frac)
+        with st.stage("candidate_link"):
+            tracklets = linker.link(video_frame, table, float(max(det.bbox[2], det.bbox[3])))
+        blob = encode_kp_candidates_blob(table[:, 0], table[:, 1], table[:, 2], table[:, 3], table[:, 4], tracklets)
+        self._kp_rows.append((self._run_id, self._svid, video_frame, det.track_id, KP_CANDIDATES_REGION, blob, noise_scale))
+
+    def add_hand_rows(self, video_frame: int, track_id: int, rows) -> None:
+        """Refined hand keypoints of a person: ``(region_type, hand_kp[21, 3], noise_scale)`` rows."""
+        for region_type, hand_kp, noise_scale in rows:
+            self._kp_rows.append((
+                self._run_id, self._svid, video_frame, track_id, region_type,
+                hand_kp.astype(np.float32).tobytes(), noise_scale,
+            ))
+
     def _flush(self) -> None:
+        with st.stage("db_write"):
+            self._flush_rows()
+
+    def _flush_rows(self) -> None:
         if self._det_rows:
             self._session.executemany(
                 "INSERT OR REPLACE INTO person_detections "
@@ -319,6 +378,7 @@ class DetectionBatchWriter:
                 self._crop_rows,
             )
             self._crop_rows.clear()
+        touch_progress(self._session, self._run_id)
         self._session.commit()
 
     def finalise(self) -> None:
@@ -423,6 +483,7 @@ class MarkerKeypointWriter:
                 self._rows,
             )
             self._rows.clear()
+            touch_progress(self._session, self._run_id)
             self._session.commit()
 
     def finalise(self) -> None:
@@ -663,9 +724,9 @@ def read_observations_with_edits(
     """
     obs_rows = session.execute(
         "SELECT video_frame, source, kp_blob FROM pose_observations"
-        " WHERE sequence_id = ? AND camera_instance_id = ? AND source != ?"
+        " WHERE sequence_id = ? AND camera_instance_id = ? AND source NOT IN (?, ?)"
         " ORDER BY video_frame",
-        (sequence_id, camera_instance_id, DOT_REGION_TYPE),
+        (sequence_id, camera_instance_id, DOT_REGION_TYPE, KP_CANDIDATES_REGION),
     ).fetchall()
     if not obs_rows:
         return {}
@@ -716,9 +777,11 @@ def read_observations_with_edits(
             # to whichever row is
             # present rather than dropping the frame.
             kp = rows[0][1]
+        result[frame] = kp
+    pad_to_common_width(result)
+    for frame, kp in result.items():
         if frame in edits:
             _apply_edit(kp, *edits[frame])
-        result[frame] = kp
 
     # Include ghost frames: edit rows with no backing pose_observations row.
     for frame, (edit_kp, mask) in edits.items():

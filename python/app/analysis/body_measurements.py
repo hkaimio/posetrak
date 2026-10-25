@@ -172,8 +172,9 @@ def _(
                 from posetrak.db.skeleton_layout import SkeletonLayout as _SkeletonLayout
 
                 # Load tracking run metadata
-                _conn = _sqlite3.connect(_db_path, check_same_thread=False)
-                _conn.row_factory = _sqlite3.Row
+                from posetrak.db.db import _connect
+
+                _conn = _connect(Path(_db_path), check_same_thread=False)
                 _run_row = _conn.execute(
                     "SELECT * FROM tracking_runs WHERE id = ?", (_run_id,)
                 ).fetchone()

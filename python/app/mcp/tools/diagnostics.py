@@ -276,3 +276,78 @@ def get_observation_gaps(
                 sections.append(f"{step:>5} {ts:>7.3f} | (no observations)")
 
     return "\n".join(sections)
+
+
+def get_assignment_trace(
+    conn: sqlite3.Connection,
+    run_id: str,
+    start_s: float,
+    end_s: float,
+    marker: str | None = None,
+) -> str:
+    """Every (candidate, marker-slot) pair the dot-assignment phase costed, per step.
+
+    Reads tracking_assignment_trace, which only has rows for a run made with
+    --trace-assignment-start/--trace-assignment-end covering this range (see
+    posetrak-tracker track --help) -- an empty result usually means the run
+    wasn't traced here, not that nothing was considered.
+
+    Shows, for every candidate a camera saw that step: which slot it was
+    costed against, its raw and post-modifier Mahalanobis cost, which
+    CostModifier excluded it (if any -- tracklet_continuity/
+    candidate_ownership/reacquisition_gate/cross_view_corroboration), and
+    whether it won that camera's Hungarian solve ('WON'). A slot with no WON
+    row that step had every candidate gated out or excluded -- distinguishes
+    "nothing detected" from "something was detected and lost the race" in a
+    way tracking_obs_results/get_observation_gaps cannot.
+    """
+    marker_names = get_run_markers(conn, run_id)
+    camera_ids, cam_names = get_run_cameras(conn, run_id)
+    cam_labels = {i: short_label(cam_names[cid]) for i, cid in enumerate(camera_ids)}
+
+    marker_filter_idx: int | None = None
+    if marker is not None:
+        marker_filter_idx = marker_indices(marker_names, [marker])[marker]
+
+    steps = get_steps_in_range(conn, run_id, start_s, end_s)
+    if not steps:
+        return f"No steps found between {start_s}s and {end_s}s."
+    step_set = {s for s, _ in steps}
+
+    query = (
+        "SELECT tracker_step, camera_idx, candidate_row, tracklet_id, candidate_x, "
+        "candidate_y, marker_idx, mahal_cost, final_cost, excluded_by, in_final_assignment "
+        "FROM tracking_assignment_trace WHERE run_id = ? AND person_id = 0 "
+        "AND tracker_step BETWEEN ? AND ? ORDER BY tracker_step, camera_idx, marker_idx, "
+        "candidate_row"
+    )
+    rows = conn.execute(query, (run_id, min(step_set), max(step_set))).fetchall()
+    rows = [r for r in rows if r["tracker_step"] in step_set]
+    if marker_filter_idx is not None:
+        rows = [r for r in rows if r["marker_idx"] == marker_filter_idx]
+
+    if not rows:
+        return (
+            f"No assignment-trace rows between {start_s}s and {end_s}s for run {run_id}. "
+            "Either nothing was traced in this range (re-run with "
+            "--trace-assignment-start/--trace-assignment-end covering it), or every "
+            "camera had zero dot candidates that step."
+        )
+
+    sections = [
+        f"Dot-assignment trace: {start_s}s - {end_s}s"
+        + (f", marker={marker}" if marker else ""),
+        f"{'step':>5} {'camera':<10} {'slot':<16} {'row':>3} {'tracklet':>8} "
+        f"{'x':>7} {'y':>7} {'raw_cost':>9} {'cost':>9} {'excluded_by':<24} {'won'}",
+        "-" * 110,
+    ]
+    for r in rows:
+        slot_name = marker_names[r["marker_idx"]] if r["marker_idx"] < len(marker_names) else "?"
+        cam_label = cam_labels.get(r["camera_idx"], f"cam{r['camera_idx']}")
+        won = "WON" if r["in_final_assignment"] else ""
+        sections.append(
+            f"{r['tracker_step']:>5} {cam_label:<10} {slot_name:<16} {r['candidate_row']:>3} "
+            f"{r['tracklet_id']:>8} {r['candidate_x']:>7.1f} {r['candidate_y']:>7.1f} "
+            f"{r['mahal_cost']:>9.2f} {r['final_cost']:>9.2f} {r['excluded_by']:<24} {won}"
+        )
+    return "\n".join(sections)

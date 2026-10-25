@@ -8,10 +8,12 @@
 #include <posetrak/core/config.hpp>
 #include <posetrak/core/observation.hpp>
 #include <posetrak/core/skeleton.hpp>
+#include <posetrak/db/blob_codec.hpp>
 
 #include <sqlite3.h>
 
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <optional>
 #include <string>
@@ -110,6 +112,75 @@ struct UnlabeledCandidate {
     /// major_axis/minor_axis are -- an existing fixture/call site built
     /// before this field existed should not silently start matching.
     int tracklet_id = -1;
+
+    /// Slot of the pose model's keypoint list this candidate is a maximum of, for a keypoint
+    /// candidate (pose_observations source 'kp_candidates'); -1 for a dot, which can belong to any
+    /// marker. KeypointClassModifier lets a keypoint candidate pair only with the marker bound to
+    /// the same keypoint.
+    int keypoint_idx = -1;
+    /// Model input pixels to frame pixels of the crop the candidate came from (the observation's
+    /// noise_scale); the measurement noise of a keypoint candidate scales with it. 0 for a dot.
+    double crop_scale = 0.0;
+    /// Radius in distorted pixels within which another subject's candidate of the same keypoint,
+    /// camera and frame is the same image point seen through its own crop (see
+    /// append_unique_candidates()). 0 for a dot, which merges only when byte-identical.
+    double merge_radius_px = 0.0;
+};
+
+/// @brief The keypoint candidates of one sequence and how the skeleton's markers bind to them.
+struct KeypointCandidates {
+    /// Sorted by camera then frame, like load_unlabeled_candidates().
+    std::vector<UnlabeledCandidate> candidates;
+    /// Skeleton marker index -> keypoint_idx of the candidates it takes; the markers of the body
+    /// pose model that have candidates in the sequence.
+    std::unordered_map<int, int> marker_keypoint;
+};
+
+/// @brief Keypoint rows that take the place of the stored body row of a (camera, frame) when
+/// load_observations() builds the frame's observations: the windowed choice of keypoint candidates
+/// hands over the candidate it picked for each keypoint, so that everything built from the row
+/// (the positions, the child-minus-parent pairs, the hand overlays' base) comes from the picks.
+struct KeypointRowOverrides {
+    /// camera_instance_id -> video_frame -> one entry per keypoint of the primary row: distorted
+    /// pixels and confidence (0 = no pick, the keypoint gives no observation).
+    std::unordered_map<std::string, std::unordered_map<int, std::vector<db::Keypoint>>> rows;
+};
+
+/// @brief One frame of a camera that holds keypoint candidates of the person.
+struct KeypointChoiceFrame {
+    int video_frame = 0;
+    double timestamp = 0.0;   ///< Seconds on the capture timeline.
+    double crop_scale = 1.0;  ///< Model input pixels to frame pixels of the person's crop.
+};
+
+/// @brief The candidates of one camera.
+struct KeypointChoiceCamera {
+    int camera_id = 0;                        ///< Camera::id().
+    std::string camera_instance_id;           ///< camera_instances.id, for the stored picks.
+    std::vector<KeypointChoiceFrame> frames;  ///< Ascending in video frame.
+};
+
+/// @brief One heatmap maximum of the person, as stored.
+struct KeypointChoiceRow {
+    std::int32_t camera = 0;  ///< Index into KeypointChoiceData::cameras.
+    std::int32_t frame = 0;   ///< Index into that camera's frames.
+    std::int32_t keypoint = 0;
+    std::int32_t rank = 0;
+    std::int32_t tracklet_id = -1;
+    float x = 0.f, y = 0.f;    ///< Distorted pixels.
+    float ux = 0.f, uy = 0.f;  ///< Undistorted pixels.
+    float peak = 0.f;          ///< As stored in the sequence (scaled like the body confidence).
+};
+
+/// @brief All keypoint candidates of a person in a time window, for the windowed choice.
+struct KeypointChoiceData {
+    /// Skeleton marker index -> keypoint_idx, for the markers whose landmark the manifest names.
+    std::unordered_map<int, int> marker_keypoint;
+    /// Per keypoint_idx of the manifest (width = highest index + 1): the qualified landmark
+    /// ("soma77:Hips"), empty for an index the manifest does not name.
+    std::vector<std::string> keypoint_landmark;
+    std::vector<KeypointChoiceCamera> cameras;
+    std::vector<KeypointChoiceRow> candidates;
 };
 
 /// @brief Reads tracking data from a per-session SQLite database
@@ -190,6 +261,43 @@ class SessionReader {
                                                std::string const& extrinsic_calibration_id,
                                                std::string const& sync_config_id);
 
+    /// @brief Camera integer ID -> capture_videos.id ("shot_video_id" in table
+    /// comments) for every camera in *sync_config_id*'s capture, in the same
+    /// `ORDER BY ci.label ASC` / sequential-assignment order load_cameras()
+    /// itself uses -- so a camera_id from this map always names the same
+    /// physical camera as the matching camera_id in a Camera map built from
+    /// the same sync_config_id. Used to resolve which seg_masks row (keyed by
+    /// shot_video_id, not camera_instance_id) covers a given camera
+    /// (segmentation-mask-dot-assignment-design.md §5).
+    /// @param sync_config_id sync_configs primary key
+    std::unordered_map<int, std::string>
+    load_camera_shot_video_ids(std::string const& sync_config_id);
+
+    /// @brief Highest closed revision of a segmentation run's masks, or
+    /// std::nullopt if the run has none. A job resolves this once at its start
+    /// and reads every mask at that revision, so a save made while it runs
+    /// cannot change what it reads (segmentation-versioning-design.md §2.3).
+    /// @param seg_run_id seg_quality_runs primary key
+    std::optional<int> newest_closed_seg_revision(std::string const& seg_run_id);
+
+    /// @brief Raw PNG bytes of one frame's mask at a revision: the row of the
+    /// frame with the largest seg_masks.revision <= *revision*. std::nullopt if
+    /// there is no such row or its blob is NULL (the frame has no mask) -- the
+    /// same "don't know, caller decides what to do" contract
+    /// app.pose.pose_worker._load_mask already uses for a missing mask.
+    /// Decode with posetrak::decode_seg_mask() (seg_mask.hpp); this method
+    /// does no image decoding of its own, matching every other raw-blob
+    /// accessor in this class.
+    /// @param seg_run_id seg_quality_runs primary key
+    /// @param shot_video_id capture_videos primary key (see
+    ///        load_camera_shot_video_ids())
+    /// @param frame_idx Native video frame number (UnlabeledCandidate::frame_idx)
+    /// @param revision Revision to read at; must be a closed one
+    ///        (newest_closed_seg_revision()).
+    std::optional<std::string> load_seg_mask_blob(std::string const& seg_run_id,
+                                                  std::string const& shot_video_id, int frame_idx,
+                                                  int revision);
+
     /// @brief Load pose observations for a sequence
     ///
     /// @param sequence_id pose_observation_sequences primary key
@@ -210,6 +318,12 @@ class SessionReader {
     ///   TrackerConfig::confidence_threshold_marker_names). Empty = disabled.
     /// @param confidence_threshold_override Per-marker confidence floor used for the markers
     ///   named above.
+    /// @param window_start_s Load only observations with timestamp >= this (default: all).
+    /// @param window_end_s Load only observations with timestamp < this (default: all). A caller
+    ///   that tracks a time range passes the range plus a margin: the observations of a long
+    ///   sequence are the largest part of the tracker's memory otherwise.
+    /// @param row_overrides Rows that replace the stored primary row of a (camera, frame) before
+    ///   the observations are built; null: the stored rows.
     /// @return ObservationSet ready for the tracker
     ObservationSet
     load_observations(std::string const& sequence_id, std::map<std::string, Camera> const& cameras,
@@ -218,7 +332,10 @@ class SessionReader {
                       double pose_noise_std = 0.0, double cross_pair_max_px = 0.0,
                       int cross_pair_max_n = 10, double edited_kp_noise_std = 0.0,
                       std::vector<std::string> const& confidence_threshold_marker_names = {},
-                      double confidence_threshold_override = 0.0);
+                      double confidence_threshold_override = 0.0,
+                      double window_start_s = -std::numeric_limits<double>::infinity(),
+                      double window_end_s = std::numeric_limits<double>::infinity(),
+                      KeypointRowOverrides const* row_overrides = nullptr);
 
     /// @brief Load anonymous reflective-dot candidates for a sequence.
     ///
@@ -242,6 +359,40 @@ class SessionReader {
     std::vector<UnlabeledCandidate>
     load_unlabeled_candidates(std::string const& sequence_id,
                               std::map<std::string, Camera> const& cameras);
+
+    /// @brief Load the keypoint candidates of a sequence (pose_observations rows with
+    /// `source='kp_candidates'`), for the markers of *skeleton* bound to the same pose model.
+    ///
+    /// The sequence's manifest rows with obs_source 'kp_candidates' name each keypoint_idx; a
+    /// candidate of a keypoint no marker's landmark matches is dropped. Candidates with a peak
+    /// below @p min_confidence are dropped, as the body keypoints are. Positions are undistorted
+    /// like the dot candidates'.
+    ///
+    /// @param person_id Person index within the sequence (0 for a one-person sequence).
+    /// @param window_start_s, window_end_s Load only rows with timestamp in [start, end).
+    /// @return The candidates and the marker-to-keypoint binding; empty when the sequence holds
+    ///         no candidates or the skeleton binds none of their keypoints.
+    KeypointCandidates
+    load_keypoint_candidates(std::string const& sequence_id,
+                             std::map<std::string, Camera> const& cameras, Skeleton const& skeleton,
+                             double min_confidence = 0.1, int person_id = 0,
+                             double window_start_s = -std::numeric_limits<double>::infinity(),
+                             double window_end_s = std::numeric_limits<double>::infinity());
+
+    /// @brief Load every keypoint candidate of a person in a time window, for the windowed choice
+    /// (keypoint_window_choice.hpp). Unlike load_keypoint_candidates() it keeps the keypoints no
+    /// marker is bound to, because they support the picks of their neighbours, and it keeps
+    /// candidates of any peak.
+    ///
+    /// @param person_id Person index within the sequence.
+    /// @param window_start_s, window_end_s Load only rows with timestamp in [start, end).
+    /// @return Empty (no cameras) when the sequence holds no candidates.
+    KeypointChoiceData
+    load_keypoint_choice_data(std::string const& sequence_id,
+                              std::map<std::string, Camera> const& cameras,
+                              Skeleton const& skeleton, int person_id = 0,
+                              double window_start_s = -std::numeric_limits<double>::infinity(),
+                              double window_end_s = std::numeric_limits<double>::infinity());
 
    private:
     /// @brief Read pose_observation_sequences.pixels_are_undistorted for sequence_id.

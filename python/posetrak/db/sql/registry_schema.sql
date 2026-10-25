@@ -96,29 +96,29 @@ CREATE TABLE IF NOT EXISTS marker_body_definitions (
 
 -- UKF / tracker configuration snapshots
 CREATE TABLE IF NOT EXISTS tracker_configs (
-    id                     TEXT PRIMARY KEY,
-    name                   TEXT NOT NULL,
-    parent_id              TEXT REFERENCES tracker_configs(id),
-    created_at             TEXT NOT NULL,
-    alpha                  REAL,
-    beta                   REAL,
-    kappa                  REAL,
-    process_noise_std      REAL,
-    process_noise_vel_std  REAL,
-    velocity_half_life_s   REAL,
-    measurement_noise_std  REAL,
-    outlier_threshold      REAL,
-    tracker_fps            REAL,
-    ik_max_iterations      INTEGER,
-    ik_tolerance           REAL,
-    init_position_std      REAL,
-    init_orientation_std   REAL,
-    init_joint_std         REAL,
-    init_velocity_std      REAL,
-    min_cameras_for_init              INTEGER,
+    id                     TEXT PRIMARY KEY,                    -- UUID of the config snapshot
+    name                   TEXT NOT NULL,                       -- display name; auto-generated for per-run snapshots (is_named = 0)
+    parent_id              TEXT REFERENCES tracker_configs(id), -- config this one was derived from by an edit; NULL for a root
+    created_at             TEXT NOT NULL,                       -- ISO 8601 UTC
+    alpha                  REAL,    -- UKF sigma-point spread; about 0.5 for a ~58-dimensional state (tiny values give negative covariance weights)
+    beta                   REAL,    -- UKF prior-distribution parameter; 2 is optimal for a Gaussian
+    kappa                  REAL,    -- UKF secondary scaling parameter; usually 0
+    process_noise_std      REAL,    -- process noise std for angle/position DOFs
+    process_noise_vel_std  REAL,    -- process noise std for velocity DOFs; NULL = same as process_noise_std
+    velocity_half_life_s   REAL,    -- velocity decay half-life in seconds; NULL = no decay
+    measurement_noise_std  REAL,    -- legacy name of the calibration noise: loaded as calib_noise_std, pixels in the original video
+    outlier_threshold      REAL,    -- chi-squared threshold for rejecting an observation as an outlier
+    tracker_fps            REAL,    -- tracker sample rate, Hz
+    ik_max_iterations      INTEGER, -- inverse-kinematics iteration cap for the initial pose
+    ik_tolerance           REAL,    -- inverse-kinematics convergence tolerance
+    init_position_std      REAL,    -- initial covariance std of the root position, metres
+    init_orientation_std   REAL,    -- initial covariance std of the root orientation, radians
+    init_joint_std         REAL,    -- initial covariance std of joint angles, radians (metres for prismatic joints)
+    init_velocity_std      REAL,    -- initial covariance std of the velocities
+    min_cameras_for_init              INTEGER,  -- fewest cameras that must see a frame for it to initialise the tracker
     velocity_mode_camera_ids          TEXT,  -- JSON array of integer camera indices; NULL = all cameras use position mode
     velocity_measurement_noise_std    REAL,  -- Measurement noise std for velocity cameras (pixels/frame); NULL = use measurement_noise_std
-    notes                             TEXT,
+    notes                             TEXT,     -- free-text notes; NULL if none
     -- Added in schema migration v22 (pose_noise_std), v23 (relative obs), v24 (cross-pair obs):
     pose_noise_std                    REAL,  -- Pose estimation noise std in model-input pixels
     use_relative_observations         INTEGER, -- 0/1 flag for child-minus-parent pixel observations
@@ -223,7 +223,89 @@ CREATE TABLE IF NOT EXISTS tracker_configs (
     -- comment (dot_assignment.hpp / config.hpp).
     dot_cross_view_corroboration_px  REAL,  -- Epipolar tolerance, px; NULL/0.0 = disabled
     dot_corroboration_gate_multiplier REAL, -- Divides cost for a corroborated pairing; NULL/1.0 = disabled
-    dot_camera_noise_scale           TEXT   -- JSON object {camera_id: scale, ...}; NULL/empty = no change
+    dot_camera_noise_scale           TEXT,  -- JSON object {camera_id: scale, ...}; NULL/empty = no change
+    -- Added in schema migration v57 (session)/v15 (registry): segmentation-
+    -- mask-based trust for the shared dot-assignment phase. Shared tunables
+    -- only -- per-subject identity (which seg_run, which label) is supplied
+    -- separately per subject at track-invocation time, never persisted here,
+    -- since it legitimately differs between subjects sharing one solve --
+    -- see SegmentationMaskModifier and TrackerConfig's own dot_seg_mask_*
+    -- field doc comments (dot_assignment.hpp / config.hpp).
+    dot_seg_mask_enabled              INTEGER, -- 0/1 flag; NULL/0 = disabled
+    dot_seg_mask_dilate_px            REAL,    -- Search radius, native px; NULL/20.0 = default
+    dot_seg_mask_tracklet_window      INTEGER, -- Rolling per-tracklet window, frames; NULL/60 = default
+    dot_seg_mask_min_tracklet_fraction REAL,   -- Hard-exclude threshold; NULL/0.3 = default
+    dot_seg_mask_cost_scale_at_zero_fraction REAL, -- Soft-penalty ceiling; NULL/4.0 = default
+    -- Added in schema migration v61 (session)/v16 (registry). A candidate
+    -- farther than this many native pixels from its subject's mask label in
+    -- the current frame is excluded outright, with no tracklet history needed
+    -- (a flickering static light gets a new tracklet id every few frames);
+    -- skipped for a camera whose mask lacks the label entirely.
+    dot_seg_mask_hard_distance_px     REAL,    -- Native px; NULL/0 = disabled
+    -- Added in schema migration v67 (session)/v17 (registry): the joint groups the tracker's
+    -- main (parent) stage tracks. A hierarchical configuration (one with tracker_config_stages
+    -- rows) restricted to its parent group lets the child stages carry the hands; without the
+    -- restriction the parent stage tracks the whole skeleton and the child stages run in
+    -- addition. An explicit --joint-groups on the tracker command line overrides this column.
+    -- See docs/roadmap/features/tracker-performance/tracker-performance-design.md.
+    active_joint_groups               TEXT,    -- JSON array of skeleton group names, e.g. ["main"]; NULL/[] = the whole skeleton
+    -- Added in schema migration v69 (session)/v18 (registry): keypoint candidates. 1 = the tracker takes the
+    -- sequence's keypoint candidates (pose_observations source 'kp_candidates') through the shared assignment
+    -- instead of the fixed body observations, for the markers bound to that pose model (the hand stages keep
+    -- their refined-hand observations). Gate, tracklet, corroboration and mask behaviour are the dot_* settings
+    -- above. See docs/roadmap/features/keypoint-candidates/keypoint-candidates-design.md.
+    kp_candidates_enabled             INTEGER, -- 0/1 flag; NULL/0 = the fixed observations are used even if the sequence holds candidates
+    -- Weight of the peak term in the assignment cost of a keypoint candidate: cost = squared Mahalanobis distance
+    -- + ln det S - weight * ln(peak), S the slot covariance with the candidate's detection noise (the gate tests
+    -- the distance alone). NULL/0 = no peak term. Has no meaning for dots.
+    kp_candidate_peak_weight          REAL,
+    -- Divides the squared Mahalanobis distance of a keypoint candidate that continues the tracklet resolved into
+    -- the same camera and marker on the previous step (dot_tracklet_gate_multiplier is the dot's). NULL/1.0 = off.
+    kp_candidate_tracklet_multiplier  REAL,
+    -- Added in schema migration v70 (session)/v19 (registry): the choice of keypoint candidates over a time
+    -- window (see docs/roadmap/features/keypoint-candidates/keypoint-candidates-design.md, section 10). The
+    -- choice runs as a phase of the tracking run before the first filter step and feeds its picks to the filter
+    -- as the fixed observations of the markers bound to the keypoints.
+    -- 'window' = the windowed choice, 'step' = the per-step assignment of the shared dot-assignment phase;
+    -- NULL = 'step'. Only read when kp_candidates_enabled is 1.
+    kp_candidate_choice               TEXT,
+    -- Half width in seconds of the window the neighbour and cross-camera support of a candidate are averaged over
+    -- along its tracklet; NULL = 1.0.
+    kp_choice_support_window_s        REAL,
+    -- Weight of the cross-camera (epipolar) support in the score of a candidate; NULL = 1.0, 0 = off.
+    kp_choice_delta                   REAL,
+    -- Weight of the multi-camera consensus flag in the score of a candidate; NULL = 0.3.
+    kp_choice_beta                    REAL,
+    -- Weight of the heatmap peak in the score of a candidate; NULL = 0.2.
+    kp_choice_gamma                   REAL,
+    -- Number of scoring rounds, each started from the picks of the previous one; NULL = 3.
+    kp_choice_rounds                  INTEGER,
+    -- JSON array of integer camera indices (as velocity_mode_camera_ids) that take no part in the windowed
+    -- choice: their fixed observations are kept and their candidates give no support. NULL/[] = every camera takes part.
+    kp_choice_skip_camera_ids         TEXT,
+    -- Strict mask filter before the choice: 1 = a candidate is dropped unless enough of the detections of its
+    -- tracklet around its frame lie on the tracked person's own mask (needs --seg-run); NULL/0 = off.
+    kp_strict_filter                  INTEGER,
+    -- Half width of the strict filter's window in video frames, looking backwards and forwards; NULL = 10.
+    kp_strict_filter_window_frames    INTEGER,
+    -- Smallest share of the detections in that window that must lie on the person's mask; NULL = 0.5.
+    kp_strict_filter_min_fraction     REAL,
+    -- Weight of the soft mask term in the score of a candidate (+1 on the person's mask, -1 on another person's,
+    -- averaged along the tracklet); NULL/0 = off. Needs --seg-run.
+    kp_mask_term_weight               REAL,
+    -- Half width in seconds of the window the mask term is averaged over; NULL = 2.0.
+    kp_mask_term_window_s             REAL,
+    -- Comma-separated keypoint classes the mask term applies to ('body', 'hands', 'feet'; the classes of a pose
+    -- model are in its choice model file); NULL = 'body'.
+    kp_mask_term_classes              TEXT,
+    -- Comma-separated keypoint classes the strict mask filter applies to ('body', 'hands', 'feet'); NULL = 'body'.
+    kp_strict_filter_classes          TEXT,
+    -- Score lost by a change of candidate between consecutive frames in the chain of picks the windowed choice
+    -- takes (a change is another tracklet or a jump of the pick, see kp_choice_jump_box); NULL/0 = every frame takes
+    -- its best score on its own.
+    kp_choice_switch_penalty          REAL,
+    -- Box heights between consecutive frames above which a move of the pick counts as a change; NULL = 0.04.
+    kp_choice_jump_box                REAL
 );
 
 -- Added in schema migration v37: hierarchical body/hand solver -- per-stage
@@ -261,13 +343,14 @@ CREATE TABLE IF NOT EXISTS tracker_config_stages (
 -- controller keeps them in a local file under the user config directory.
 
 CREATE TABLE IF NOT EXISTS control_endpoints (
-    camera_instance_id TEXT PRIMARY KEY REFERENCES camera_instances(id),
+    camera_instance_id TEXT PRIMARY KEY REFERENCES camera_instances(id), -- the camera this row controls
+    -- how the capture daemon drives the camera
     method             TEXT NOT NULL CHECK (method IN (
                            'gopro_cohn', 'gopro_ble', 'insta360_ble',
                            'adb', 'ble_hid', 'manual')),
-    gopro_serial       TEXT,  -- gopro_cohn: stable camera identity
-    ble_mac            TEXT,  -- gopro_ble: camera BLE address
-    wake_payload       BLOB,  -- insta360_ble: per-unit wake advertisement payload
-    adb_serial         TEXT,  -- adb: persistent device serial
-    notes              TEXT
+    gopro_serial       TEXT,  -- gopro_cohn: stable camera identity (tail of the serial, as in the BLE name); NULL for other methods
+    ble_mac            TEXT,  -- gopro_ble: camera BLE address; NULL for other methods
+    wake_payload       BLOB,  -- insta360_ble: per-unit wake advertisement payload; NULL for other methods
+    adb_serial         TEXT,  -- adb: persistent device serial; NULL for other methods
+    notes              TEXT   -- free text; NULL if none
 );

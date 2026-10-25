@@ -166,7 +166,8 @@ Markers define observation points on the skeleton that correspond to physical tr
 
 ### Optional Fields
 
-- **`openpose_keypoint`** (integer): COCO keypoint ID for 2D pose detection integration
+- **`openpose_keypoint`** (integer): COCO-133 keypoint index. Binds the marker to that slot of a sequence that has no keypoint manifest, and to the COCO-133 and hand21 slots of one that has
+- **`landmark`** (string): the keypoint of a pose model the marker is bound to, `<model>:<keypoint>` (`soma77:LeftForeArm`, `coco133:left_elbow`, `hand21:left_index_1`). A sequence's manifest names its slots the same way; see "Pose blob extensibility" in data-model-and-storage.md. A skeleton can carry the markers of several pose models: a sequence binds only its own
 - **`group`** (string): Assigned via groups section (see below)
 
 ### Example
@@ -178,6 +179,15 @@ markers:
     offset: [0.02, 0.05, 0.0]
     openpose_keypoint: 5
 ```
+
+## Layers
+
+The bundled default skeletons are composed from layers by `posetrak skeleton compose` (module
+`posetrak.skeleton.compose`): the joint hierarchy, the joint limits (`joint_limits.yaml`), one marker
+set per pose model (`coco133`, `hand21`, `soma77`) and the dimensions. A skeleton composed this way
+records its layers under a top-level `layers:` key, which the tracker ignores. `skeleton compose --base
+SKELETON --marker-set soma77` adds a pose model's markers to a skeleton of your own. Regenerate the
+bundled files after editing a layer with `python -m posetrak.skeleton.compose`.
 
 ## Groups Section
 

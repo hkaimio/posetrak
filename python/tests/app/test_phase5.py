@@ -186,13 +186,17 @@ def test_nudge_up_writes_edit(qapp, seq_db):
     assert abs(edit_kp[0, 1] - (orig_y - 1.0)) < 0.01
 
 
-def test_nudge_ignored_without_selection(qapp, seq_db):
+def test_arrow_without_selection_steps_a_frame_instead_of_nudging(qapp, seq_db):
     w = _make_widget(qapp, seq_db)
     w._sel_kp_indices = set()
     w._primary_kp_idx = None
     w._sel_cam_idx = None
+    w._nudge_keypoint = MagicMock()
+    w._step_frames = MagicMock()
     consumed = w._handle_key(_make_key_event(Qt.Key.Key_Right))
-    assert consumed is False
+    assert consumed is True
+    w._step_frames.assert_called_once_with(1)
+    w._nudge_keypoint.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

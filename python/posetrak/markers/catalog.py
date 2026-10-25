@@ -30,9 +30,14 @@ A marker with ``mirror: true`` is written for the right side: its name ends in
 across the sagittal plane, which negates ``lateral`` and the lateral component
 of ``normal``. Every other marker is taken as written.
 
-The geometry fields are optional, but ``along``, ``lateral`` and ``anterior``
-come together. A module authored without nominal geometry still fixes the slot
-names, their order and their parent joints.
+The geometry fields are optional. ``along`` may be given alone: it says roughly
+where on the parent bone the marker sits (0 at the bone's joint, 1 at its far end)
+and is enough for a calibration to tell the markers of one bone apart. ``lateral``
+and ``anterior`` refine it and come together with ``along``. A module authored
+without nominal geometry still fixes the slot names, their order and their parent
+joints. ``reach`` (metres) says how far from the ``along`` point on the bone axis the
+marker may lie: a few centimetres for a marker on a limb, more for one on the chest or
+back, where the skin is far from the bone.
 """
 from __future__ import annotations
 
@@ -62,6 +67,7 @@ class Slot:
     lateral: float | None = None
     anterior: float | None = None
     normal: tuple[float, float, float] | None = None
+    reach: float | None = None   # how far from the `along` point on the bone axis the marker may be, metres
 
 
 @dataclass(frozen=True)
@@ -207,13 +213,17 @@ def _slot(entry: dict, source: str) -> Slot:
     if not name or not joint:
         raise MarkerSetError(f"{source}: every marker needs a name and a parent_joint (got {entry})")
     given = [g for g in _GEOMETRY if entry.get(g) is not None]
-    if given and len(given) != len(_GEOMETRY):
-        raise MarkerSetError(f"{source}: marker {name!r} gives {', '.join(given)} but needs all of {', '.join(_GEOMETRY)}")
+    if given and given != ["along"] and len(given) != len(_GEOMETRY):
+        raise MarkerSetError(
+            f"{source}: marker {name!r} gives {', '.join(given)} but needs all of {', '.join(_GEOMETRY)} "
+            "(or only along)"
+        )
     normal = entry.get("normal")
     return Slot(
         name=str(name), parent_joint=str(joint),
         along=_float(entry.get("along")), lateral=_float(entry.get("lateral")), anterior=_float(entry.get("anterior")),
         normal=tuple(float(v) for v in normal) if normal else None,
+        reach=_float(entry.get("reach")),
     )
 
 
@@ -230,6 +240,7 @@ def _mirrored(slot: Slot, source: str) -> Slot:
         lateral=None if slot.lateral is None else -slot.lateral,
         anterior=slot.anterior,
         normal=None if slot.normal is None else (slot.normal[0], -slot.normal[1], slot.normal[2]),
+        reach=slot.reach,
     )
 
 

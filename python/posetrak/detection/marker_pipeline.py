@@ -45,6 +45,8 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from pathlib import Path
+from posetrak.db.db import _connect
 import threading
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -263,9 +265,7 @@ def _run_camera_job(job: _CameraJob) -> tuple[str, int]:
     wait. No live stop_event or per-frame on_progress here -- see
     run_parallel()'s own docstring for why those don't cross the process
     boundary."""
-    conn = sqlite3.connect(job.session_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 30000")
+    conn = _connect(Path(job.session_path))
     detector = _build_detector(job.detector_spec)
     try:
         frames_done = _process_camera_core(

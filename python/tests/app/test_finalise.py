@@ -362,3 +362,165 @@ def test_auto_assign_skips_track_id_outside_persons_ordered(session):
         "SELECT person_name FROM detection_track_assignments WHERE detection_run_id = 'run1'"
     ).fetchall()
     assert [r["person_name"] for r in rows] == ["alice"]
+
+
+def test_auto_assign_skips_a_label_no_subject_has(session):
+    """Labels are permanent subject labels, so persons_ordered can hold ""
+    for an unused label -- a track on such a label is skipped, never turned
+    into a blank-named person."""
+    for track_id in (1, 2):
+        session.execute(
+            "INSERT INTO detection_keypoints"
+            " (detection_run_id, shot_video_id, video_frame, track_id, region_type,"
+            "  keypoints, noise_scale)"
+            " VALUES ('run1', ?, 0, ?, 'full_body', ?, 0.5)",
+            (_SVID, track_id, _kp(1.0, 133)),
+        )
+        session.execute(
+            "INSERT INTO person_tracks"
+            " (id, detection_run_id, shot_video_id, track_id, first_frame, last_frame)"
+            " VALUES (?, 'run1', ?, ?, 0, 0)",
+            (f"pt{track_id}", _SVID, track_id),
+        )
+    session.commit()
+
+    seq_ids = auto_assign_and_finalise(
+        session, detection_run_id="run1", shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
+        persons_ordered=["", "bob"], pose_model="rtmpose-l-133kp",
+    )
+    assert len(seq_ids) == 1
+    names = [r["person_name"] for r in session.execute(
+        "SELECT person_name FROM detection_track_assignments WHERE detection_run_id = 'run1'"
+    ).fetchall()]
+    assert names == ["bob"]
+
+
+def test_auto_assign_records_the_persons_subject_id(session):
+    """The person's registry (subject) id lands on the sequence and on the
+    stitched track assignment, not just the name."""
+    session.execute(
+        "INSERT INTO detection_keypoints"
+        " (detection_run_id, shot_video_id, video_frame, track_id, region_type,"
+        "  keypoints, noise_scale)"
+        " VALUES ('run1', ?, 0, 1, 'full_body', ?, 0.5)",
+        (_SVID, _kp(1.0, 133)),
+    )
+    session.execute(
+        "INSERT INTO person_tracks"
+        " (id, detection_run_id, shot_video_id, track_id, first_frame, last_frame)"
+        " VALUES ('pt1', 'run1', ?, 1, 0, 0)",
+        (_SVID,),
+    )
+    session.commit()
+
+    seq_ids = auto_assign_and_finalise(
+        session, detection_run_id="run1", shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
+        persons_ordered=["alice"], pose_model="rtmpose-l-133kp",
+    )
+    person = session.execute(
+        "SELECT id FROM capture_subjects WHERE name = 'alice'"
+    ).fetchone()["id"]
+    sp = session.execute(
+        "SELECT capture_person_id, subject_id FROM sequence_persons WHERE sequence_id = ?",
+        (seq_ids[0],),
+    ).fetchone()
+    assert (sp["capture_person_id"], sp["subject_id"]) == (person, person)
+    dta = session.execute(
+        "SELECT subject_id FROM detection_track_assignments WHERE detection_run_id = 'run1'"
+    ).fetchone()
+    assert dta["subject_id"] == person
+
+
+def _finalise_with_hands(session, pose_model, body_width):
+    for region, n in (("full_body", body_width), ("hand_l", 21), ("hand_r", 21)):
+        session.execute(
+            "INSERT OR REPLACE INTO detection_keypoints"
+            " (detection_run_id, shot_video_id, video_frame, track_id, region_type, keypoints, noise_scale)"
+            " VALUES ('run1', ?, 0, 1, ?, ?, 0.5)",
+            (_SVID, region, _kp(1.0, n)),
+        )
+    session.commit()
+    assignment = TrackAssignment(shot_video_id=_SVID, track_id=1, person_name="alice", first_frame=0, last_frame=0)
+    return finalise_to_db(
+        session, detection_run_id="run1", shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
+        assignments=[assignment], pose_model=pose_model,
+    )[0]
+
+
+def _manifest(session, seq_id):
+    rows = session.execute(
+        "SELECT obs_source, keypoint_idx, name, source FROM pose_sequence_keypoints WHERE sequence_id = ?"
+        " ORDER BY obs_source, keypoint_idx", (seq_id,)).fetchall()
+    by_source = {}
+    for r in rows:
+        by_source.setdefault(r["obs_source"], []).append((r["keypoint_idx"], r["name"], r["source"]))
+    return by_source
+
+
+def test_finalise_writes_a_manifest_per_source_for_a_coco133_sequence(session):
+    manifest = _manifest(session, _finalise_with_hands(session, "rtmpose-l-133kp", 133))
+    assert set(manifest) == {"body", "hand_l", "hand_r"}
+    assert len(manifest["body"]) == 133 and manifest["body"][7] == (7, "coco133:left_elbow", "coco133")
+    assert manifest["hand_l"][5] == (5, "hand21:left_index_1", "hand21")
+    assert manifest["hand_r"][0] == (0, "hand21:right_hand_root", "hand21")
+
+
+def test_finalise_writes_the_soma_body_manifest_and_replaces_it_on_refinalising(session):
+    seq_id = _finalise_with_hands(session, "soma77-dinov3-vitpose", 77)
+    manifest = _manifest(session, seq_id)
+    assert len(manifest["body"]) == 77 and manifest["body"][13] == (13, "soma77:LeftForeArm", "soma77")
+    assert len(manifest["hand_r"]) == 21
+    second = _finalise_with_hands(session, "soma77-dinov3-vitpose", 77)
+    assert session.execute("SELECT COUNT(*) FROM pose_sequence_keypoints WHERE sequence_id = ?", (seq_id,)).fetchone()[0] == 0
+    assert len(_manifest(session, second)["body"]) == 77
+
+
+def test_finalise_scales_the_candidate_peaks_like_the_body_confidence(session):
+    from posetrak.detection.kp_candidates import decode_kp_candidates_blob, encode_kp_candidates_blob
+
+    blob = encode_kp_candidates_blob([0, 0], [1.0, 2.0], [3.0, 4.0], [0.5, 0.25], [0, 1], [5, 6])
+    for region, data in (("full_body", _kp(0.5, 77)), ("kp_candidates", blob)):
+        session.execute(
+            "INSERT INTO detection_keypoints"
+            " (detection_run_id, shot_video_id, video_frame, track_id, region_type, keypoints, noise_scale)"
+            " VALUES ('run1', ?, 0, 1, ?, ?, 0.5)", (_SVID, region, data))
+    session.commit()
+    seq_id = finalise_to_db(
+        session, detection_run_id="run1", shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
+        assignments=[TrackAssignment(_SVID, 1, "alice", 0, 0)], pose_model="soma77-vitpose-h", confidence_scale=5.0)[0]
+    rows = {r["source"]: bytes(r["kp_blob"]) for r in session.execute(
+        "SELECT source, kp_blob FROM pose_observations WHERE sequence_id = ?", (seq_id,))}
+    table = decode_kp_candidates_blob(rows["kp_candidates"])
+    np.testing.assert_allclose(table[:, 3], [2.5, 1.25])
+    np.testing.assert_array_equal(table[:, [0, 1, 2, 4, 5]], decode_kp_candidates_blob(blob)[:, [0, 1, 2, 4, 5]])
+    np.testing.assert_allclose(np.frombuffer(rows["body"], np.float32).reshape(-1, 3)[0, 2], 2.5)
+
+
+def test_finalise_copies_candidate_rows_with_the_body_manifest(session):
+    from posetrak.detection.kp_candidates import encode_kp_candidates_blob
+
+    blob = encode_kp_candidates_blob([0, 0], [1.0, 2.0], [3.0, 4.0], [0.9, 0.2], [0, 1], [5, 6])
+    for region, data in (("full_body", _kp(1.0, 77)), ("kp_candidates", blob)):
+        session.execute(
+            "INSERT INTO detection_keypoints"
+            " (detection_run_id, shot_video_id, video_frame, track_id, region_type, keypoints, noise_scale)"
+            " VALUES ('run1', ?, 0, 1, ?, ?, 0.5)", (_SVID, region, data))
+    session.commit()
+    seq_id = finalise_to_db(
+        session, detection_run_id="run1", shot_id=_SHOT_ID, sync_config_id=_SYNC_ID,
+        assignments=[TrackAssignment(_SVID, 1, "alice", 0, 0)], pose_model="soma77-vitpose-h")[0]
+
+    rows = {r["source"]: r for r in session.execute(
+        "SELECT source, kp_blob, noise_scale FROM pose_observations WHERE sequence_id = ?", (seq_id,))}
+    assert set(rows) == {"body", "kp_candidates"}
+    assert bytes(rows["kp_candidates"]["kp_blob"]) == blob            # copied as it is, not confidence-scaled
+    assert rows["kp_candidates"]["noise_scale"] == pytest.approx(0.5)
+    names = {src: {r[0]: r[1] for r in session.execute(
+        "SELECT keypoint_idx, name FROM pose_sequence_keypoints WHERE sequence_id = ? AND obs_source = ?",
+        (seq_id, src))} for src in ("body", "kp_candidates")}
+    assert len(names["kp_candidates"]) == 77 and names["kp_candidates"] == names["body"]
+
+    from app.pose.db_cache import read_observations_with_edits
+
+    merged = read_observations_with_edits(session, seq_id, _CAM_ID)    # readers of keypoint blobs skip the candidates
+    assert set(merged) == {0}

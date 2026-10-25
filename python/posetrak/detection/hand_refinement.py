@@ -30,8 +30,10 @@ from typing import Callable
 
 import numpy as np
 
+from posetrak.detection import stage_timing as st
 from posetrak.detection.frame_source import iter_frames
 from posetrak.detection.pipeline import CameraInfo
+from posetrak.detection.pose_models import COCO133, COCO133_HAND_BASE, HAND_OBS_SOURCE, spec_for_pose_model
 
 _log = logging.getLogger(__name__)
 
@@ -65,18 +67,14 @@ _GATE_FLOOR_PX = 40.0
 # edited_kp_noise_std.
 _HAND_CONF_SCALE = 5.0
 
-# COCO-133 keypoint indices (see app/pose/kp_models.py). Hand refinement only
-# runs against the 133-point whole-body layout — a 17-point model has no
-# hand keypoints to refine at all.
-_N_KP_133 = 133
-_WRIST_IDX = {"left": 9, "right": 10}
-_ELBOW_IDX = {"left": 7, "right": 8}
-# Canonical source of truth for the hand21 -> COCO-133 index mapping;
-# posetrak.db.observation_merge and the C++ session loader reference these
-# values (91/112/21) in their own comments rather than importing this module.
-_HAND_BASE_IDX = {"left": 91, "right": 112}
+# The wrist and elbow slots come from the pose model's registry entry, so the pass works for every model that
+# names them.
 _HAND_N_KP = 21
-_REGION_TYPE = {"left": "hand_l", "right": "hand_r"}
+_REGION_TYPE = HAND_OBS_SOURCE
+# The COCO-133 slots, for the hand redetection of the editing UI, which works on COCO-133 sequences only.
+_WRIST_IDX = {side: w for side, (w, _) in COCO133.arm_indices().items()}
+_ELBOW_IDX = {side: e for side, (_, e) in COCO133.arm_indices().items()}
+_HAND_BASE_IDX = COCO133_HAND_BASE
 
 # rtmlib.Hand's RTMPose stage input size (square). Used to derive noise_scale
 # from the hand crop's own pixel size the same way the whole-body pipeline
@@ -96,28 +94,31 @@ class HandCandidate:
     crop_w_px: float       # pixel width of the wrist-centred crop fed to hand_model
 
 
-def detect_hand_in_crop(
-    hand_model,
-    image: np.ndarray,
+@dataclass
+class HandCropPlan:
+    """The wrist-centred crop of one hand and the numbers its gate needs."""
+
+    x0: int
+    y0: int
+    x1: int
+    y1: int
+    wrist: tuple[float, float]
+    forearm_len: float
+    half: float
+
+
+def plan_hand_crop(
+    image_shape: tuple[int, ...],
     wrist: tuple[float, float],
     elbow: tuple[float, float] | None,
-) -> HandCandidate | None:
-    """Crop around *wrist*, run *hand_model*, gate the result by proximity.
+) -> HandCropPlan | None:
+    """The crop around *wrist* (offset along the forearm towards the hand), or None if it is degenerate.
 
-    *hand_model* is anything callable as ``keypoints, scores = hand_model(crop)``
-    returning ``keypoints: float32[n_hands, 21, 2]`` (crop-local) and
-    ``scores: float32[n_hands, 21]`` — the ``rtmlib.Hand`` call signature.
-
-    *wrist* and *elbow* are full-frame pixel coordinates; *elbow* is ``None``
-    when it isn't confidently known, in which case the crop centres on the
-    wrist with no offset and the gate falls back to its floor value.
-
-    Picks the candidate hand whose own root keypoint (index 0) lands
-    closest to *wrist*, then rejects it if that distance still exceeds the
-    gate threshold. Returns ``None`` on no detection or a gate reject.
+    *elbow* is ``None`` when it isn't confidently known, in which case the crop centres on the wrist with no
+    offset and the gate falls back to its floor value.
     """
     wx, wy = wrist
-    img_h, img_w = image.shape[:2]
+    img_h, img_w = image_shape[:2]
 
     forearm_len = 0.0
     ex = ey = None
@@ -136,17 +137,26 @@ def detect_hand_in_crop(
     x1, y1 = int(min(img_w, cx + half)), int(min(img_h, cy + half))
     if x1 <= x0 or y1 <= y0:
         _log.debug(
-            "detect_hand_in_crop: degenerate crop wrist=%s elbow=%s -> (%d,%d,%d,%d), rejecting",
+            "plan_hand_crop: degenerate crop wrist=%s elbow=%s -> (%d,%d,%d,%d), rejecting",
             wrist, elbow, x0, y0, x1, y1,
         )
         return None
+    return HandCropPlan(x0, y0, x1, y1, (wx, wy), forearm_len, half)
 
-    keypoints, scores = hand_model(image[y0:y1, x0:x1])
+
+def gate_hand_candidates(plan: HandCropPlan, keypoints, scores) -> HandCandidate | None:
+    """Pick the candidate hand whose root keypoint lands closest to the wrist; None if none passes the gate.
+
+    *keypoints* is ``float32[n_hands, 21, 2]`` (crop-local) and *scores* ``float32[n_hands, 21]`` as the hand
+    model returns them for the crop of *plan*.
+    """
+    wx, wy = plan.wrist
+    x0, y0, forearm_len = plan.x0, plan.y0, plan.forearm_len
     n_det = len(keypoints) if keypoints is not None else 0
     if n_det == 0:
         _log.debug(
-            "detect_hand_in_crop: no candidates  crop=(%d,%d,%d,%d)  forearm_len=%.1f",
-            x0, y0, x1, y1, forearm_len,
+            "gate_hand_candidates: no candidates  crop=(%d,%d,%d,%d)  forearm_len=%.1f",
+            x0, y0, plan.x1, plan.y1, forearm_len,
         )
         return None
 
@@ -159,14 +169,14 @@ def detect_hand_in_crop(
 
     if best_idx is None or best_dist > gate_thr:
         _log.debug(
-            "detect_hand_in_crop: gate REJECT  n_candidates=%d  best_dist=%.1fpx  gate_thr=%.1fpx",
+            "gate_hand_candidates: gate REJECT  n_candidates=%d  best_dist=%.1fpx  gate_thr=%.1fpx",
             n_det, best_dist if best_dist is not None else -1.0, gate_thr,
         )
         return None
 
     _log.debug(
-        "detect_hand_in_crop: gate PASS  n_candidates=%d  best_dist=%.1fpx  gate_thr=%.1fpx  crop_w=%.0fpx",
-        n_det, best_dist, gate_thr, 2.0 * half,
+        "gate_hand_candidates: gate PASS  n_candidates=%d  best_dist=%.1fpx  gate_thr=%.1fpx  crop_w=%.0fpx",
+        n_det, best_dist, gate_thr, 2.0 * plan.half,
     )
     kp_full = keypoints[best_idx].astype(np.float32).copy()
     kp_full[:, 0] += x0
@@ -175,8 +185,137 @@ def detect_hand_in_crop(
         keypoints=kp_full,
         scores=scores[best_idx].astype(np.float32),
         root_dist_px=best_dist,
-        crop_w_px=2.0 * half,
+        crop_w_px=2.0 * plan.half,
     )
+
+
+def detect_hand_in_crop(
+    hand_model,
+    image: np.ndarray,
+    wrist: tuple[float, float],
+    elbow: tuple[float, float] | None,
+) -> HandCandidate | None:
+    """Crop around *wrist*, run *hand_model*, gate the result by proximity.
+
+    *hand_model* is anything callable as ``keypoints, scores = hand_model(crop)``
+    returning ``keypoints: float32[n_hands, 21, 2]`` (crop-local) and
+    ``scores: float32[n_hands, 21]`` — the ``rtmlib.Hand`` call signature.
+
+    *wrist* and *elbow* are full-frame pixel coordinates (see :func:`plan_hand_crop`). Returns ``None`` on no
+    detection or a gate reject.
+    """
+    plan = plan_hand_crop(image.shape, wrist, elbow)
+    if plan is None:
+        return None
+    keypoints, scores = hand_model(image[plan.y0:plan.y1, plan.x0:plan.x1])
+    return gate_hand_candidates(plan, keypoints, scores)
+
+
+def hand_rows_of(candidates: dict[str, HandCandidate]) -> list[tuple[str, np.ndarray, float]]:
+    """``(region_type, hand_kp[21, 3], noise_scale)`` rows for the gated *candidates* by side."""
+    rows = []
+    for side, result in candidates.items():
+        hand_kp = np.empty((_HAND_N_KP, 3), dtype=np.float32)
+        hand_kp[:, 0] = result.keypoints[:, 0]
+        hand_kp[:, 1] = result.keypoints[:, 1]
+        hand_kp[:, 2] = result.scores * _HAND_CONF_SCALE
+        rows.append((_REGION_TYPE[side], hand_kp, result.crop_w_px / _HAND_POSE_INPUT_WIDTH))
+    return rows
+
+
+def hand_wrists(
+    kp: np.ndarray, arms: dict[str, tuple[int, int]],
+) -> dict[str, tuple[tuple[float, float], tuple[float, float] | None]]:
+    """``{side: (wrist, elbow or None)}`` of the sides of keypoints *kp* whose wrist is confident.
+
+    *arms* is ``PoseModelSpec.arm_indices()`` of the model *kp* comes from.
+    """
+    out = {}
+    for side, (wrist_idx, elbow_idx) in arms.items():
+        wx, wy, wc = kp[wrist_idx]
+        if wc <= 0.0:
+            continue
+        ex, ey, ec = kp[elbow_idx]
+        out[side] = ((float(wx), float(wy)), (float(ex), float(ey)) if ec > 0.0 else None)
+    return out
+
+
+class HandBatchModel:
+    """``rtmlib.Hand`` with the pose stage run once for the hands found in many crops.
+
+    The hand detector takes one image per call (its ONNX graph has batch size 1) and runs per crop; the pose
+    model takes any batch and runs on every detected hand of every crop together. A crop in which the detector
+    finds nothing goes to the pose model whole, as ``rtmlib.Hand`` does.
+    """
+
+    def __init__(self, hand=None) -> None:
+        if hand is None:
+            device = _rtmpose_backend._auto_device()
+            hand = _Hand(to_openpose=False, backend="onnxruntime", device=device)
+        self._hand = hand
+
+    def __call__(self, crops: list[np.ndarray]) -> list[tuple[np.ndarray, np.ndarray]]:
+        """``(keypoints[n, 21, 2], scores[n, 21])`` per crop."""
+        with st.stage("hand_model"):
+            boxes = [self._hand.det_model(crop) for crop in crops]
+            counts = [max(len(found), 1) for found in boxes]
+            jobs = [(crop, np.asarray(box, dtype=np.float32))
+                    for crop, found in zip(crops, boxes)
+                    for box in (found if len(found) else [[0, 0, crop.shape[1], crop.shape[0]]])]
+            decoded = iter(_rtmpose_backend.run_rtmlib_batch(self._hand.pose_model, jobs))
+            out = []
+            for n in counts:
+                pairs = [next(decoded) for _ in range(n)]
+                out.append((np.stack([p[0] for p in pairs]), np.stack([p[1] for p in pairs])))
+            return out
+
+
+class HandPass:
+    """Refined hand keypoints for the poses of a batch of frames, the hand crops batched.
+
+    *pose_model* is the stored model name of the poses (COCO-133 when not given); it says which keypoints are
+    the wrists and elbows.
+
+    Used inside the detection loop on the frames already decoded; ``HandRefinementPipeline`` is the same
+    refinement as a second pass over a stored run.
+    """
+
+    def __init__(self, model: HandBatchModel | None = None, pose_model: str | None = None) -> None:
+        self._model = model
+        spec = spec_for_pose_model(pose_model) if pose_model else COCO133
+        self._arms = spec.arm_indices() if spec is not None else {}
+        self._width = len(spec.keypoint_names) if spec is not None else 0
+
+    @staticmethod
+    def supports(pose_model: str | None) -> bool:
+        """True if *pose_model* names a wrist and an elbow."""
+        spec = spec_for_pose_model(pose_model)
+        return spec is not None and bool(spec.arm_indices())
+
+    @property
+    def model(self) -> HandBatchModel:
+        if self._model is None:
+            self._model = HandBatchModel()
+        return self._model
+
+    def refine(self, items: list[tuple[np.ndarray, np.ndarray]]) -> list[list[tuple[str, np.ndarray, float]]]:
+        """For each ``(frame, keypoints[N, 3])`` the ``(region_type, hand_kp, noise_scale)`` rows of its hands."""
+        plans = []                                   # (item index, side, plan)
+        for index, (frame, kp) in enumerate(items):
+            if kp.shape[0] != self._width:
+                continue
+            for side, (wrist, elbow) in hand_wrists(kp, self._arms).items():
+                plan = plan_hand_crop(frame.shape, wrist, elbow)
+                if plan is not None:
+                    plans.append((index, side, plan))
+        found: list[dict[str, HandCandidate]] = [{} for _ in items]
+        if plans:
+            crops = [items[i][0][p.y0:p.y1, p.x0:p.x1] for i, _, p in plans]
+            for (index, side, plan), (kps, scores) in zip(plans, self.model(crops)):
+                candidate = gate_hand_candidates(plan, kps, scores)
+                if candidate is not None:
+                    found[index][side] = candidate
+        return [hand_rows_of(candidates) for candidates in found]
 
 
 class HandRefinementPipeline:
@@ -206,6 +345,8 @@ class HandRefinementPipeline:
         self._session = session
         self._stop_event = stop_event or threading.Event()
         self._hand_model = None
+        self._arms: dict[str, tuple[int, int]] = {}
+        self._width = 0
 
     def _get_hand_model(self):
         if self._hand_model is None:
@@ -224,7 +365,7 @@ class HandRefinementPipeline:
 
         Returns the number of (frame, track, side) hand detections that
         passed the gate and were written. No-ops (returns 0) if the run's
-        pose model isn't the 133-point whole-body layout.
+        pose model names no wrist and elbow.
 
         *on_camera_done* (done, total), if given, fires after each camera
         finishes -- mirrors DetectionPipeline.run()'s own callback of the
@@ -236,9 +377,11 @@ class HandRefinementPipeline:
             "SELECT pose_model FROM detection_runs WHERE id=?", (run_id,)
         ).fetchone()
         pose_model = row["pose_model"] if row else None
-        if not pose_model or "133" not in pose_model:
-            _log.info("run: pose model %r has no hand keypoints, skipping", pose_model)
+        if not HandPass.supports(pose_model):
+            _log.info("run: pose model %r names no wrist and elbow, skipping", pose_model)
             return 0
+        spec = spec_for_pose_model(pose_model)
+        self._arms, self._width = spec.arm_indices(), len(spec.keypoint_names)
 
         total_refined = 0
         for i, cam in enumerate(cameras):
@@ -281,7 +424,7 @@ class HandRefinementPipeline:
             if frame_rows is not None:
                 for row in frame_rows:
                     kp = np.frombuffer(bytes(row["keypoints"]), dtype=np.float32).reshape(-1, 3)
-                    if kp.shape[0] != _N_KP_133:
+                    if kp.shape[0] != self._width:
                         continue
                     for region_type, hand_kp, noise_scale in self._refine_one(hand_model, kp, img):
                         updates.append((
@@ -311,23 +454,12 @@ class HandRefinementPipeline:
         hand_kp[21,3], noise_scale) — one entry per side whose hand was found
         and passed the gate — ready to write as new detection_keypoints rows.
         """
-        results: list[tuple[str, np.ndarray, float]] = []
-        for side in ("left", "right"):
-            wx, wy, wc = kp[_WRIST_IDX[side]]
-            if wc <= 0.0:
-                continue
-            ex, ey, ec = kp[_ELBOW_IDX[side]]
-            elbow = (float(ex), float(ey)) if ec > 0.0 else None
-            result = detect_hand_in_crop(hand_model, img, (float(wx), float(wy)), elbow)
-            if result is None:
-                continue
-            hand_kp = np.empty((_HAND_N_KP, 3), dtype=np.float32)
-            hand_kp[:, 0] = result.keypoints[:, 0]
-            hand_kp[:, 1] = result.keypoints[:, 1]
-            hand_kp[:, 2] = result.scores * _HAND_CONF_SCALE
-            noise_scale = result.crop_w_px / _HAND_POSE_INPUT_WIDTH
-            results.append((_REGION_TYPE[side], hand_kp, noise_scale))
-        return results
+        candidates = {}
+        for side, (wrist, elbow) in hand_wrists(kp, self._arms).items():
+            result = detect_hand_in_crop(hand_model, img, wrist, elbow)
+            if result is not None:
+                candidates[side] = result
+        return hand_rows_of(candidates)
 
     def _flush(self, updates: list[tuple]) -> None:
         if not updates:

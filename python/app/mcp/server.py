@@ -181,6 +181,35 @@ def get_observation_gaps(
 
 
 @mcp.tool()
+def get_assignment_trace(
+    run_id: str,
+    start_s: float,
+    end_s: float,
+    marker: str | None = None,
+) -> str:
+    """Every (candidate, marker-slot) pair the dot-assignment phase costed, per step.
+
+    Only has data for a run made with --trace-assignment-start/
+    --trace-assignment-end covering this range (posetrak-tracker track
+    --help) -- an empty result usually means the run wasn't traced here, not
+    that nothing was considered. Trace ranges should be kept narrow: this is
+    per-candidate-per-slot detail, not a per-step summary like
+    get_observation_gaps.
+
+    Use this when get_camera_coverage/get_observation_gaps show a slot
+    absent or an outlier and you need to know why: was there really no
+    candidate that step, did a CostModifier (tracklet_continuity/
+    candidate_ownership/reacquisition_gate/cross_view_corroboration) exclude
+    the right one, or did it simply lose the Hungarian solve to a closer
+    candidate for a different slot.
+
+    marker: optional skeleton marker name to filter to, e.g. "dot1".
+    """
+    with _conn() as conn:
+        return _diag.get_assignment_trace(conn, run_id, start_s, end_s, marker)
+
+
+@mcp.tool()
 def get_camera_geometry(run_id: str) -> str:
     """Camera 3-D world positions, viewing directions, and pairwise parallax.
 

@@ -96,6 +96,14 @@ def run_tracker(
     start_time: float | None = None,
     end_time: float | None = None,
     smooth: bool = True,
+    seg_run_id: str | None = None,
+    seg_mask_label: int | None = None,
+    seg_revision: int | None = None,
+    tracklet_assignments_path: Path | None = None,
+    kp_choice_model_path: Path | None = None,
+    kp_confidence_scale: float | None = None,
+    kp_choice_dump_path: Path | None = None,
+    trace_assignment_steps: tuple[int, int] | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> TrackerResult:
     """Run the posetrak-tracker binary as a subprocess.
@@ -128,6 +136,30 @@ def run_tracker(
         Optional end time in seconds (passed to binary as ``--end-time``).
     smooth:
         Whether to enable RTS smoothing (``--smooth`` flag). Default True.
+    seg_run_id:
+        Optional ``seg_quality_runs.id`` gating the shared dot-assignment
+        phase's trust in a candidate's tracklet (SegmentationMaskModifier) --
+        see segmentation-mask-dot-assignment-design.md. Requires
+        ``seg_mask_label`` too; the tracker config's own
+        ``dot_seg_mask_enabled`` must also be set for this to have any
+        effect. ``posetrak.db.manage_person.resolve_seg_mask_label()``
+        resolves the label a subject's own name maps to within this
+        segmentation.
+    seg_mask_label:
+        This subject's own label (1..N) within *seg_run_id*'s masks.
+    seg_revision:
+        Mask revision every mask of the run is read at (``--seg-revision``). None lets the binary
+        pin the newest closed revision at its start; callers that want to know it resolve it
+        themselves (``posetrak.db.seg_revisions.newest_closed_revision``) and pass it. The binary
+        records it in ``tracking_run_persons.seg_revision``.
+    kp_choice_model_path:
+        Choice model file (``posetrak.detection.kp_choice_model``) for the windowed choice of keypoint candidates:
+        the pose model's neighbour limits and keypoint classes (``--kp-choice-model``).
+    kp_confidence_scale:
+        The pose model's confidence scale (``--kp-confidence-scale``); the binary assumes 5.0 (SOMA-77) without it.
+    kp_choice_dump_path:
+        CSV file the binary writes every keypoint candidate of the windowed choice to, with its consensus flag and
+        whether it was picked (``--kp-choice-dump``, diagnostics).
     on_progress:
         Callback invoked for each non-empty output line. Called from whichever
         thread calls ``run_tracker()``.
@@ -155,6 +187,23 @@ def run_tracker(
         args += ["--end-time", str(end_time)]
     if smooth:
         args.append("--smooth")
+    if seg_run_id is not None and seg_mask_label is not None:
+        args += ["--seg-run-id", seg_run_id, "--seg-mask-label", str(seg_mask_label)]
+        if seg_revision is not None:
+            args += ["--seg-revision", str(seg_revision)]
+    if tracklet_assignments_path is not None:
+        args += ["--tracklet-assignments", str(tracklet_assignments_path)]
+    if kp_choice_model_path is not None:
+        args += ["--kp-choice-model", str(kp_choice_model_path)]
+    if kp_confidence_scale is not None:
+        args += ["--kp-confidence-scale", str(kp_confidence_scale)]
+    if kp_choice_dump_path is not None:
+        args += ["--kp-choice-dump", str(kp_choice_dump_path)]
+    if trace_assignment_steps is not None:
+        args += [
+            "--trace-assignment-start", str(trace_assignment_steps[0]),
+            "--trace-assignment-end", str(trace_assignment_steps[1]),
+        ]
 
     run_id: str | None = None
 
@@ -193,6 +242,7 @@ def _build_multi_person_args(
     start_time: float | None,
     end_time: float | None,
     smooth: bool,
+    joint_groups: list[str] | None = None,
 ) -> list[str]:
     """Build the CLI argument list for a ``--person``-mode multi-person run.
 
@@ -215,6 +265,8 @@ def _build_multi_person_args(
         args += ["--start-time", str(start_time)]
     if end_time is not None:
         args += ["--end-time", str(end_time)]
+    if joint_groups:
+        args += ["--joint-groups", *joint_groups]
     if smooth:
         args.append("--smooth")
     return args
@@ -229,6 +281,7 @@ def run_multi_person_tracker(
     start_time: float | None = None,
     end_time: float | None = None,
     smooth: bool = True,
+    joint_groups: list[str] | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> MultiPersonResult:
     """Run the posetrak-tracker binary in ``--person`` multi-person mode.
@@ -259,6 +312,10 @@ def run_multi_person_tracker(
         Optional sequence time-range override, applied to every person.
     smooth:
         Whether to enable RTS smoothing (``--smooth`` flag). Default True.
+    joint_groups:
+        Restrict the main (parent) stage to these joint groups of the skeleton
+        (``--joint-groups``), for every person; a hierarchical run's child stages
+        keep their own groups. None leaves the groups to the tracker configuration.
     on_progress:
         Callback invoked for each non-empty output line.
 
@@ -271,6 +328,7 @@ def run_multi_person_tracker(
     args = _build_multi_person_args(
         binary, session_path, persons, output_dir,
         start_time=start_time, end_time=end_time, smooth=smooth,
+        joint_groups=joint_groups,
     )
 
     run_ids: list[str | None] = [None] * len(persons)

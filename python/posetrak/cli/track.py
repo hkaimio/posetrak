@@ -20,6 +20,7 @@ from posetrak.db.manage_config import resolve_default_tracker_config
 from posetrak.export.bvh import export_bvh
 from posetrak.export.gltf import export_gltf
 from posetrak.export.usd import export_usd
+from posetrak.skeleton.binding import missing_pose_model_message, missing_pose_models
 from posetrak.tracker.runner import (
     MultiPersonResult,
     PersonRunSpec,
@@ -174,7 +175,161 @@ def _build_run_config(
                 vals["cross_pair_max_n"],
             ),
         )
+        if base_config_id is not None:
+            _copy_remaining_config_columns(conn, base_config_id, config_id)
+            _copy_config_stages(conn, base_config_id, config_id)
     return config_id
+
+
+def _copy_config_stages(conn: sqlite3.Connection, base_config_id: str, new_config_id: str) -> None:
+    """Copy the base config's tracker_config_stages rows, so a run made from a hierarchical
+    config is hierarchical (the presence of stage rows selects hierarchical mode)."""
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(tracker_config_stages)") if r[1] != "tracker_config_id"]
+    conn.execute(
+        f"INSERT INTO tracker_config_stages (tracker_config_id, {', '.join(cols)})"
+        f" SELECT ?, {', '.join(cols)} FROM tracker_config_stages WHERE tracker_config_id = ?",
+        (new_config_id, base_config_id),
+    )
+
+
+def _copy_remaining_config_columns(
+    conn: sqlite3.Connection, base_config_id: str, new_config_id: str,
+) -> None:
+    """Carry every tracker_configs column the run row did not set itself (dot
+    assignment, streak, segmentation-mask settings, ...) over from the base
+    config, so a run made from a base config uses all of its settings and
+    columns added later are not silently dropped. Columns the CLI overrides
+    (_CONFIG_DEFAULTS) and the row's own identity columns are left alone."""
+    own = set(_CONFIG_DEFAULTS) | {
+        "id", "name", "parent_id", "created_at", "notes",
+        "velocity_mode_camera_ids", "use_relative_observations", "relative_min_confidence",
+        "cross_pair_max_px", "cross_pair_max_n",
+    }
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(tracker_configs)") if r[1] not in own]
+    if not cols:
+        return
+    assignments = ", ".join(
+        f"{c} = (SELECT {c} FROM tracker_configs WHERE id = :base)" for c in cols
+    )
+    conn.execute(
+        f"UPDATE tracker_configs SET {assignments} WHERE id = :new",
+        {"base": base_config_id, "new": new_config_id},
+    )
+
+
+def _window_choice_changes(
+    *,
+    kp_choice: str | None,
+    support_window: float | None,
+    delta: float | None,
+    beta: float | None,
+    gamma: float | None,
+    rounds: int | None,
+    skip_cameras: tuple[str, ...],
+    sequence_cameras: list[str],
+    strict_filter: bool | None,
+    strict_window: int | None,
+    strict_min_fraction: float | None,
+    mask_weight: float | None,
+    mask_window: float | None,
+    mask_classes: str | None,
+    strict_classes: str | None = None,
+    switch_penalty: float | None = None,
+    jump_box: float | None = None,
+) -> dict[str, float | int | str]:
+    """The tracker_configs columns the windowed-choice options of ``track run`` set (only those given)."""
+    import json
+
+    changes: dict[str, float | int | str] = {}
+    if kp_choice is not None:
+        changes["kp_candidate_choice"] = kp_choice
+    for column, value in (
+        ("kp_choice_support_window_s", support_window), ("kp_choice_delta", delta), ("kp_choice_beta", beta),
+        ("kp_choice_gamma", gamma), ("kp_choice_rounds", rounds), ("kp_strict_filter_window_frames", strict_window),
+        ("kp_strict_filter_min_fraction", strict_min_fraction), ("kp_mask_term_weight", mask_weight),
+        ("kp_mask_term_window_s", mask_window), ("kp_mask_term_classes", mask_classes),
+        ("kp_strict_filter_classes", strict_classes), ("kp_choice_switch_penalty", switch_penalty),
+        ("kp_choice_jump_box", jump_box),
+    ):
+        if value is not None:
+            changes[column] = value
+    if strict_filter is not None:
+        changes["kp_strict_filter"] = int(strict_filter)
+    if skip_cameras:
+        unknown = [c for c in skip_cameras if c not in sequence_cameras]
+        if unknown:
+            raise click.ClickException(f"--kp-skip-camera {unknown}: not a camera of the sequence {sequence_cameras}.")
+        changes["kp_choice_skip_camera_ids"] = json.dumps([sequence_cameras.index(c) for c in skip_cameras])
+    from posetrak.detection.kp_choice_model import KEYPOINT_CLASSES
+
+    for option, classes in (("--kp-mask-classes", mask_classes), ("--kp-strict-classes", strict_classes)):
+        bad = [c for c in (classes or "").split(",") if c and c not in KEYPOINT_CLASSES]
+        if bad:
+            raise click.ClickException(f"{option} {bad}: the classes are {', '.join(KEYPOINT_CLASSES)}.")
+    return changes
+
+
+def _uses_window_choice(conn: sqlite3.Connection, config_id: str) -> bool:
+    """Whether the run's config takes keypoint candidates with the windowed choice."""
+    row = conn.execute(
+        "SELECT kp_candidates_enabled, kp_candidate_choice FROM tracker_configs WHERE id = ?", (config_id,)).fetchone()
+    return bool(row["kp_candidates_enabled"]) and row["kp_candidate_choice"] == "window"
+
+
+def _check_window_choice(conn: sqlite3.Connection, config_id: str, *, seg_run: str | None) -> None:
+    """Refuse a mask option of the windowed choice without the segmentation it reads."""
+    row = conn.execute(
+        "SELECT kp_strict_filter, kp_mask_term_weight FROM tracker_configs WHERE id = ?", (config_id,)).fetchone()
+    if (row["kp_strict_filter"] or row["kp_mask_term_weight"]) and seg_run is None:
+        fail("The strict mask filter and the mask term of the windowed choice need --seg-run: the masks to read.")
+
+
+def _apply_assignment_options(
+    conn: sqlite3.Connection,
+    config_id: str,
+    *,
+    candidates: bool | None,
+    strict_mask: bool,
+    mask_min_fraction: float | None,
+    mask_window: int | None,
+    multi_view_agreement: bool,
+    agreement_px: float | None,
+    agreement_factor: float | None,
+    kp_peak_weight: float | None = None,
+    kp_tracklet_multiplier: float | None = None,
+    choice: dict[str, float | int | str] | None = None,
+) -> None:
+    """Set the keypoint-candidate and candidate-assignment settings a ``track run`` option names on the run's config.
+
+    Each option changes only its own columns; a value the base config already holds is kept unless the option
+    gives one. Strict mask adherence is the segmentation-mask modifier of the shared assignment, multi-view
+    agreement its cross-view corroboration: the same ``dot_*`` settings dots use.
+    """
+    row = conn.execute("SELECT * FROM tracker_configs WHERE id = ?", (config_id,)).fetchone()
+    changes: dict[str, float | int] = {}
+    if candidates is not None:
+        changes["kp_candidates_enabled"] = int(candidates)
+    if kp_peak_weight is not None:
+        changes["kp_candidate_peak_weight"] = kp_peak_weight
+    if kp_tracklet_multiplier is not None:
+        changes["kp_candidate_tracklet_multiplier"] = kp_tracklet_multiplier
+    changes.update(choice or {})
+    if strict_mask:
+        changes["dot_seg_mask_enabled"] = 1
+        changes["dot_seg_mask_min_tracklet_fraction"] = (
+            mask_min_fraction if mask_min_fraction is not None else row["dot_seg_mask_min_tracklet_fraction"] or 0.5)
+        if mask_window is not None:
+            changes["dot_seg_mask_tracklet_window"] = mask_window
+    if multi_view_agreement:
+        changes["dot_cross_view_corroboration_px"] = (
+            agreement_px if agreement_px is not None else row["dot_cross_view_corroboration_px"] or 12.0)
+        changes["dot_corroboration_gate_multiplier"] = (
+            agreement_factor if agreement_factor is not None else row["dot_corroboration_gate_multiplier"] or 4.0)
+    if changes:
+        with conn:
+            conn.execute(
+                f"UPDATE tracker_configs SET {', '.join(f'{c} = ?' for c in changes)} WHERE id = ?",
+                (*changes.values(), config_id))
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +347,40 @@ def _build_run_config(
 @click.option("--end-time", default=None, type=float, help="Override sequence end time (s).")
 @click.option("--no-smooth", is_flag=True, default=False, help="Disable RTS smoothing.")
 @click.option("--binary", default=None, help="Path to posetrak-tracker binary.")
+@click.option("--seg-run", "seg_run", default=None, help="Segmentation (seg_quality_runs) ID (prefix accepted) whose masks gate dot-assignment trust for the tracked subject; needs the tracker config's dot_seg_mask_enabled. The subject's mask label is looked up in the subject registry.")
+@click.option("--seg-revision", "seg_revision", default=None, type=int, help="Revision of --seg-run's masks to read (default: the newest saved revision at the start of the run). Pass the revision a tracking run recorded to reproduce it after the masks were edited.")
+@click.option("--trace-steps", "trace_steps", nargs=2, type=int, default=None, metavar="FIRST LAST", help="Record the full dot-assignment decision trace (every candidate considered per marker slot, its cost, what excluded it, whether it won) for tracker steps FIRST..LAST (inclusive) into tracking_assignment_trace. Keep the range narrow. Step 0 is the run's start time; steps follow the tracker frame rate.")
+@click.option("--seg-label", "seg_label", default=None, type=int, help="Override the mask label looked up for --seg-run (e.g. for a label not yet mapped to a subject).")
+@click.option("--dot-detection-run", "dot_detection_run", default=None, help="Detection run (prefix accepted) whose dot tracklet ids the decisions below refer to; needed with --dot-edits-trial or --dot-proposals.")
+@click.option("--dot-edits-trial", "dot_edits_trial", default=None, help="Trial ID (prefix accepted) whose dot-assignment review decisions (assign / forbid / reject / other, from the review tool) the tracker follows for whole dot tracklets.")
+@click.option("--dot-proposals", "dot_proposals", is_flag=True, default=False, help="Also use the newest automatic dot-to-slot proposals of --dot-detection-run: a high-confidence proposal is followed like a review decision, any other makes its slot cheaper; a review decision overrides a proposal.")
+@click.option("--candidates/--no-candidates", "candidates", default=None, help="Take the sequence's keypoint candidates (detect run --candidates) instead of its fixed body observations for the markers bound to the pose model, choosing among them with the tracker's prediction. Default: the base config's setting, off if it has none. Hand stages keep their refined-hand observations.")
+@click.option("--kp-peak-weight", "kp_peak_weight", default=None, type=float, help="Weight of ln(peak) in the assignment cost of a keypoint candidate (cost = distance^2 + ln det S - weight * ln(peak)). Default: the base config's, else 0.")
+@click.option("--kp-tracklet-multiplier", "kp_tracklet_multiplier", default=None, type=float, help="Divisor of the distance^2 of a keypoint candidate that continues the tracklet of the same marker's previous step. Default: the base config's, else 1 (off).")
+@click.option("--kp-choice", "kp_choice", type=click.Choice(["window", "step"]), default=None, help="How keypoint candidates are chosen (with --candidates): 'window' chooses them over a time window before tracking, from the candidates, the other cameras and the skeleton neighbours alone (and the masks, if asked), and feeds the picks to the filter; 'step' lets the tracker's prediction choose at each step. Default: the base config's, else 'step'.")
+@click.option("--kp-support-window", "kp_support_window", default=None, type=float, help="With --kp-choice window: half width (s) of the window the neighbour and cross-camera support are averaged over along a tracklet. Default: the base config's, else 1.0.")
+@click.option("--kp-delta", "kp_delta", default=None, type=float, help="With --kp-choice window: weight of the cross-camera support. Default: the base config's, else 1.0.")
+@click.option("--kp-beta", "kp_beta", default=None, type=float, help="With --kp-choice window: weight of the multi-camera consensus flag. Default: the base config's, else 0.3.")
+@click.option("--kp-gamma", "kp_gamma", default=None, type=float, help="With --kp-choice window: weight of the heatmap peak. Default: the base config's, else 0.2.")
+@click.option("--kp-rounds", "kp_rounds", default=None, type=int, help="With --kp-choice window: number of scoring rounds. Default: the base config's, else 3.")
+@click.option("--kp-skip-camera", "kp_skip_cameras", multiple=True, help="With --kp-choice window: camera label that keeps its fixed observations (a wide-lens camera, say) and takes no part in the choice. Repeatable.")
+@click.option("--kp-strict-filter/--no-kp-strict-filter", "kp_strict_filter", default=None, help="With --kp-choice window: drop a candidate unless enough of the detections of its tracklet around its frame lie on the tracked person's own mask (needs --seg-run). Default: the base config's, else off.")
+@click.option("--kp-strict-window", "kp_strict_window", default=None, type=int, help="With --kp-strict-filter: half width (video frames) of the window. Default: the base config's, else 10.")
+@click.option("--kp-strict-min-fraction", "kp_strict_min_fraction", default=None, type=float, help="With --kp-strict-filter: smallest share of the detections that must lie on the mask. Default: the base config's, else 0.5.")
+@click.option("--kp-strict-classes", "kp_strict_classes", default=None, help="With --kp-strict-filter: comma-separated keypoint classes the filter applies to (body, hands, feet). Default: the base config's, else body.")
+@click.option("--kp-switch-penalty", "kp_switch_penalty", default=None, type=float, help="With --kp-choice window: score lost by a change of candidate (another tracklet, or a jump) between consecutive frames in the chain of picks; 0 = every frame takes its best score on its own. Default: the base config's, else 0.")
+@click.option("--kp-jump-box", "kp_jump_box", default=None, type=float, help="With --kp-switch-penalty: box heights between consecutive frames above which a move of the pick is a change. Default: the base config's, else 0.04.")
+@click.option("--kp-mask-weight", "kp_mask_weight", default=None, type=float, help="With --kp-choice window: weight of the soft mask term in the score (+1 on the person's mask, -1 on another person's; needs --seg-run). Default: the base config's, else 0 (off).")
+@click.option("--kp-mask-window", "kp_mask_window", default=None, type=float, help="With --kp-mask-weight: half width (s) of the window the mask term is averaged over. Default: the base config's, else 2.0.")
+@click.option("--kp-mask-classes", "kp_mask_classes", default=None, help="With --kp-mask-weight: comma-separated keypoint classes the term applies to (body, hands, feet). Default: the base config's, else body.")
+@click.option("--kp-choice-model", "kp_choice_model", default=None, type=click.Path(exists=True, dir_okay=False), help="With --kp-choice window: use this choice model file (neighbour limits and keypoint classes, see posetrak.detection.kp_choice_model) instead of the pose model's shipped table.")
+@click.option("--kp-choice-dump", "kp_choice_dump", default=None, type=click.Path(), help="Diagnostics: write every keypoint candidate of the windowed choice, with its consensus flag and whether it was picked, to this CSV file.")
+@click.option("--strict-mask", "strict_mask", is_flag=True, default=False, help="Use a candidate or dot only if its tracklet lies on the tracked subject's own mask for enough of the recent steps (needs --seg-run).")
+@click.option("--mask-min-fraction", "mask_min_fraction", default=None, type=float, help="With --strict-mask: smallest share of recent steps a tracklet must lie on the subject's mask. Default: the base config's, else 0.5.")
+@click.option("--mask-window", "mask_window", default=None, type=int, help="With --strict-mask: number of recent steps the share is taken over. Default: the base config's, else 60.")
+@click.option("--multi-view-agreement", "multi_view_agreement", is_flag=True, default=False, help="Prefer a candidate when another camera's candidate for the same marker lies on its epipolar line.")
+@click.option("--agreement-px", "agreement_px", default=None, type=float, help="With --multi-view-agreement: epipolar tolerance (px). Default: the base config's, else 12.")
+@click.option("--agreement-factor", "agreement_factor", default=None, type=float, help="With --multi-view-agreement: factor the cost of an agreeing candidate is divided by. Default: the base config's, else 4.")
 # Config parameter overrides
 @click.option("--process-noise-std", default=None, type=float, help="Process noise std (rad/s²). Default 0.1.")
 @click.option("--process-vel-noise-std", default=None, type=float, help="Velocity process noise std. Default 0.5.")
@@ -217,6 +406,40 @@ def cmd_run(
     end_time: float | None,
     no_smooth: bool,
     binary: str | None,
+    seg_run: str | None,
+    seg_revision: int | None,
+    trace_steps: tuple[int, int] | None,
+    seg_label: int | None,
+    dot_detection_run: str | None,
+    dot_edits_trial: str | None,
+    dot_proposals: bool,
+    candidates: bool | None,
+    kp_peak_weight: float | None,
+    kp_tracklet_multiplier: float | None,
+    kp_choice: str | None,
+    kp_choice_model: str | None,
+    kp_choice_dump: str | None,
+    kp_support_window: float | None,
+    kp_delta: float | None,
+    kp_beta: float | None,
+    kp_gamma: float | None,
+    kp_rounds: int | None,
+    kp_skip_cameras: tuple[str, ...],
+    kp_strict_filter: bool | None,
+    kp_strict_window: int | None,
+    kp_strict_min_fraction: float | None,
+    kp_mask_weight: float | None,
+    kp_mask_window: float | None,
+    kp_mask_classes: str | None,
+    kp_strict_classes: str | None,
+    kp_switch_penalty: float | None,
+    kp_jump_box: float | None,
+    strict_mask: bool,
+    mask_min_fraction: float | None,
+    mask_window: int | None,
+    multi_view_agreement: bool,
+    agreement_px: float | None,
+    agreement_factor: float | None,
     process_noise_std: float | None,
     process_vel_noise_std: float | None,
     vel_half_life: float | None,
@@ -279,6 +502,10 @@ def cmd_run(
     ).fetchone()
     if seq_row is None:
         fail(f"Sequence '{sequence_id}' not found.")
+    models = missing_pose_models(
+        conn, sequence_id, conn.execute("SELECT yaml_content FROM skeletons WHERE id = ?", (skeleton_id,)).fetchone()[0])
+    if models:
+        fail(missing_pose_model_message(models))
 
     # Cameras (for velocity-cameras resolution)
     seq_cameras: list[str] = []
@@ -311,6 +538,27 @@ def cmd_run(
     except ValueError as exc:
         fail(str(exc))
 
+    if strict_mask and seg_run is None:
+        fail("--strict-mask needs --seg-run: the masks of the segmentation to hold the tracklets against.")
+    if (mask_min_fraction is not None or mask_window is not None) and not strict_mask:
+        fail("--mask-min-fraction and --mask-window need --strict-mask.")
+    if (agreement_px is not None or agreement_factor is not None) and not multi_view_agreement:
+        fail("--agreement-px and --agreement-factor need --multi-view-agreement.")
+    choice_changes = _window_choice_changes(
+        kp_choice=kp_choice, support_window=kp_support_window, delta=kp_delta, beta=kp_beta, gamma=kp_gamma,
+        rounds=kp_rounds, skip_cameras=kp_skip_cameras, sequence_cameras=seq_cameras, strict_filter=kp_strict_filter,
+        strict_window=kp_strict_window, strict_min_fraction=kp_strict_min_fraction, mask_weight=kp_mask_weight,
+        mask_window=kp_mask_window, mask_classes=kp_mask_classes, strict_classes=kp_strict_classes,
+        switch_penalty=kp_switch_penalty, jump_box=kp_jump_box)
+    _apply_assignment_options(
+        conn, config_id, candidates=candidates, strict_mask=strict_mask, mask_min_fraction=mask_min_fraction,
+        mask_window=mask_window, multi_view_agreement=multi_view_agreement, agreement_px=agreement_px,
+        agreement_factor=agreement_factor, kp_peak_weight=kp_peak_weight, kp_tracklet_multiplier=kp_tracklet_multiplier,
+        choice=choice_changes)
+    window_choice = _uses_window_choice(conn, config_id)
+    if window_choice:
+        _check_window_choice(conn, config_id, seg_run=seg_run)
+
     # Default output dir
     if output_dir:
         out_path = Path(output_dir)
@@ -322,7 +570,70 @@ def cmd_run(
         skel_name = (skel_name_row["name"] if skel_name_row else "skeleton").replace(" ", "_")
         out_path = Path(session_path).parent / "posetrak_results" / capture_label / skel_name / "tracking"
 
+    seg_run_id: str | None = None
+    if seg_run is not None:
+        try:
+            seg_run_id = resolve_id_prefix(conn, "seg_quality_runs", seg_run)
+        except ValueError as exc:
+            fail(str(exc))
+        if seg_label is None:
+            from posetrak.db.manage_subject import seg_mask_label_for_sequence
+
+            seg_label = seg_mask_label_for_sequence(conn, seg_run_id, sequence_id, person_id)
+            if seg_label is None:
+                fail(
+                    "The tracked subject has no mask label in segmentation "
+                    f"{seg_run_id}; pass --seg-label, or map the label to the subject "
+                    "in the segmentation panel."
+                )
+        # Pinned here, at the start of the run, so a save made in the segmentation panel meanwhile
+        # does not change what the run reads; the tracker records it with the run.
+        from posetrak.db.seg_revisions import newest_closed_revision
+
+        newest = newest_closed_revision(conn, seg_run_id)
+        if newest is None:
+            fail(f"Segmentation {seg_run_id} has no saved mask revision.")
+        if seg_revision is None:
+            seg_revision = newest
+        elif not 0 <= seg_revision <= newest:
+            # An open revision is above every saved one; reading it would see an unsaved edit.
+            fail(f"--seg-revision {seg_revision}: the saved revisions of {seg_run_id} go up to {newest}.")
+        click.echo(f"Segmentation: {seg_run_id} (label {seg_label}, revision {seg_revision})", err=True)
+    elif seg_label is not None or seg_revision is not None:
+        fail("--seg-label and --seg-revision need --seg-run.")
+
+    rules_path: Path | None = None
+    if dot_edits_trial is not None or dot_proposals:
+        if dot_detection_run is None:
+            fail("--dot-edits-trial and --dot-proposals need --dot-detection-run.")
+        try:
+            detection_run_id = resolve_id_prefix(conn, "detection_runs", dot_detection_run)
+            edits_trial_id = (resolve_id_prefix(conn, "trials", dot_edits_trial)
+                              if dot_edits_trial is not None else None)
+        except ValueError as exc:
+            fail(str(exc))
+        from posetrak.markers.review import export_tracklet_rules
+
+        out_path.mkdir(parents=True, exist_ok=True)
+        rules_path = out_path / "tracklet_assignments.csv"
+        n_rules = export_tracklet_rules(conn, edits_trial_id, detection_run_id, rules_path,
+                                        use_proposals=dot_proposals)
+        click.echo(f"Tracklet decisions: {n_rules} rules -> {rules_path}", err=True)
+
     out_path.mkdir(parents=True, exist_ok=True)
+    choice_model_path: Path | None = None
+    kp_confidence_scale: float | None = None
+    if window_choice:
+        from app.pose.finalise import conf_scale_for_model
+        from posetrak.detection.kp_choice_model import write_choice_model
+
+        pose_model = conn.execute(
+            "SELECT pose_model FROM pose_observation_sequences WHERE id = ?", (sequence_id,)).fetchone()["pose_model"]
+        choice_model_path = (Path(kp_choice_model) if kp_choice_model
+                             else write_choice_model(pose_model, out_path / "kp_choice_model.csv"))
+        if choice_model_path is None:
+            click.echo(f"Note: pose model '{pose_model}' has no neighbour limits; the windowed choice has no skeleton support.", err=True)
+        kp_confidence_scale = conf_scale_for_model(pose_model or "")
     conn.close()
 
     # Binary path
@@ -351,6 +662,14 @@ def cmd_run(
         start_time=start_time if start_time is not None else seq_row["time_start_s"],
         end_time=end_time if end_time is not None else seq_row["time_end_s"],
         smooth=not no_smooth,
+        seg_run_id=seg_run_id,
+        seg_mask_label=seg_label,
+        seg_revision=seg_revision,
+        tracklet_assignments_path=rules_path,
+        kp_choice_model_path=choice_model_path,
+        kp_confidence_scale=kp_confidence_scale,
+        kp_choice_dump_path=Path(kp_choice_dump) if kp_choice_dump else None,
+        trace_assignment_steps=trace_steps,
         on_progress=lambda line: click.echo(line, err=True),
     )
 
@@ -449,6 +768,11 @@ def resolve_trial_persons(
                 "<config> <id> directly to pick one."
             )
         seq_row = seq_rows[0]
+        skeleton_row = conn.execute(
+            "SELECT yaml_content FROM skeletons WHERE id = ?", (person_row["default_skeleton_id"],)).fetchone()
+        models = missing_pose_models(conn, seq_row["seq_id"], skeleton_row[0]) if skeleton_row else None
+        if models:
+            raise ValueError(f"{name!r}: {missing_pose_model_message(models)}")
         resolved.append(ResolvedPerson(
             name=name,
             sequence_id=seq_row["seq_id"],
@@ -631,7 +955,9 @@ def cmd_run_persons(
         except ValueError as exc:
             fail(str(exc))
     else:
-        config_id = resolve_default_tracker_config(conn, trial_id=trial_id)
+        config_id = resolve_default_tracker_config(
+            conn, trial_id=trial_id, skeleton_ids=[r.skeleton_id for r in resolved]
+        )
 
     # Default output dir
     if output_dir:
@@ -714,7 +1040,7 @@ def cmd_list(ctx: click.Context, sequence: str | None) -> None:
             fail(str(exc))
 
     query = (
-        "SELECT id, skeleton_id, ran_at, posetrak_version "
+        "SELECT id, name, skeleton_id, ran_at, posetrak_version "
         "FROM tracking_runs"
     )
     params: list = []
@@ -729,8 +1055,28 @@ def cmd_list(ctx: click.Context, sequence: str | None) -> None:
     if not rows:
         sys.exit(0)
 
-    columns = ["id", "skeleton_id", "ran_at", "posetrak_version"]
+    columns = ["id", "name", "skeleton_id", "ran_at", "posetrak_version"]
     print_table(rows, columns, json_mode=ctx.obj["json_mode"])
+
+
+@track_group.command("rename")
+@click.argument("run")
+@click.argument("name")
+@click.pass_context
+def cmd_rename(ctx: click.Context, run: str, name: str) -> None:
+    """Give tracking run RUN (id prefix accepted) the display name NAME; an empty NAME clears it."""
+    session_path: str | None = ctx.obj.get("session")
+    if session_path is None:
+        fail("--session / POSETRAK_SESSION_DB is required for 'track rename'.")
+    try:
+        conn = open_session(Path(session_path))
+        run_id = resolve_id_prefix(conn, "tracking_runs", run)
+    except (FileNotFoundError, ValueError) as exc:
+        fail(str(exc))
+    conn.execute("UPDATE tracking_runs SET name = ? WHERE id = ?", (name.strip() or None, run_id))
+    conn.commit()
+    conn.close()
+    click.echo(f"{run_id}  {name.strip() or '(no name)'}")
 
 
 # ---------------------------------------------------------------------------

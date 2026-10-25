@@ -455,8 +455,8 @@ class FrameCropCacheManager:
             if row is not None:
                 cam_rows = conn.execute(
                     "SELECT cv.id AS shot_video_id, cv.file_path, cv.actual_fps, "
-                    "       COALESCE(cm.width_px, ic.image_width) AS expected_w, "
-                    "       COALESCE(cm.height_px, ic.image_height) AS expected_h "
+                    "       COALESCE(ic.image_width, cm.width_px) AS expected_w, "
+                    "       COALESCE(ic.image_height, cm.height_px) AS expected_h "
                     "FROM capture_videos cv "
                     "LEFT JOIN camera_modes cm ON cm.id = cv.camera_mode_id "
                     "LEFT JOIN intrinsics_calibrations ic ON ic.id = cv.intrinsics_calibration_id "

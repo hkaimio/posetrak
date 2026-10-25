@@ -54,6 +54,7 @@ but has not been done yet — it is a prerequisite for Phase 4.
 
 ```
 detect run    --capture ID --sync ID --start S --end S [--detector] [--pose-model] [--conf]
+detect assign RUN [--persons N] [--subjects NAMES] [--fill-only | --replace] [--finalise] [--dry-run]
 detect list   [--capture ID]
 detect show   ID
 ```

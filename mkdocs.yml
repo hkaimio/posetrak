@@ -54,6 +54,7 @@ nav:
       - Extrinsics calibration: user-guide/extrinsics-calibration.md
       - Synchronizing videos: user-guide/synchronizing-videos.md
       - Segmenting multi-person scenes: user-guide/segmentation.md
+      - Pose models and licences: user-guide/pose-models.md
       - Analyzing poses: user-guide/analyzing-poses.md
       - Tracking & troubleshooting: user-guide/tracking-troubleshooting.md
       - Marker-based capture (command line): user-guide/marker-based-capture.md

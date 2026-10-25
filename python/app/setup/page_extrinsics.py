@@ -9,7 +9,8 @@ Public classes
 ExtrinsicsStatusDialog
     Status-first entry point (UX Phase 2): a per-camera solved/not-solved
     summary, with "Calibrate…" (opens ExtrinsicsAutoCalibDialog) and
-    "Import TOML…" (opens ExtrinsicsImportDialog) actions. This is what
+    "Calibrate from box video…" (opens BoxVideoDialog) and "Import TOML…"
+    (opens ExtrinsicsImportDialog) actions. This is what
     CapturePanel's "Extrinsics…" button opens.
 
 ExtrinsicsImportWidget
@@ -4687,6 +4688,12 @@ class ExtrinsicsStatusDialog(QDialog):
             "markers/rig, solve)."
         )
         calibrate_btn.clicked.connect(self._on_calibrate)
+        box_btn = QPushButton("Calibrate from box video…")
+        box_btn.setToolTip(
+            "Solve all cameras from a video of a handheld calibration box that is carried "
+            "through the scene and set down."
+        )
+        box_btn.clicked.connect(self._on_box_video)
         import_btn = QPushButton("Import TOML…")
         import_btn.setToolTip("Import a Pose2Sim calibration TOML file.")
         import_btn.clicked.connect(self._on_import_toml)
@@ -4695,6 +4702,7 @@ class ExtrinsicsStatusDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.addWidget(calibrate_btn)
+        btn_row.addWidget(box_btn)
         btn_row.addWidget(import_btn)
         btn_row.addStretch()
         btn_row.addWidget(close_btn)
@@ -4799,6 +4807,14 @@ class ExtrinsicsStatusDialog(QDialog):
             self, self._conn, self._session_id, self._shot_ids,
             lambda _calib_id: self._refresh(),
         )
+
+    def _on_box_video(self) -> None:
+        if not self._shot_ids:
+            QMessageBox.warning(self, "No capture", "No capture available to calibrate.")
+            return
+        from app.setup.box_video_dialog import BoxVideoDialog
+        BoxVideoDialog(self._conn, self._session_id, self._shot_ids[0], parent=self).exec()
+        self._refresh()
 
     def _on_import_toml(self) -> None:
         dlg = ExtrinsicsImportDialog(self._conn, self._session_id, self._shot_ids, parent=self)

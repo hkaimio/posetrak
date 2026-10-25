@@ -70,6 +70,19 @@ void export_state_vector(std::ofstream& file, int frame_idx, double timestamp, S
 /// @brief Generate the CSV header line matching export_state_vector()'s column order.
 std::string generate_state_header(SkeletonLayout const& layout);
 
+/// @brief Cost warning for a run whose skeleton has child-stage (hand) groups but is not
+/// tracked in the cheap hierarchical form.
+///
+/// A skeleton with child-stage groups tracked single-stage, or hierarchically with the
+/// parent stage on the whole skeleton (no active_joint_groups), carries every hand marker
+/// through the largest filter: several times the time and memory of a parent stage
+/// restricted to its own group. Returns an empty string when the run is in the cheap form
+/// or the skeleton has no child-stage groups.
+///
+/// @param has_stage_rows True when the tracker configuration has tracker_config_stages rows.
+std::string hand_stage_cost_warning(Skeleton const& skeleton, TrackerConfig const& config,
+                                    bool has_stage_rows);
+
 /// @brief Append one smoothed-joint-angles row (joint_angles.csv format) to *file*.
 void write_smoothed_joint_angles_frame(std::ofstream& file, int frame, double timestamp,
                                        State const& state, SkeletonLayout const& layout);
@@ -128,6 +141,9 @@ struct BuildPersonContextOptions {
 struct PersonContext {
     PersonSpec spec;
 
+    /// spec.sequence_id resolved to the full id (the spec may carry a prefix).
+    std::string full_sequence_id;
+
     // Loaded once in build_person_context().
     Skeleton skeleton;
     std::map<std::string, Camera> cameras_by_name;
@@ -135,6 +151,11 @@ struct PersonContext {
     TrackerConfig tracker_config;
     double tracker_fps = 100.0;
     ObservationSet observations;
+    /// How `observations` were loaded, for a phase that loads them again with other keypoints
+    /// (run_keypoint_choice_phase()).
+    double observation_min_confidence = 0.1;
+    double observation_window_start = -std::numeric_limits<double>::infinity();
+    double observation_window_end = std::numeric_limits<double>::infinity();
     std::string session_id;
     std::string extrinsic_calibration_id;
     std::string sync_config_id;
@@ -163,6 +184,16 @@ struct PersonContext {
     /// list above (the same binary-search treatment
     /// ObservationSequence::get_in_range() uses for *observations*).
     std::unordered_map<int, std::vector<UnlabeledCandidate>> unlabeled_candidates_by_camera;
+
+    /// The markers that take keypoint candidates instead of the fixed body observations, marker
+    /// index -> keypoint_idx (TrackerConfig::kp_candidates_enabled and a sequence that holds
+    /// candidates; empty otherwise). The candidates themselves are in
+    /// unlabeled_candidates_by_camera alongside any dots.
+    std::unordered_map<int, int> kp_marker_keypoint;
+
+    /// Whether this person takes part in the shared assignment phase on the steps that have
+    /// candidates.
+    bool uses_candidate_assignment() const { return has_dot_track || !kp_marker_keypoint.empty(); }
 
     std::shared_ptr<const SkeletonLayout> layout;
 

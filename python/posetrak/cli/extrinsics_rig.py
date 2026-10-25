@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Marker-body-based extrinsics commands: anchor-rig, reanchor.
+"""Marker-body-based extrinsics commands: anchor-rig, reanchor, box-video.
 
 See docs/roadmap/features/extrinsics-improvements/
 extrinsics-improvements-design.md, section 9 (Tier A/B) and section 10.
@@ -31,6 +31,12 @@ import click
 
 from posetrak.detection.frame_source import iter_frames
 
+from app.setup.box_video import (
+    BoxVideoError,
+    BoxVideoParams,
+    calibrate_from_box_video,
+    format_report,
+)
 from app.setup.extrinsics_solver import (
     CamCalibState,
     MarkerGroup,
@@ -330,6 +336,120 @@ def extrinsics_anchor_rig(
         C = -s.R.T @ s.t.flatten()
         click.echo(f"  {s.label:20s}  ({C[0]:+.3f}, {C[1]:+.3f}, {C[2]:+.3f})")
     click.echo(f"scene_marker_bodies: 1 rig anchor + {n_tags_saved} tag(s) saved")
+
+
+# ---------------------------------------------------------------------------
+# box-video
+# ---------------------------------------------------------------------------
+
+
+@extrinsics_group.command("box-video")
+@click.option("--capture", required=True, metavar="UUID", help="captures.id (or prefix); its videos must be synchronised")
+@click.option("--marker-body", required=True, metavar="ID_OR_PREFIX",
+              help="marker_body_definitions.id (or prefix) of the calibration box")
+@click.option("--reference-camera", required=True, metavar="LABEL",
+              help="camera_instances.label scanned for moments when the box is at rest")
+@click.option("--time-start", type=float, default=6.0, show_default=True, metavar="SECONDS",
+              help="Start of the scanned range on the synchronised timeline")
+@click.option("--time-end", type=float, default=33.0, show_default=True, metavar="SECONDS",
+              help="End of the scanned range; the box must be set down inside it")
+@click.option("--rig-dict", default="DICT_4X4_50", show_default=True,
+              help="ArUco dictionary for box markers whose body definition names none")
+@click.option("--min-marker-perimeter-rate", type=float, default=0.01, show_default=True)
+@click.option("--world-z-offset", type=float, default=0.0, show_default=True, metavar="METRES",
+              help="Added to the box's Z so that world Z=0 is e.g. the floor below the box's "
+                   "reference marker")
+@click.option("--exclude-window-ts", default="", metavar="SECONDS,SECONDS",
+              help="Synchronised-timeline times of stationary windows to drop (nearest window "
+                   "within 0.5 s); take them from a previous run's window list")
+@click.option("--min-window-corners", type=int, default=8, show_default=True,
+              help="Windows with fewer detected box corners (all cameras together) are dropped")
+@click.option("--max-median-error", type=float, default=5.0, show_default=True, metavar="PX",
+              help="The calibration fails when any camera's median reprojection error exceeds this, "
+                   "or its 90th-percentile error four times this")
+@click.option("--residuals", "residuals_csv", type=click.Path(dir_okay=False), default=None,
+              help="Write every box-corner observation's reprojection error to this CSV file")
+@click.option("--write", is_flag=True,
+              help="Store the calibration as a new extrinsic_calibrations row and link it to the "
+                   "capture. Without it nothing is written (dry run).")
+@click.option("--method", default="moving-box-anchor", show_default=True)
+@click.pass_obj
+def extrinsics_box_video(
+    obj: dict,
+    capture: str,
+    marker_body: str,
+    reference_camera: str,
+    time_start: float,
+    time_end: float,
+    rig_dict: str,
+    min_marker_perimeter_rate: float,
+    world_z_offset: float,
+    exclude_window_ts: str,
+    min_window_corners: int,
+    max_median_error: float,
+    residuals_csv: str | None,
+    write: bool,
+    method: str,
+) -> None:
+    """Calibrate a capture's cameras from a video of a handheld calibration box.
+
+    The box is carried through the scene in view of all cameras and set down.
+    Moments when it is at rest in the reference camera are looked up in every
+    camera through the capture's sync table; the window seen by the most
+    cameras fixes the world frame, which is then aligned to the box's final
+    rest position. A per-camera error table is always printed. Exit status is
+    non-zero, and nothing is written, when any camera is unsolved, has no box
+    observations, or has a median reprojection error above --max-median-error or a
+    90th-percentile error above four times it.
+    """
+    conn = _open_session_required(obj)
+    try:
+        capture_id = _resolve(conn, "captures", capture)
+        session_id = conn.execute(
+            "SELECT session_id FROM captures WHERE id = ?", (capture_id,)
+        ).fetchone()[0]
+        body_id = _resolve(conn, "marker_body_definitions", marker_body)
+        config = load_marker_body_yaml(
+            conn.execute("SELECT yaml_content FROM marker_body_definitions WHERE id = ?",
+                         (body_id,)).fetchone()[0],
+            rig_id=body_id,
+        )
+        try:
+            exclude = [float(t) for t in exclude_window_ts.split(",") if t.strip()]
+        except ValueError:
+            raise click.UsageError(f"--exclude-window-ts must be comma-separated numbers: {exclude_window_ts!r}")
+        params = BoxVideoParams(
+            reference_camera=reference_camera, time_start_s=time_start, time_end_s=time_end,
+            min_marker_perimeter_rate=min_marker_perimeter_rate, rig_dict=rig_dict,
+            world_z_offset=world_z_offset, exclude_window_ts=exclude,
+            min_window_corners=min_window_corners, max_median_error_px=max_median_error,
+        )
+        try:
+            res = calibrate_from_box_video(conn, capture_id, config, params, progress=click.echo)
+        except BoxVideoError as exc:
+            raise click.ClickException(str(exc))
+
+        click.echo("\n" + format_report(res))
+        if residuals_csv:
+            with open(residuals_csv, "w", encoding="utf-8") as f:
+                f.write("corner,camera,error_px\n")
+                f.writelines(f"{n},{c},{e:.3f}\n" for n, c, e in res.residuals)
+        if not res.ok:
+            raise SystemExit(1)
+
+        for s in res.calibration.cameras.values():
+            C = -s.R.T @ s.t.flatten()
+            click.echo(f"  {s.label:22s} ({C[0]:+.3f}, {C[1]:+.3f}, {C[2]:+.3f})")
+        if write:
+            calib_id = write_extrinsics_to_db(
+                res.calibration, conn, session_id, _label_to_instance_id(conn), method=method,
+            )
+            set_capture_extrinsics(conn, capture_id, calib_id)
+            click.echo(f"\nextrinsic_calibration_id: {calib_id} (linked to capture {capture_id})")
+        else:
+            click.echo("\n(dry run -- pass --write to store this calibration)")
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

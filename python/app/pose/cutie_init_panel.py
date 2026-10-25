@@ -12,7 +12,6 @@ Phase 4: correction workflow, RTMPose post-step.
 from __future__ import annotations
 
 import datetime
-import json
 import logging
 import sqlite3
 import time
@@ -45,6 +44,19 @@ from PySide6.QtWidgets import (
 from app.pose.frame_cache import FrameCache
 from app.pose.video_canvas import VideoCanvas, label_to_color
 from posetrak.db.db import generate_id
+from posetrak.db.seg_revisions import (
+    OpenRevisionError,
+    close_revision,
+    discard_revision,
+    get_open_revision,
+    masked_frames,
+    mask_at,
+    newest_closed_revision,
+    open_revision,
+    owner_is_alive,
+    owner_note,
+    write_mask,
+)
 
 
 class RangeBar(QWidget):
@@ -273,7 +285,14 @@ class CutieInitPanel(QWidget):
         # Populated by _load_run()
         self._cameras: list[dict] = []
         self._seg_run_id: str | None = None
-        self._persons: list[str] = []       # person names, index+1 = SAM label
+        # (start_s, end_s) of the existing segmentation self._seg_run_id
+        # names, if any -- like _trial_range_s below, widens the scrubber's
+        # own min/max (see _setup_scrubber_range) so a segmentation being
+        # reopened for review/editing is always fully reachable, even past
+        # whatever narrower range track_first/track_last would otherwise
+        # suggest.
+        self._seg_range_s: tuple[float, float] | None = None
+        self._persons: list[str] = []       # subject names, index+1 = SAM label ("" = unused label)
         # Global-time scrubbing (see _local_frame_for docstring): None
         # means no sync config for this capture, falling back to the
         # legacy per-camera-frame domain where each camera has its own
@@ -344,6 +363,13 @@ class CutieInitPanel(QWidget):
         self._seg_init_run_id: str | None = seg_init_run_id
         self._db_flush_buffer: list[tuple] = []    # buffered (svid, frame_idx, blob) rows
         self._DB_FLUSH_EVERY = 50           # flush to DB every N frames
+        # Mask revision this panel has open for writing (None until the first write after opening
+        # the run or after the last save), and whether the run is open read-only because another
+        # editor has a revision open.
+        self._open_rev: int | None = None
+        self._read_only: bool = False
+        self._read_only_reason: str = ""
+        self._claim_run()
         self._batch_recv_count: int = 0     # batches received for current job (for logging)
         self._t_job_recv_start: float = 0.0
 
@@ -351,6 +377,8 @@ class CutieInitPanel(QWidget):
         if self._skeleton_overlay is not None:
             self._canvas.set_skeleton_overlay(self._skeleton_overlay)
         self._load_run()
+        if self._read_only:
+            self._set_status(self._read_only_reason)
 
     # ------------------------------------------------------------------
     # Public
@@ -359,7 +387,77 @@ class CutieInitPanel(QWidget):
     def shutdown(self) -> None:
         self._encode_timer.stop()
         self._runner.shutdown()
+        self._flush_masks()
+        self._close_revision()
         self._frame_cache.close()
+
+    # ------------------------------------------------------------------
+    # Mask revisions
+    # ------------------------------------------------------------------
+
+    def _claim_run(self) -> None:
+        """Handle an open revision of the run being continued.
+
+        One editor per run: a revision held by a live editor makes this panel read-only; one left
+        by a crashed editor is offered for saving or discarding first.
+        """
+        if self._seg_init_run_id is None:
+            return
+        held = get_open_revision(self._conn, self._seg_init_run_id)
+        if held is None:
+            return
+        if owner_is_alive(held.note):
+            self._read_only = True
+            self._read_only_reason = (
+                f"Read-only: revision {held.revision} of this segmentation has been open since "
+                f"{held.created_at} ({held.note or 'unknown editor'})."
+            )
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Unsaved segmentation edits")
+        box.setText(
+            f"An earlier session left revision {held.revision} of this segmentation unsaved "
+            f"(opened {held.created_at}). Save it to keep its masks, or discard it."
+        )
+        save = box.addButton("Save", QMessageBox.ButtonRole.AcceptRole)
+        discard = box.addButton("Discard", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Open read-only", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is save:
+            close_revision(self._conn, self._seg_init_run_id, held.revision)
+        elif box.clickedButton() is discard:
+            discard_revision(self._conn, self._seg_init_run_id, held.revision)
+        else:
+            self._read_only = True
+            self._read_only_reason = f"Read-only: revision {held.revision} is unsaved."
+
+    def _open_for_write(self) -> bool:
+        """Open a revision of the run on the first write; False when the run is read-only."""
+        if self._read_only:
+            return False
+        if self._open_rev is None:
+            try:
+                self._open_rev = open_revision(self._conn, self._seg_init_run_id, note=owner_note())
+            except OpenRevisionError as exc:
+                self._read_only = True
+                self._read_only_reason = (
+                    f"Read-only: revision {exc.open_revision.revision} was opened by another editor."
+                )
+                self._set_status(self._read_only_reason)
+                return False
+        return True
+
+    def _close_revision(self) -> None:
+        """Save the open revision, if any."""
+        if self._open_rev is not None and self._seg_init_run_id is not None:
+            close_revision(self._conn, self._seg_init_run_id, self._open_rev)
+            self._open_rev = None
+
+    def _mask_revision(self, run_id: str) -> int | None:
+        """Highest revision of *run_id* this panel reads: its own open one, else the newest saved."""
+        if run_id == self._seg_init_run_id and self._open_rev is not None:
+            return self._open_rev
+        return newest_closed_revision(self._conn, run_id)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -575,19 +673,31 @@ class CutieInitPanel(QWidget):
 
         pose_row.addWidget(QLabel("Pose model:"))
         self._pose_model_combo = QComboBox()
+        self._pose_model_combo.addItem("SOMA-77 (GEM-X, recommended)", "soma77-vitpose-h")
         self._pose_model_combo.addItem("RTMPose-L 133kp", "rtmpose-l-133kp")
         self._pose_model_combo.addItem("VITpose-L 133kp", "vitpose-l-133kp")
-        self._pose_model_combo.setToolTip("Pose estimator model for queued pose extraction")
+        self._pose_model_combo.setToolTip(
+            "Pose estimator model for queued pose extraction. SOMA-77's weights are downloaded after you "
+            "accept their licences; without them RTMPose-133 is used."
+        )
         pose_row.addWidget(self._pose_model_combo)
 
         self._refine_hands_check = QCheckBox("Refine hands")
         self._refine_hands_check.setChecked(True)
         self._refine_hands_check.setToolTip(
-            "After pose extraction, re-detect each tracked wrist's hand in a "
-            "tight crop (rtmlib.Hand) and patch in the refined finger keypoints. "
+            "Re-detect each tracked wrist's hand in a tight crop (rtmlib.Hand) on the "
+            "frame already decoded and add the refined finger keypoints. "
             "Only has an effect for 133-keypoint pose models."
         )
         pose_row.addWidget(self._refine_hands_check)
+
+        self._candidates_check = QCheckBox("Keypoint candidates")
+        self._candidates_check.setToolTip(
+            "SOMA-77 only. Also store up to six heatmap maxima per keypoint, linked into tracklets, so that "
+            "tracking can choose among them. About a quarter more stored detection data and detection that takes "
+            "about 15% longer. A detection run holds candidates for all of its cameras or for none."
+        )
+        pose_row.addWidget(self._candidates_check)
 
         self._queue_pose_btn = QPushButton("🎯 Queue Pose")
         self._queue_pose_btn.setToolTip(
@@ -814,32 +924,32 @@ class CutieInitPanel(QWidget):
         ]
 
         seg_row = self._conn.execute(
-            "SELECT id FROM seg_quality_runs "
+            "SELECT id, time_start_s, time_end_s FROM seg_quality_runs "
             "WHERE shot_id = ? ORDER BY created_at DESC LIMIT 1",
             (shot_id,),
         ).fetchone()
+        self._seg_range_s = None
         if seg_row:
             self._seg_run_id = seg_row["id"]
+            if seg_row["time_start_s"] is not None and seg_row["time_end_s"] is not None:
+                self._seg_range_s = (float(seg_row["time_start_s"]), float(seg_row["time_end_s"]))
 
-        # Subjects: capture-level performer definitions (can exist before any
-        # detection has run -- the real prerequisite for segmentation, not
-        # "detection already ran") union'd with any names already assigned to
-        # tracks from a prior detection run on this capture, so captures that
-        # went through the old detect-first flow keep working unchanged. See
-        # docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md.
-        #
-        # Also union in capture_objects.name, so a non-person prop (e.g. a
-        # ball with no coded pattern, tracked purely by segmentation-mask
-        # centroid) can be selected as a SAM/Cutie target here too, the same
-        # way a person is. Safe to just widen this
-        # one query: self._persons is used everywhere below as a plain list
-        # of label strings (button text, SAM object-id ordinals,
-        # persons_json's ordinal->name snapshot) -- nothing in this panel
-        # ever looks the name back up against capture_persons specifically,
-        # so an object's name flows through identically to a person's.
-        from posetrak.db.manage_person import list_persons
-        person_names = {r["name"] for r in list_persons(self._conn, shot_id)}
-        person_names |= {
+        # Subjects: every person and object of the capture (they can exist
+        # before any detection has run -- the real prerequisite for
+        # segmentation). A non-person prop, e.g. a ball tracked purely by
+        # segmentation-mask centroid, is a subject like a person, so it can
+        # be a SAM/Cutie target too. self._persons is used below as a plain
+        # list of label strings (button text, SAM object-id ordinals).
+        # Labels come from the capture's subject registry (persons and
+        # objects share it; each has a permanent, never-reused label), not
+        # from a name's position in a sorted list -- adding a subject later
+        # cannot shift anyone's label. See docs/roadmap/features/
+        # subject-identity/subject-identity-design.md. A name only known
+        # from an earlier detection run's track assignments becomes a person
+        # first, so it gets a registry label like everyone else.
+        from posetrak.db.manage_person import find_or_create_person
+        from posetrak.db.manage_subject import list_subjects
+        legacy_names = {
             r["person_name"] for r in self._conn.execute(
                 "SELECT DISTINCT dta.person_name FROM detection_track_assignments dta "
                 "JOIN detection_runs dr ON dr.id = dta.detection_run_id "
@@ -847,13 +957,15 @@ class CutieInitPanel(QWidget):
                 (shot_id,),
             ).fetchall()
         }
-        person_names |= {
-            r["name"] for r in self._conn.execute(
-                "SELECT name FROM capture_objects WHERE capture_id = ?",
-                (shot_id,),
-            ).fetchall()
-        }
-        self._persons = sorted(person_names)
+        for name in sorted(legacy_names):
+            find_or_create_person(self._conn, shot_id, name)
+        # self._persons: index i is the name of label i+1, "" for a label no
+        # subject has -- the ordinal-list shape the pose/finalise code uses,
+        # with gaps allowed.
+        subjects = list_subjects(self._conn, shot_id)
+        self._persons = [""] * max((s_["label"] for s_ in subjects), default=0)
+        for subj in subjects:
+            self._persons[subj["label"] - 1] = subj["name"]
 
         # self._sync_config_id: set whenever any sync_configs row exists
         # for the capture (most recent by rowid) -- this alone is enough
@@ -939,6 +1051,38 @@ class CutieInitPanel(QWidget):
             # fall back to the legacy per-camera domain.
             self._sync_table = None
             return
+
+        # track_first/track_last (above) is only a heuristic default from
+        # whatever pose data happens to already exist for this capture --
+        # it can be narrower than the trial being opened (e.g. a trial's
+        # time range was corrected after detection already ran over the
+        # old range) or than an existing segmentation's own persisted
+        # range. Either one being unreachable on the scrubber makes it
+        # impossible to review or edit the far end of the segmentation, so
+        # widen (never narrow) to cover both -- clamped to the cameras' own
+        # full footage range first, since a segmentation created before
+        # sync was solved carries the 0.0/1e9 "covers everything" sentinel
+        # (see _ensure_seg_run) rather than a real bound.
+        foot_min: float | None = None
+        foot_max: float | None = None
+        for cam in self._cameras:
+            f0 = self._sync_table.frame_to_global_time(cam["first"], cam["id"])
+            f1 = self._sync_table.frame_to_global_time(cam["last"], cam["id"])
+            if f0 is None or f1 is None:
+                continue
+            foot_min = f0 if foot_min is None else min(foot_min, f0)
+            foot_max = f1 if foot_max is None else max(foot_max, f1)
+
+        for extra_range in (self._trial_range_s, self._seg_range_s):
+            if extra_range is None:
+                continue
+            e0, e1 = extra_range
+            if foot_min is not None:
+                e0 = max(e0, foot_min)
+            if foot_max is not None:
+                e1 = min(e1, foot_max)
+            t_min = min(t_min, e0)
+            t_max = max(t_max, e1)
 
         g_min, g_max = self._to_units(t_min), self._to_units(t_max)
         self._scrubber.blockSignals(True)
@@ -1042,7 +1186,9 @@ class CutieInitPanel(QWidget):
 
         self._person_group.setVisible(True)
         for i, name in enumerate(self._persons):
-            label = i + 1  # 1-based SAM label
+            if not name:
+                continue  # a label no subject has
+            label = i + 1  # 1-based SAM label = the subject's registry label
             r, g, b = label_to_color(label)
             luma = 0.299 * r + 0.587 * g + 0.114 * b
             text_color = "#000" if luma > 140 else "#fff"
@@ -1080,7 +1226,7 @@ class CutieInitPanel(QWidget):
             self._sam_status_label.setText(f"SAM2 error: {e}")
 
         # Enable track / pose buttons if there are persons to track
-        can_track = bool(self._persons)
+        can_track = bool(self._persons) and not self._read_only
         self._track_range_btn.setEnabled(can_track)
         self._track_fwd_btn.setEnabled(can_track)
         self._track_bwd_btn.setEnabled(can_track)
@@ -1336,14 +1482,10 @@ class CutieInitPanel(QWidget):
         if not run_ids:
             self._range_bar.set_covered_frames([])
             return
-        placeholders = ",".join("?" * len(run_ids))
-        rows = self._conn.execute(
-            f"SELECT DISTINCT frame_idx FROM seg_masks "
-            f"WHERE seg_quality_run_id IN ({placeholders}) AND shot_video_id=? "
-            f"ORDER BY frame_idx",
-            [*run_ids, cam["id"]],
-        ).fetchall()
-        local_frames = [r["frame_idx"] for r in rows]
+        local_frames = sorted({
+            f for run_id in run_ids
+            for f in masked_frames(self._conn, run_id, cam["id"], self._mask_revision(run_id))
+        })
         if self._sync_table is None:
             self._range_bar.set_covered_frames(local_frames)
             return
@@ -1589,11 +1731,19 @@ class CutieInitPanel(QWidget):
             display_frame = _draw_click_markers(frame, clicks) if clicks else frame
             self._canvas.display(display_frame, mask)
 
-        t = (frame_idx - cam["track_first"]) / cam["fps"]
-        mm, ss = divmod(t, 60)
+        # Global capture time, the same timeline the Mark Start/End labels and
+        # the range bar use; the camera's own time from its first tracked frame
+        # only when there is no sync table.
+        t = (
+            self._sync_table.frame_to_global_time(frame_idx, cam["id"])
+            if self._sync_table is not None
+            else None
+        )
+        if t is None:
+            t = (frame_idx - cam["track_first"]) / cam["fps"]
         seg_indicator = " [mask]" if mask is not None else ""
         self._frame_label.setText(
-            f"Frame {frame_idx}  ({int(mm):02d}:{ss:05.2f}){seg_indicator}"
+            f"Frame {frame_idx}  ({self._fmt_mmss(t)}){seg_indicator}"
         )
 
     def _refresh_overlay(
@@ -1620,14 +1770,9 @@ class CutieInitPanel(QWidget):
         """
         run_ids = self._read_run_ids()
         for run_id in run_ids:
-            row = self._conn.execute(
-                "SELECT mask_blob FROM seg_masks "
-                "WHERE seg_quality_run_id = ? AND shot_video_id = ? AND frame_idx = ?",
-                (run_id, shot_video_id, frame_idx),
-            ).fetchone()
-            if row is not None:
-                buf = np.frombuffer(bytes(row["mask_blob"]), dtype=np.uint8)
-                return _decode_mask_png(buf)
+            blob = mask_at(self._conn, run_id, shot_video_id, frame_idx, self._mask_revision(run_id))
+            if blob is not None:
+                return _decode_mask_png(np.frombuffer(blob, dtype=np.uint8))
         return None
 
     def _update_skeleton_overlay(self, cam: dict, frame_idx: int) -> None:
@@ -1663,7 +1808,7 @@ class CutieInitPanel(QWidget):
                     kp_bytes, dtype=np.float32
                 ).reshape(n, 3)
 
-        assignments = {i + 1: name for i, name in enumerate(self._persons)}
+        assignments = {i + 1: name for i, name in enumerate(self._persons) if name}
         self._skeleton_overlay.set_detections([dict(d) for d in dets], kp_dict)
         self._skeleton_overlay.set_assignments(assignments)
 
@@ -1826,8 +1971,11 @@ class CutieInitPanel(QWidget):
 
     def _queue_pose_jobs(self, cameras: list[dict]) -> None:
         """Create and enqueue PoseExtractionJobs for the given cameras."""
-        pose_model = self._pose_model_combo.currentData()
+        from app.pose.pose_model_gui import prepare_pose_model
+
+        pose_model, _reason = prepare_pose_model(self, self._pose_model_combo.currentData())
         refine_hands = self._refine_hands_check.isChecked()
+        candidates = self._candidates_check.isChecked() and pose_model.startswith("soma77")
         detection_run_id = self._resolve_or_create_detection_run(pose_model)
         if detection_run_id is None:
             return  # user cancelled
@@ -1841,13 +1989,8 @@ class CutieInitPanel(QWidget):
             if not run_ids:
                 continue
             # Check masks exist for this camera in any relevant run.
-            placeholders = ",".join("?" * len(run_ids))
-            count = self._conn.execute(
-                f"SELECT COUNT(*) FROM seg_masks "
-                f"WHERE seg_quality_run_id IN ({placeholders}) AND shot_video_id=?",
-                [*run_ids, cam["id"]],
-            ).fetchone()[0]
-            if count == 0:
+            if not any(masked_frames(self._conn, run_id, cam["id"], self._mask_revision(run_id))
+                       for run_id in run_ids):
                 continue
 
             # Prefer the interactive run; fall back to original batch run.
@@ -1871,6 +2014,7 @@ class CutieInitPanel(QWidget):
                 pose_model=pose_model,
                 overwrite_range=True,
                 refine_hands=refine_hands,
+                candidates=candidates,
             )
             self._runner.enqueue(job)
             queued += 1
@@ -2124,6 +2268,7 @@ class CutieInitPanel(QWidget):
             self._set_status(f"Pose done — {units_written} frames with keypoints.")
         else:
             self._flush_masks()
+            self._close_revision()   # a finished propagation job is one saved revision
             self._conn.commit()  # no-op if _flush_masks already committed everything
             if self._controller:
                 self._controller.clear_all()
@@ -2137,6 +2282,7 @@ class CutieInitPanel(QWidget):
 
     def _on_job_failed(self, job_id: str, error: str) -> None:
         self._flush_masks()
+        self._close_revision()
         self._conn.commit()
         self._refresh_queue_list()
         if error.startswith("CUTIE_SETUP_ERROR:"):
@@ -2152,6 +2298,8 @@ class CutieInitPanel(QWidget):
             self._set_status(f"Job failed: {error}")
 
     def _on_queue_done(self) -> None:
+        self._flush_masks()
+        self._close_revision()   # also covers a cancelled queue
         self._stop_btn.setEnabled(False)
         self._progress_bar.setVisible(False)
         self._progress_bar.setValue(0)
@@ -2246,13 +2394,10 @@ class CutieInitPanel(QWidget):
         table for this capture, since marks aren't real global-time values
         in that legacy per-camera-frame fallback.
 
-        persons_json snapshots self._persons -- the ordinal->name mapping
-        (index i = mask label i+1) actually in effect right now, the same
-        list _queue_pose_jobs threads through as persons_ordered. Lets a
-        *different* caller reuse this segmentation later without having to
-        assume today's capture_persons order still matches (gap 2,
-        RunDetectionDialog's "use existing segmentation" bbox source). See
-        docs/roadmap/features/segmentation-reuse/segmentation-reuse-design.md.
+        The masks are painted with each subject's permanent registry label
+        (see docs/roadmap/features/subject-identity/subject-identity-design.md),
+        so no label->name snapshot is stored: any caller reusing this
+        segmentation later reads the names from the subject registry.
         """
         if self._seg_init_run_id is not None:
             return
@@ -2266,10 +2411,9 @@ class CutieInitPanel(QWidget):
         self._conn.execute(
             "INSERT INTO seg_quality_runs "
             "(id, shot_id, trial_id, time_start_s, time_end_s, created_at, "
-            " quality_source, erosion_px, persons_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'cutie-interactive', 5, ?)",
-            (run_id, self._shot_id, self._trial_id, time_start_s, time_end_s,
-             now, json.dumps(list(self._persons))),
+            " quality_source, erosion_px) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'cutie-interactive', 5)",
+            (run_id, self._shot_id, self._trial_id, time_start_s, time_end_s, now),
         )
         self._conn.commit()
         self._seg_init_run_id = run_id
@@ -2293,20 +2437,22 @@ class CutieInitPanel(QWidget):
             log.debug("Panel: _flush_masks skipped  buffer=%d  run_id=%s",
                       len(self._db_flush_buffer), self._seg_init_run_id)
             return
+        if not self._open_for_write():
+            log.warning("Panel: %d masks not written, the segmentation is read-only", len(self._db_flush_buffer))
+            self._db_flush_buffer.clear()
+            return
         n = len(self._db_flush_buffer)
         t0 = time.monotonic()
-        self._conn.executemany(
-            "INSERT OR REPLACE INTO seg_masks "
-            "(seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
-            "VALUES (?, ?, ?, ?)",
-            [
-                (self._seg_init_run_id, svid, fi, blob)
-                for svid, fi, blob in self._db_flush_buffer
-            ],
-        )
+        written = 0
+        for svid, fi, blob in self._db_flush_buffer:
+            # Only changed frames get a row in the revision; a propagation over a range repeats
+            # most masks it finds unchanged.
+            if mask_at(self._conn, self._seg_init_run_id, svid, fi, self._open_rev) != blob:
+                write_mask(self._conn, self._seg_init_run_id, svid, fi, self._open_rev, blob)
+                written += 1
         self._conn.commit()
         self._db_flush_buffer.clear()
-        log.debug("Panel: flushed %d masks to DB  %.1fms", n, (time.monotonic() - t0) * 1000)
+        log.debug("Panel: flushed %d masks (%d changed) to DB  %.1fms", n, written, (time.monotonic() - t0) * 1000)
 
     def _set_status(self, text: str) -> None:
         self._status_label.setText(text)

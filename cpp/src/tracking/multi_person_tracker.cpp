@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
@@ -35,6 +36,27 @@ Eigen::MatrixXd diag_to_covariance_matrix(Eigen::VectorXd const& diag) {
 }
 
 }  // namespace
+
+std::string hand_stage_cost_warning(Skeleton const& skeleton, TrackerConfig const& config,
+                                    bool has_stage_rows) {
+    bool has_child_groups = false;
+    for (auto const& group : skeleton.groups())
+        has_child_groups = has_child_groups || !group.freeflyer_joint.empty();
+    if (!has_child_groups)
+        return {};
+    if (!has_stage_rows) {
+        return "the skeleton has hand groups but the tracker configuration has no "
+               "tracker_config_stages rows, so every hand marker is tracked in one stage; "
+               "this costs several times the time and memory of the hierarchical form "
+               "(parent stage restricted with active_joint_groups)";
+    }
+    if (config.active_joint_groups.empty()) {
+        return "the tracker configuration has hand stages but no active_joint_groups, so the "
+               "parent stage tracks the whole skeleton and the hand stages run in addition; "
+               "set active_joint_groups to the parent group (e.g. [\"main\"]) to restrict it";
+    }
+    return {};
+}
 
 // ---------------------------------------------------------------------------
 // CSV export helpers (moved verbatim from cli/track.cpp)
@@ -224,6 +246,7 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
 
     auto ctx = std::make_unique<PersonContext>();
     ctx->spec = spec;
+    ctx->full_sequence_id = full_sequence_id;
 
     // Load skeleton
     if (!quiet) {
@@ -274,13 +297,28 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
     if (!quiet) {
         fmt::print("Loading observations from sequence '{}'\n", full_sequence_id);
     }
+    // Only the tracked window is loaded when the caller gave one. The margin covers the
+    // initialisation search, which runs forward from the start but is bounded by the end, and a
+    // frame's observations whose timestamps straddle a window edge. Without an explicit start the
+    // start is derived from the first observations of the whole sequence, so nothing is cut.
+    constexpr double kObservationWindowMarginS = 1.0;
+    double const inf = std::numeric_limits<double>::infinity();
+    double const window_start = std::isnan(opts.override_start_time)
+                                    ? -inf
+                                    : opts.override_start_time - kObservationWindowMarginS;
+    double const window_end = std::isnan(opts.override_end_time)
+                                  ? inf
+                                  : opts.override_end_time + kObservationWindowMarginS;
+    ctx->observation_min_confidence = opts.min_confidence;
+    ctx->observation_window_start = window_start;
+    ctx->observation_window_end = window_end;
     ctx->observations = reader.load_observations(
         full_sequence_id, ctx->cameras_by_name, ctx->skeleton, opts.min_confidence, spec.person_id,
         ctx->tracker_config.use_relative_observations, ctx->tracker_config.relative_min_confidence,
         ctx->tracker_config.pose_noise_std, ctx->tracker_config.cross_pair_max_px,
         ctx->tracker_config.cross_pair_max_n, ctx->tracker_config.edited_kp_noise_std,
         ctx->tracker_config.confidence_threshold_marker_names,
-        ctx->tracker_config.confidence_threshold_override);
+        ctx->tracker_config.confidence_threshold_override, window_start, window_end);
 
     // A dots-track skeleton (has_dot_track) can legitimately have zero labeled
     // observations here by construction -- load_observations() itself already
@@ -313,6 +351,45 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
         // search.
         for (auto const& c : ctx->unlabeled_candidates) {
             ctx->unlabeled_candidates_by_camera[c.camera_id].push_back(c);
+        }
+    }
+
+    // Keypoint candidates (keypoint-candidates-design.md): for the markers bound to the pose model
+    // of the sequence's candidates they take the place of the fixed body observations from the
+    // first step after initialisation, which still uses the fixed observations.
+    // With the windowed choice the candidates are loaded by run_keypoint_choice_phase() instead.
+    if (ctx->tracker_config.kp_candidates_enabled && !ctx->tracker_config.kp_choice.window) {
+        auto kp = reader.load_keypoint_candidates(full_sequence_id, ctx->cameras_by_name,
+                                                  ctx->skeleton, opts.min_confidence,
+                                                  spec.person_id, window_start, window_end);
+        if (kp.candidates.empty()) {
+            throw std::runtime_error(
+                "The tracker config asks for keypoint candidates, but sequence '" +
+                full_sequence_id +
+                "' holds none for this skeleton's markers. Run detection with --candidates and "
+                "finalise it, or track without candidates.");
+        }
+        if (!quiet) {
+            fmt::print("  Loaded {} keypoint candidates for {} markers\n", kp.candidates.size(),
+                       kp.marker_keypoint.size());
+        }
+        ctx->kp_marker_keypoint = std::move(kp.marker_keypoint);
+        // bucket_candidates_by_camera() binary-searches each camera's list by timestamp. The dots,
+        // when there are any, and the keypoint candidates were each loaded in order, so merge them
+        // (std::merge: stable_sort would need a temporary buffer of an over-aligned type).
+        std::unordered_map<int, std::vector<UnlabeledCandidate>> kp_by_camera;
+        for (auto& c : kp.candidates)
+            kp_by_camera[c.camera_id].push_back(std::move(c));
+        for (auto& [camera_id, kp_list] : kp_by_camera) {
+            auto& pool = ctx->unlabeled_candidates_by_camera[camera_id];
+            std::vector<UnlabeledCandidate> merged;
+            merged.reserve(pool.size() + kp_list.size());
+            std::merge(pool.begin(), pool.end(), kp_list.begin(), kp_list.end(),
+                       std::back_inserter(merged),
+                       [](UnlabeledCandidate const& a, UnlabeledCandidate const& b) {
+                           return a.timestamp < b.timestamp;
+                       });
+            pool = std::move(merged);
         }
     }
 
@@ -405,6 +482,13 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
     }
     auto skeleton_ptr = std::make_shared<const Skeleton>(ctx->skeleton);
     ctx->tracker = std::make_unique<Tracker>(skeleton_ptr, ctx->cameras_by_id, ctx->tracker_config);
+    if (!ctx->kp_marker_keypoint.empty()) {
+        std::vector<int> candidate_markers;
+        for (auto const& [marker_id, keypoint_idx] : ctx->kp_marker_keypoint)
+            candidate_markers.push_back(marker_id);
+        std::sort(candidate_markers.begin(), candidate_markers.end());
+        ctx->tracker->set_candidate_slot_markers(std::move(candidate_markers));
+    }
 
     if (opts.smooth_output) {
         ctx->tracker->enable_smoothing(true);
@@ -527,8 +611,13 @@ build_person_context(PersonSpec const& spec, BuildPersonContextOptions const& op
     // tracker_config with any tracker_config_stages rows needs its DB rows kept
     // full-skeleton-width even though *ctx->layout* above may be group-scoped,
     // so a child stage can later merge into DOFs *ctx->layout* doesn't cover.
-    if (!reader.load_tracker_config_stages(full_config_id).empty()) {
+    bool const has_stage_rows = !reader.load_tracker_config_stages(full_config_id).empty();
+    if (has_stage_rows) {
         ctx->full_layout = SkeletonLayout::from_full_skeleton(skeleton_ptr);
+    }
+    if (auto warning = hand_stage_cost_warning(ctx->skeleton, ctx->tracker_config, has_stage_rows);
+        !warning.empty()) {
+        fmt::print(stderr, "Warning: {}\n", warning);
     }
 
     ctx->exporter = std::make_unique<TrackingExporter>(spec.output_dir, ctx->skeleton, *ctx->layout,
@@ -734,6 +823,12 @@ void step_person_context_update(PersonContext& ctx, int step, bool verbose, bool
     auto const t_obs0 = Clock::now();
     auto frame_obs = ctx.observations.get_all_in_range(t_start, t_end);
     frame_step_profile::add_get_observations_ms(Ms(Clock::now() - t_obs0).count());
+    if (!ctx.kp_marker_keypoint.empty()) {
+        std::erase_if(frame_obs, [&](Observation const& o) {
+            return o.mode == MeasurementMode::POSITION &&
+                   ctx.kp_marker_keypoint.count(o.marker_id) > 0;
+        });
+    }
     frame_obs.insert(frame_obs.end(), extra_observations.begin(), extra_observations.end());
 
     double t_effective = t_start + ctx.dt / 2.0;
@@ -842,23 +937,32 @@ void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet,
             fmt::print("Running RTS backward smoother...\n");
         }
         auto smoothed = ctx.tracker->smooth();
+        ctx.tracker->release_smoother_cache();
 
-        // smoothed[0] is step_person_context_frame0()'s untracked warm-up result when
-        // that frame actually ran (ctx.frame0_tracked) -- it has no filtered-row
-        // (is_smoothed=0) counterpart, since that frame's result is deliberately never
-        // written to tracking_results/state_vectors.csv. Skip it here so smoothed
-        // tracker_step N lines up with filtered tracker_step N instead of being off by
-        // one (a real, previously-shipped bug: every smoothed row was mislabeled).
-        auto const smoothed_begin =
-            ctx.frame0_tracked && !smoothed.empty() ? smoothed.begin() + 1 : smoothed.begin();
+        // Each smoothed frame is labelled with the tracker step its timestamp belongs to.
+        // The list is not one-per-step: the warm-up frame before step 1 has no filtered
+        // row, a step with no observations has no entry, and a predicted-only step is
+        // smoothed but not written. Counting entries instead would shift every smoothed
+        // row after the first such step onto an earlier step, so the smoothed pose would
+        // lead the video by the number of steps skipped so far.
+        struct StepFrame {
+            int step;
+            SmoothedFrame const* frame;
+        };
+        std::vector<StepFrame> out_frames;
+        for (auto const& sf : smoothed) {
+            int const step = smoothed_step(sf.timestamp, ctx.start_time, ctx.dt);
+            if (step >= 1)
+                out_frames.push_back({step, &sf});
+        }
 
         {
             auto path = ctx.spec.output_dir / "smoothed_state_vectors.csv";
             std::ofstream f(path);
             f << generate_state_header(*ctx.layout) << "\n";
-            int step = 1;
-            for (auto it = smoothed_begin; it != smoothed.end(); ++it) {
-                export_state_vector(f, step++, it->timestamp, it->state, *ctx.layout);
+            for (auto const& [step, sf] : out_frames) {
+                if (sf->tracked)
+                    export_state_vector(f, step, sf->timestamp, sf->state, *ctx.layout);
             }
         }
         {
@@ -866,9 +970,10 @@ void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet,
             std::ofstream f(path);
             f << "frame,timestamp,joint_name,angle_x,angle_y,angle_z,"
                  "velocity_x,velocity_y,velocity_z\n";
-            int step = 1;
-            for (auto it = smoothed_begin; it != smoothed.end(); ++it) {
-                write_smoothed_joint_angles_frame(f, step++, it->timestamp, it->state, *ctx.layout);
+            for (auto const& [step, sf] : out_frames) {
+                if (sf->tracked)
+                    write_smoothed_joint_angles_frame(f, step, sf->timestamp, sf->state,
+                                                      *ctx.layout);
             }
         }
         {
@@ -876,36 +981,42 @@ void finalize_person_context(PersonContext& ctx, bool smooth_output, bool quiet,
             std::ofstream f(path);
             f << "frame,timestamp,pos_x,pos_y,pos_z,quat_w,quat_x,quat_y,quat_z,"
                  "vel_x,vel_y,vel_z,omega_x,omega_y,omega_z\n";
-            int step = 1;
-            for (auto it = smoothed_begin; it != smoothed.end(); ++it) {
-                write_smoothed_root_pose_frame(f, step++, it->timestamp, it->state);
+            for (auto const& [step, sf] : out_frames) {
+                if (sf->tracked)
+                    write_smoothed_root_pose_frame(f, step, sf->timestamp, sf->state);
             }
         }
 
         // Write smoothed frames to DB (same full-skeleton expansion as the forward
         // pass above -- see PersonContext::full_layout's doc comment).
         {
-            int step_idx = 1;
-            for (auto it = smoothed_begin; it != smoothed.end(); ++it) {
+            for (auto const& [step_idx, sf_ptr] : out_frames) {
+                if (!sf_ptr->tracked)
+                    continue;
+                auto const* it = sf_ptr;
                 Eigen::VectorXd const state_vec =
                     ctx.full_layout
                         ? expand_state_to_full_layout(it->state, *ctx.layout, *ctx.full_layout)
                               .to_error_vector()
                         : it->state.to_error_vector();
-                Eigen::MatrixXd const cov_for_write =
-                    ctx.full_layout && it->covariance.size() > 0
-                        ? diag_to_covariance_matrix(expand_cov_diag_to_full_layout(
-                              it->covariance.diagonal(), *ctx.layout, *ctx.full_layout,
+                Eigen::VectorXd const cov_for_write =
+                    ctx.full_layout && it->covariance_diag.size() > 0
+                        ? expand_cov_diag_to_full_layout(
+                              it->covariance_diag, *ctx.layout, *ctx.full_layout,
                               ctx.tracker_config.init_joint_std * ctx.tracker_config.init_joint_std,
                               ctx.tracker_config.init_velocity_std *
-                                  ctx.tracker_config.init_velocity_std))
-                        : it->covariance;
-                ctx.result_writer->write_smoothed_frame(step_idx++, it->timestamp, state_vec,
+                                  ctx.tracker_config.init_velocity_std)
+                        : it->covariance_diag;
+                ctx.result_writer->write_smoothed_frame(step_idx, it->timestamp, state_vec,
                                                         cov_for_write);
             }
         }
 
-        ctx.smoothed_frames.assign(smoothed_begin, smoothed.end());
+        // One entry per step that has a frame, predicted-only steps included (their
+        // smoothed state is the estimate for that step).
+        ctx.smoothed_frames.clear();
+        for (auto const& [step, sf] : out_frames)
+            ctx.smoothed_frames.push_back(*sf);
 
         if (!quiet) {
             fmt::print("  Smoothed {} frames\n", smoothed.size());
@@ -1205,7 +1316,7 @@ MultiPersonTracker::MultiPersonTracker(std::vector<PersonSpec> const& specs,
     {
         std::vector<TrackerConfig const*> dot_configs;
         for (auto const& ctx : persons_) {
-            if (ctx->has_dot_track)
+            if (ctx->uses_candidate_assignment())
                 dot_configs.push_back(&ctx->tracker_config);
         }
         std::string const field = find_dot_config_disagreement(dot_configs);
@@ -1364,7 +1475,7 @@ void MultiPersonTracker::run() {
             candidates_by_idx;
         for (int idx : order) {
             auto& ctx = *persons_[static_cast<size_t>(idx)];
-            if (step >= ctx.num_steps || !ctx.has_dot_track)
+            if (step >= ctx.num_steps || !ctx.uses_candidate_assignment())
                 continue;
             auto [t_start, t_end] = person_context_step_window(ctx, step);
             auto candidates =
@@ -1393,8 +1504,12 @@ void MultiPersonTracker::run() {
                 auto it = candidates_by_idx.find(idx);
                 if (it == candidates_by_idx.end())
                     continue;
-                subjects.push_back(
-                    DotAssignmentSubject{idx, persons_[static_cast<size_t>(idx)]->tracker.get()});
+                {
+                    auto& subject_ctx = *persons_[static_cast<size_t>(idx)];
+                    DotAssignmentSubject subject{idx, subject_ctx.tracker.get()};
+                    subject.marker_keypoint = subject_ctx.kp_marker_keypoint;
+                    subjects.push_back(std::move(subject));
+                }
                 for (auto const& [cam_id, cands] : it->second) {
                     append_unique_candidates(combined_candidates[cam_id], cands,
                                              std::uint64_t{1} << idx);

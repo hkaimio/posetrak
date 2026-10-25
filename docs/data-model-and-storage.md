@@ -327,29 +327,91 @@ a unit.  Tools that write paths should prefer relative paths when the file is un
 project root; tools that read paths must resolve against the registry's `project_root`
 when the path is not absolute.
 
+### Detection regions and observation sources
+
+`detection_keypoints.region_type` names what a row holds; finalisation copies the rows of the
+tracks assigned to a person into `pose_observations` with the source below.  Every row is
+keyed by (detection run, video, frame, track, region type).
+
+| `region_type` | `pose_observations.source` | Blob | Written by |
+|---|---|---|---|
+| `full_body` | `body` | `float32[n_kp, 3]`: x, y, confidence (distorted pixels) | every pose detection run |
+| `hand_l`, `hand_r` | same | `float32[21, 3]`, refined hand keypoints | detection runs with hand refinement |
+| `kp_candidates` | `kp_candidates` | candidate blob (below) | SOMA-77 runs made with candidates |
+| `dots` | `dots` | dot candidate blob, `int32 n` then `float32[n, 9]` | dot detection runs |
+| `markers` | `markers` | `float32[n, 3]` marker corners | coded-marker (ArUco) runs |
+
+**Keypoint candidates.** A heatmap model has several local maxima per keypoint. A run made with
+`detect run --candidates` (or the "Keypoint candidates" box of the pose extraction panel; SOMA-77
+only, recorded as `detection_runs.config_json.candidates`) stores up to six per keypoint next to the
+ordinary row, which keeps the strongest. One `kp_candidates` row per (run, video, frame, track):
+
+```
+int32 n, int32 n_fields (= 6), then float32[n, n_fields] little endian:
+keypoint_idx, x, y, peak, rank, tracklet_id
+```
+
+`x, y` are distorted pixels, `peak` the heatmap value, `rank` 0 the strongest maximum of the keypoint,
+`tracklet_id` the causal constant-velocity tracklet the maximum was linked to (-1 unlinked), unique
+per (detection run, camera) across keypoints and tracks. The row's `noise_scale` is the one of the
+person's body row. A reader takes the first six fields and ignores any more, so fields can be
+appended. The maxima come from the flip-averaged heatmap before the person-mask gate, so the mask
+does not remove the alternatives a tracker may need. Writer and reader in Python:
+`posetrak.detection.kp_candidates`; reader in C++: `db::decode_kp_candidates` (`blob_codec.hpp`);
+both are tested against the same bytes. There is no tracklet table; extents and statistics are
+computed from the rows. Finalisation multiplies `peak` by the pose model's confidence scale (the same factor as the confidence of the `body` row), so that the tracker's measurement noise of a candidate is that of the fixed observation of its keypoint. A refreshed run (`detect stale --refresh`) keeps the candidate rows of the
+frames it copies and links the frames it re-runs after them.
+
+A tracking run uses the candidates when `tracker_configs.kp_candidates_enabled` is 1 (`track run
+--candidates`); with 0 the sequence's fixed `body` observations are used even if it holds candidates. Two
+further columns set how the tracker chooses among them: `kp_candidate_peak_weight` (weight of the candidate's
+peak in its assignment cost) and `kp_candidate_tracklet_multiplier` (preference for the candidate that continues
+the tracklet chosen for the same keypoint on the previous step); NULL means off for both.
+
+`tracker_configs.kp_candidate_choice` selects how the candidates are chosen: `'step'` (NULL) lets the tracker's
+prediction choose at each step; `'window'` chooses over the tracked range before the first step, from the
+candidates, the other cameras, the skeleton neighbours and the masks alone, and feeds the picks to the filter in place
+of the stored keypoints. The `kp_choice_*`, `kp_strict_filter*` and `kp_mask_term_*` columns hold its settings (see the
+schema file and `docs/roadmap/features/keypoint-candidates/keypoint-candidates-design.md` section 10.5). A window
+run stores what it picked in `tracking_kp_picks`, one row per run, person and camera: the tracklet id and rank of the
+picked candidate for every keypoint of every frame, with the counts of keypoint-frames that had a candidate, were
+emptied by the strict mask filter and were picked.
+
 ### Pose blob extensibility: the keypoint manifest
-`PoseObservation.kp_blob` from a person's pose detector has its keypoint count and
-ordering implied by the model name (`pose_model`).  A sequence whose observations come
-from another source carries a per-sequence manifest instead, so the blob is indexed by
-`keypoint_idx` rather than by model convention:
+A `PoseObservation.kp_blob` has its keypoint count and ordering named by a per-source
+manifest, so the blob is indexed by `keypoint_idx` and the name of the slot rather than by
+model convention.  The manifest is kept per observation source of the sequence (`body`,
+`hand_l`, `hand_r`, `kp_candidates`), because the rows of one sequence come from different keypoint
+vocabularies:
 
 ```sql
 CREATE TABLE pose_sequence_keypoints (
     sequence_id   TEXT NOT NULL REFERENCES pose_observation_sequences(id),
+    obs_source    TEXT NOT NULL DEFAULT 'body',  -- pose_observations.source the row indexes
     keypoint_idx  INTEGER NOT NULL,
-    name          TEXT NOT NULL,   -- landmark name: "<marker name>:c<corner 0-3>"
-    source        TEXT NOT NULL,   -- where the slot comes from, e.g. "aruco"
-    PRIMARY KEY (sequence_id, keypoint_idx)
+    name          TEXT NOT NULL,   -- landmark: "<model>:<keypoint>" or "<marker name>:c<corner 0-3>"
+    source        TEXT NOT NULL,   -- model or detector: "soma77", "coco133", "hand21", "aruco"
+    PRIMARY KEY (sequence_id, obs_source, keypoint_idx)
 );
 ```
 
-A sequence with no manifest rows -- every person sequence -- keeps the layout implied by
-`pose_model`, so nothing existing changes.  Today the manifest is written for object
-sequences (`finalise_object_to_db`, `source = 'aruco'`).  The C++ `SessionReader` matches
-each row's `name` against `Marker::landmark` to bind a blob slot to a skeleton marker,
-and sizes the per-frame blob as `max(keypoint_idx) + 1` rather than by how many slots
-happened to match, so a skeleton that uses only a subset of the slots still reads the
-blob correctly.
+Finalisation writes the manifest of every new sequence: the body blob named by its pose
+model (`soma77:LeftForeArm`, `coco133:left_elbow`; `posetrak.detection.pose_models` is the
+registry), each refined-hand source by the hand21 names of its side (`hand21:left_index_1`),
+and an object sequence by its marker corners (`source = 'aruco'`).  A source with no
+manifest rows -- every sequence finalised before the manifest was written for all sequences
+-- keeps the COCO-133 layout implied by `pose_model`, with the hand rows at COCO indices 91
+and 112.  The C++ `SessionReader` binds each slot of a source with manifest rows to the
+skeleton marker whose `Marker::landmark` equals the row's `name` (a name without a model
+prefix also matches `<source>:<name>`), and only those; the implied COCO map is used only
+for a source without rows.  A COCO-133 or hand21 slot is also bound to the marker whose
+`openpose_keypoint` is its COCO-133 index, so skeletons with `openpose_keypoint` markers and
+no landmarks keep working.  The `kp_candidates` source (below) has the same names as the
+`body` source of its sequence.  The per-frame blob is sized as `max(keypoint_idx) + 1` rather
+than by how many slots happened to match.  A skeleton that binds no slot of a manifest
+fails the run with a message naming the pose model.  Hand rows are laid over the COCO hand
+slots of a COCO-133-wide body row (`posetrak.db.observation_merge`); after a narrower body
+row (SOMA-77, 77 slots) the left hand is appended and then the right hand.
 
 ### Capture objects and marker detection runs
 A tracked rigid prop is a `capture_objects` row (`capture_id`, `name`,
@@ -427,6 +489,25 @@ this: create a fresh `detection_runs` row and copy the old run's `detection_keyp
 `detection_track_assignments` / `person_detections` rows onto it via `INSERT...SELECT` (cheap,
 and leaves the original run byte-for-byte unchanged) rather than mutating the original in
 place.
+
+### Segmentation masks are append-only by revision
+A segmentation run's masks (`seg_masks`) are stored per revision: the primary key is
+`(seg_quality_run_id, shot_video_id, frame_idx, revision)`, and a row holds the mask a frame has from
+that revision on (a NULL `mask_blob` records that the frame has no mask from then on). The mask of a
+frame at revision `r` is its row with the largest `revision <= r`. `seg_mask_revisions` has one row per
+revision: revision 0 is the state when the segmentation was created (or when the database was
+migrated to schema 68), `closed_at` is NULL while the revision is open for editing, and a partial unique
+index allows one open revision per segmentation run. Only closed revisions are visible: the
+`seg_masks_latest` view returns the current mask of every masked frame, and the helpers in
+`posetrak.db.seg_revisions` (Python) and `SessionReader::load_seg_mask_blob` (C++) read a frame at a
+given revision.
+
+Results derived from masks record the revision they read, resolved once when the job starts:
+`detection_runs.seg_quality_run_id` / `seg_revision` for runs whose boxes or heatmap gate come from masks,
+`tracking_run_persons.seg_quality_run_id` / `seg_mask_label` / `seg_revision` for a subject tracked with a
+mask gate. NULL means the masks were not versioned when the result was made. A revision referenced by a
+result is kept by `posetrak seg prune`. See
+`docs/roadmap/features/segmentation-versioning/segmentation-versioning-design.md`.
 
 ### Multi-person tracking via `TrackingRunPerson`
 A single tracking run can track any number of persons simultaneously.
@@ -719,7 +800,8 @@ CREATE TABLE tracking_runs (
     posetrak_version TEXT NOT NULL,
     -- ordered JSON arrays defining the obs_blob layout (see §5 blob layout)
     active_camera_ids TEXT NOT NULL,  -- e.g. ["cam_A","cam_B","cam_C"]
-    marker_names TEXT NOT NULL        -- e.g. ["MRK-knee.L","MRK-knee.R",...]
+    marker_names TEXT NOT NULL,       -- e.g. ["MRK-knee.L","MRK-knee.R",...]
+    name TEXT                         -- display name given by the user (session tree, `posetrak track rename`); NULL until named
 );
 
 CREATE TABLE tracking_run_persons (
@@ -998,8 +1080,8 @@ inter-tool exchange if a specific consumer requires it.
 - **obs_blob compression**: decide between page-level `zstd_vfs` (transparent, no code
   changes) vs. per-blob application-layer compression (more portable).
 - **Pose blob extensibility**: resolved.  The `pose_sequence_keypoints` manifest (§3) is
-  implemented and used by object sequences; person sequences without manifest rows keep
-  the layout implied by `pose_model`.
+  implemented per observation source; sources without manifest rows keep the layout implied
+  by `pose_model`.
 
 ---
 

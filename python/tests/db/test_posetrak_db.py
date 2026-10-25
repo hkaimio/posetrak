@@ -1120,6 +1120,158 @@ def test_migrate_session_v54_to_v55_adds_corroboration_and_camera_trust_columns(
     conn.close()
 
 
+_DOT_SEG_MASK_COLUMNS = {
+    "dot_seg_mask_enabled",
+    "dot_seg_mask_dilate_px",
+    "dot_seg_mask_tracklet_window",
+    "dot_seg_mask_min_tracklet_fraction",
+    "dot_seg_mask_cost_scale_at_zero_fraction",
+}
+
+
+def test_migrate_registry_v14_to_v15_adds_seg_mask_columns(tmp_path: Path) -> None:
+    """v14->v15 adds tracker_configs.dot_seg_mask_* -- see db.py's
+    _migrate_registry_v14_to_v15."""
+    db_path = tmp_path / "reg.db"
+    conn = create_registry(db_path)
+    conn.execute("PRAGMA user_version = 14")
+    conn.commit()
+    conn.close()
+
+    conn = open_registry(db_path)
+    assert get_schema_version(conn) == REGISTRY_SCHEMA_VERSION
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(tracker_configs)")}
+    assert _DOT_SEG_MASK_COLUMNS <= cols
+    conn.close()
+
+
+def test_migrate_session_v56_to_v57_adds_seg_mask_columns(tmp_path: Path) -> None:
+    """v56->v57 is the session mirror of registry v14->v15 -- see db.py's
+    _migrate_session_v56_to_v57."""
+    db_path = tmp_path / "session.db"
+    conn = create_session(db_path)
+    conn.execute("PRAGMA user_version = 56")
+    conn.commit()
+    conn.close()
+
+    conn = open_session(db_path)
+    assert get_schema_version(conn) == SESSION_SCHEMA_VERSION
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(tracker_configs)")}
+    assert _DOT_SEG_MASK_COLUMNS <= cols
+    conn.close()
+
+
+def test_migrate_adds_the_hard_mask_distance_column() -> None:
+    """Registry v15->v16 and session v60->v61 add dot_seg_mask_hard_distance_px
+    to a tracker_configs table that lacks it, and are safe to repeat."""
+    import sqlite3
+
+    from posetrak.db.db import _migrate_registry_v15_to_v16, _migrate_session_v60_to_v61
+
+    for migrate, version in ((_migrate_registry_v15_to_v16, 16), (_migrate_session_v60_to_v61, 61)):
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE tracker_configs (id TEXT PRIMARY KEY)")
+        migrate(conn)
+        migrate(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tracker_configs)")}
+        assert "dot_seg_mask_hard_distance_px" in cols
+        assert get_schema_version(conn) == version
+        conn.close()
+
+
+def test_migrate_adds_the_active_joint_groups_column() -> None:
+    """Registry v16->v17 and session v66->v67 add tracker_configs.active_joint_groups
+    to a table that lacks it, and are safe to repeat."""
+    import sqlite3
+
+    from posetrak.db.db import _migrate_registry_v16_to_v17, _migrate_session_v66_to_v67
+
+    for migrate, version in ((_migrate_registry_v16_to_v17, 17), (_migrate_session_v66_to_v67, 67)):
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE tracker_configs (id TEXT PRIMARY KEY)")
+        migrate(conn)
+        migrate(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tracker_configs)")}
+        assert "active_joint_groups" in cols
+        assert get_schema_version(conn) == version
+        conn.close()
+
+
+def test_migrate_adds_the_kp_candidates_enabled_column() -> None:
+    """Registry v17->v18 and session v68->v69 add tracker_configs.kp_candidates_enabled, repeatably."""
+    import sqlite3
+
+    from posetrak.db.db import _migrate_registry_v17_to_v18, _migrate_session_v68_to_v69
+
+    for migrate, version in ((_migrate_registry_v17_to_v18, 18), (_migrate_session_v68_to_v69, 69)):
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE tracker_configs (id TEXT PRIMARY KEY)")
+        migrate(conn)
+        migrate(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tracker_configs)")}
+        assert {"kp_candidates_enabled", "kp_candidate_peak_weight", "kp_candidate_tracklet_multiplier"} <= cols
+        assert get_schema_version(conn) == version
+        conn.close()
+
+
+def test_migrate_adds_the_window_choice_settings_and_the_picks_table() -> None:
+    """Registry v18->v19 and session v69->v70 add the windowed-choice settings, repeatably; the session adds the picks table."""
+    import sqlite3
+
+    from posetrak.db.db import _migrate_registry_v18_to_v19, _migrate_session_v69_to_v70
+
+    expected = {
+        "kp_candidate_choice", "kp_choice_support_window_s", "kp_choice_delta", "kp_choice_beta", "kp_choice_gamma",
+        "kp_choice_rounds", "kp_choice_skip_camera_ids", "kp_strict_filter", "kp_strict_filter_window_frames",
+        "kp_strict_filter_min_fraction", "kp_mask_term_weight", "kp_mask_term_window_s", "kp_mask_term_classes",
+        "kp_strict_filter_classes",
+    }
+    for migrate, version in ((_migrate_registry_v18_to_v19, 19), (_migrate_session_v69_to_v70, 70)):
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE tracker_configs (id TEXT PRIMARY KEY)")
+        migrate(conn)
+        migrate(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tracker_configs)")}
+        assert expected <= cols
+        assert get_schema_version(conn) == version
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert ("tracking_kp_picks" in tables) == (version == 70)
+        conn.close()
+
+
+def test_migrate_adds_the_sticky_choice_settings() -> None:
+    """Registry v19->v20 and session v70->v71 add the switch penalty and jump threshold, repeatably."""
+    import sqlite3
+
+    from posetrak.db.db import _migrate_registry_v19_to_v20, _migrate_session_v70_to_v71
+
+    for migrate, version in ((_migrate_registry_v19_to_v20, 20), (_migrate_session_v70_to_v71, 71)):
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE tracker_configs (id TEXT PRIMARY KEY)")
+        migrate(conn)
+        migrate(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tracker_configs)")}
+        assert {"kp_choice_switch_penalty", "kp_choice_jump_box"} <= cols
+        assert get_schema_version(conn) == version
+        conn.close()
+
+
+def test_fresh_databases_hold_the_window_choice_columns(tmp_path: Path) -> None:
+    """A new registry has the settings in tracker_configs; a new session has the picks table with the migration's columns."""
+    registry = create_registry(tmp_path / "reg.db")
+    cols = {r[1] for r in registry.execute("PRAGMA table_info(tracker_configs)")}
+    assert {"kp_candidate_choice", "kp_strict_filter", "kp_mask_term_classes", "kp_choice_switch_penalty",
+            "kp_choice_jump_box"} <= cols
+    registry.close()
+    session = create_session(tmp_path / "ses.db")
+    picks = [r[1] for r in session.execute("PRAGMA table_info(tracking_kp_picks)")]
+    assert picks == [
+        "run_id", "person_id", "camera_instance_id", "n_frames", "n_keypoints", "video_frames", "tracklet_ids",
+        "ranks", "n_candidate_keypoint_frames", "n_filter_emptied", "n_picked",
+    ]
+    session.close()
+
+
 # ---------------------------------------------------------------------------
 # PRAGMA foreign_keys
 # ---------------------------------------------------------------------------
@@ -1514,3 +1666,109 @@ def test_copy_rows_if_missing_missing_row_raises(
         _copy_rows_if_missing(
             registry_db, session_db, "camera_models", ["nonexistent-uuid"]
         )
+
+
+def test_session_v61_to_v62_adds_dot_assignment_tables_and_is_repeatable():
+    import sqlite3
+
+    from posetrak.db.db import _migrate_session_v61_to_v62
+
+    conn = sqlite3.connect(":memory:")
+    _migrate_session_v61_to_v62(conn)
+    _migrate_session_v61_to_v62(conn)
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"dot_assignment_proposals", "dot_assignment_edits"} <= tables
+    assert get_schema_version(conn) == 62
+
+
+def test_session_v62_to_v63_adds_tracking_run_name_and_is_repeatable():
+    import sqlite3
+
+    from posetrak.db.db import _migrate_session_v62_to_v63
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE tracking_runs (id TEXT PRIMARY KEY, notes TEXT)")
+    conn.execute("INSERT INTO tracking_runs (id) VALUES ('run-1')")
+    _migrate_session_v62_to_v63(conn)
+    _migrate_session_v62_to_v63(conn)
+    columns = [r[1] for r in conn.execute("PRAGMA table_info(tracking_runs)")]
+    assert columns.count("name") == 1
+    assert conn.execute("SELECT name FROM tracking_runs").fetchone()[0] is None
+    assert get_schema_version(conn) == 63
+
+
+def test_new_session_has_tracking_run_name(session_db: sqlite3.Connection) -> None:
+    columns = [r[1] for r in session_db.execute("PRAGMA table_info(tracking_runs)")]
+    assert "name" in columns
+
+
+def test_session_v63_to_v64_marks_existing_runs_complete_and_is_repeatable():
+    import sqlite3
+
+    from posetrak.db.db import _migrate_session_v63_to_v64
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE tracking_runs (id TEXT PRIMARY KEY, notes TEXT)")
+    conn.execute("CREATE TABLE tracking_run_persons (run_id TEXT, person_id INTEGER)")
+    conn.execute("INSERT INTO tracking_runs (id) VALUES ('run-1')")
+    _migrate_session_v63_to_v64(conn)
+    _migrate_session_v63_to_v64(conn)
+    columns = [r[1] for r in conn.execute("PRAGMA table_info(tracking_runs)")]
+    for name in ("status", "completed_at", "failure"):
+        assert columns.count(name) == 1
+    assert conn.execute("SELECT status, completed_at, failure FROM tracking_runs").fetchone() == (
+        "complete", None, None)
+    persons = [r[1] for r in conn.execute("PRAGMA table_info(tracking_run_persons)")]
+    assert {"seg_quality_run_id", "seg_mask_label", "seg_revision"} <= set(persons)
+    assert conn.execute("SELECT COUNT(*) FROM run_progress").fetchone()[0] == 0
+    assert get_schema_version(conn) == 64
+
+
+def test_new_session_has_run_status_columns(session_db: sqlite3.Connection) -> None:
+    columns = [r[1] for r in session_db.execute("PRAGMA table_info(tracking_runs)")]
+    assert {"status", "completed_at", "failure"} <= set(columns)
+
+
+def test_session_v64_to_v65_keys_the_keypoint_manifest_by_observation_source():
+    import sqlite3
+
+    from posetrak.db.db import _migrate_session_v64_to_v65
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE pose_observation_sequences (id TEXT PRIMARY KEY)")
+    conn.execute(
+        "CREATE TABLE pose_sequence_keypoints (sequence_id TEXT NOT NULL REFERENCES pose_observation_sequences(id),"
+        " keypoint_idx INTEGER NOT NULL, name TEXT NOT NULL, source TEXT NOT NULL,"
+        " PRIMARY KEY (sequence_id, keypoint_idx))")
+    conn.execute("INSERT INTO pose_observation_sequences (id) VALUES ('s1')")
+    conn.executemany("INSERT INTO pose_sequence_keypoints VALUES ('s1', ?, ?, 'soma77')", [(0, "Hips"), (1, "Spine1")])
+    _migrate_session_v64_to_v65(conn)
+    _migrate_session_v64_to_v65(conn)
+    assert conn.execute("SELECT obs_source, keypoint_idx, name, source FROM pose_sequence_keypoints ORDER BY 2").fetchall() == [
+        ("body", 0, "Hips", "soma77"), ("body", 1, "Spine1", "soma77")]
+    conn.execute("INSERT INTO pose_sequence_keypoints VALUES ('s1', 'hand_l', 0, 'hand21:left_hand_root', 'hand21')")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO pose_sequence_keypoints VALUES ('s1', 'hand_l', 0, 'x', 'hand21')")
+    assert get_schema_version(conn) == 65
+
+
+def test_session_v65_to_v66_adds_detection_run_inputs_and_links_prototype_runs():
+    import sqlite3
+
+    from posetrak.db.db import _migrate_session_v65_to_v66
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE detection_runs (id TEXT PRIMARY KEY, config_json TEXT)")
+    conn.executemany("INSERT INTO detection_runs VALUES (?, ?)", [
+        ("src", None),
+        ("proto", '{"source_detection_run": "src", "flip_test": true}'),
+        ("dangling", '{"source_detection_run": "gone"}'),
+        ("marker", '{"dictionary": "DICT_4X4_50"}'),
+        ("broken", "not json"),
+    ])
+    _migrate_session_v65_to_v66(conn)
+    _migrate_session_v65_to_v66(conn)
+    rows = dict(conn.execute("SELECT id, source_detection_run_id FROM detection_runs"))
+    assert rows == {"src": None, "proto": "src", "dangling": None, "marker": None, "broken": None}
+    assert conn.execute("SELECT COUNT(*) FROM detection_runs WHERE seg_quality_run_id IS NOT NULL OR seg_revision IS NOT NULL").fetchone()[0] == 0
+    assert get_schema_version(conn) == 66

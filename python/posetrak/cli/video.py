@@ -274,3 +274,88 @@ def cmd_relocate(
     for r in records:
         click.echo(f"  {r['id'][:8]}…  {r['old_path']}")
         click.echo(f"           -> {r['new_path']}")
+
+
+# ---------------------------------------------------------------------------
+# video proxy — scrub proxy cache (sidecar database beside the session)
+# ---------------------------------------------------------------------------
+
+
+@video_group.group("proxy")
+def proxy_group() -> None:
+    """Manage the scrub proxy: small images of every Nth video frame that the
+    viewer shows while dragging the time slider. Stored in <session>.cache.db,
+    which is safe to delete."""
+
+
+def _open_proxy(ctx: click.Context):
+    from posetrak.detection.proxy_cache import ProxyCache, sidecar_path
+
+    path = ctx.obj.get("session")
+    if not path:
+        fail("--session / POSETRAK_SESSION_DB is required.")
+    return ProxyCache(sidecar_path(path))
+
+
+@proxy_group.command("build")
+@click.option("--capture", "capture_id", default=None, metavar="ID",
+              help="Only this capture's videos (prefix accepted).")
+@click.option("--step", default=None, type=int, metavar="N",
+              help="Keep every Nth frame (default: 8).")
+@click.option("--width", default=None, type=int, metavar="PX",
+              help="Image width in pixels (default: 640).")
+@click.pass_context
+def cmd_proxy_build(ctx: click.Context, capture_id: str | None, step: int | None,
+                    width: int | None) -> None:
+    """Build the proxy for whole videos (the viewer builds the range it shows
+    by itself; use this to prepare a capture ahead of time).
+
+    Example:
+
+        posetrak -s session.db video proxy build --capture 13af67f5
+    """
+    from posetrak.detection.proxy_cache import PROXY_STEP, PROXY_WIDTH
+
+    conn = _open_session_required(ctx)
+    try:
+        if capture_id is not None:
+            capture_id = resolve_id_prefix(conn, "captures", capture_id)
+        q = "SELECT id, file_path FROM capture_videos"
+        rows = conn.execute(q + (" WHERE shot_id = ?" if capture_id else ""),
+                            (capture_id,) if capture_id else ()).fetchall()
+    except (ValueError, sqlite3.Error) as exc:
+        fail(str(exc))
+    finally:
+        conn.close()
+    cache = _open_proxy(ctx)
+    for row in rows:
+        if not Path(row["file_path"]).exists():
+            click.echo(f"{row['id'][:8]}  missing file, skipped: {row['file_path']}")
+            continue
+        n = cache.build(row["id"], row["file_path"], step=step or PROXY_STEP,
+                        width=width or PROXY_WIDTH)
+        click.echo(f"{row['id'][:8]}  {n} frames")
+    cache.close()
+
+
+@proxy_group.command("info")
+@click.pass_context
+def cmd_proxy_info(ctx: click.Context) -> None:
+    """Show how many proxy frames are stored per video, and their size."""
+    cache = _open_proxy(ctx)
+    rows = cache.stats()
+    cache.close()
+    if not rows:
+        click.echo("(empty)")
+    for svid, frames, size in rows:
+        click.echo(f"{svid[:8]}  {frames} frames  {size / 1e6:.1f} MB")
+
+
+@proxy_group.command("clear")
+@click.pass_context
+def cmd_proxy_clear(ctx: click.Context) -> None:
+    """Delete every proxy frame (the videos and session are not touched)."""
+    cache = _open_proxy(ctx)
+    cache.clear()
+    cache.close()
+    click.echo("cleared")

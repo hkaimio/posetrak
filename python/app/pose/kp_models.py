@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from posetrak.detection.pose_models import COCO133_NAMES, SOMA77_NAMES
+
 
 @dataclass(frozen=True)
 class PoseModel:
@@ -143,51 +145,7 @@ COCO17 = PoseModel(
 #  112-132 right hand (21 pts)
 # ---------------------------------------------------------------------------
 
-_COCO133_NAMES: tuple[str, ...] = (
-    # 0-16: body
-    "nose",
-    "left_eye", "right_eye",
-    "left_ear", "right_ear",
-    "left_shoulder", "right_shoulder",
-    "left_elbow", "right_elbow",
-    "left_wrist", "right_wrist",
-    "left_hip", "right_hip",
-    "left_knee", "right_knee",
-    "left_ankle", "right_ankle",
-    # 17-22: feet
-    "left_big_toe", "left_small_toe", "left_heel",
-    "right_big_toe", "right_small_toe", "right_heel",
-    # 23-39: jaw contour
-    *[f"jaw_{i}" for i in range(17)],
-    # 40-44: right eyebrow, 45-49: left eyebrow
-    *[f"right_eyebrow_{i}" for i in range(5)],
-    *[f"left_eyebrow_{i}" for i in range(5)],
-    # 50-53: nose bridge, 54-58: nose tip
-    *[f"nose_bridge_{i}" for i in range(4)],
-    *[f"nose_tip_{i}" for i in range(5)],
-    # 59-64: right eye, 65-70: left eye
-    *[f"right_eye_{i}" for i in range(6)],
-    *[f"left_eye_{i}" for i in range(6)],
-    # 71-82: outer lips, 83-90: inner lips
-    *[f"outer_lip_{i}" for i in range(12)],
-    *[f"inner_lip_{i}" for i in range(8)],
-    # 91-111: left hand
-    "left_hand_root",
-    "left_thumb_1", "left_thumb_2", "left_thumb_3", "left_thumb_4",
-    "left_index_1", "left_index_2", "left_index_3", "left_index_4",
-    "left_middle_1", "left_middle_2", "left_middle_3", "left_middle_4",
-    "left_ring_1", "left_ring_2", "left_ring_3", "left_ring_4",
-    "left_pinky_1", "left_pinky_2", "left_pinky_3", "left_pinky_4",
-    # 112-132: right hand
-    "right_hand_root",
-    "right_thumb_1", "right_thumb_2", "right_thumb_3", "right_thumb_4",
-    "right_index_1", "right_index_2", "right_index_3", "right_index_4",
-    "right_middle_1", "right_middle_2", "right_middle_3", "right_middle_4",
-    "right_ring_1", "right_ring_2", "right_ring_3", "right_ring_4",
-    "right_pinky_1", "right_pinky_2", "right_pinky_3", "right_pinky_4",
-)
-
-assert len(_COCO133_NAMES) == 133, f"expected 133, got {len(_COCO133_NAMES)}"
+_COCO133_NAMES: tuple[str, ...] = COCO133_NAMES
 
 _FACE_IDX     = frozenset(range(23, 91))
 _LEFT_HAND_IDX  = frozenset(range(91, 112))
@@ -295,3 +253,41 @@ def get_pose_model(model_name: str | None) -> PoseModel:
         if "133" in model_name:
             return COCO133
     return COCO17
+
+
+# ---------------------------------------------------------------------------
+# SOMA-77  (NVIDIA SOMA skeleton joint centres; the 77 keypoints of the GEM-X 2D model)
+#
+# Layout (index = heatmap channel): 0-3 Hips, Spine1, Spine2, Chest; 4-5 Neck1, Neck2; 6-10 Head, HeadEnd,
+# Jaw, LeftEye, RightEye; 11-38 left shoulder, arm, forearm, hand and the five finger chains; 39-66 the same on
+# the right; 67-71 left leg, shin, foot, toe base, toe end; 72-76 the right leg. The keypoints are joint centres,
+# not surface landmarks.
+# ---------------------------------------------------------------------------
+
+SOMA77 = PoseModel(
+    model_id="soma-77",
+    names=SOMA77_NAMES,
+    groups={
+        "Trunk and head": frozenset(range(0, 11)),
+        "Left arm": frozenset(range(11, 15)),
+        "Left hand": frozenset(range(15, 39)),
+        "Right arm": frozenset(range(39, 43)),
+        "Right hand": frozenset(range(43, 67)),
+        "Left leg": frozenset(range(67, 72)),
+        "Right leg": frozenset(range(72, 77)),
+        "Spine": frozenset({0, 1, 2, 3, 4, 5}),
+        "Upper body": frozenset(range(0, 67)),
+        "Lower body": frozenset(range(67, 77)),
+    },
+    tree_groups=("Trunk and head", "Left arm", "Left hand", "Right arm", "Right hand", "Left leg", "Right leg"),
+    limb_chains={
+        "Spine and head": ("Hips", "Spine1", "Spine2", "Chest", "Neck1", "Neck2", "Head", "HeadEnd"),
+        "Left arm": ("LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand"),
+        "Right arm": ("RightShoulder", "RightArm", "RightForeArm", "RightHand"),
+        "Left leg": ("LeftLeg", "LeftShin", "LeftFoot", "LeftToeBase", "LeftToeEnd"),
+        "Right leg": ("RightLeg", "RightShin", "RightFoot", "RightToeBase", "RightToeEnd"),
+    },
+)
+_assert_tree_partitions(SOMA77)
+_REGISTRY["soma-77"] = SOMA77
+_REGISTRY["soma77-dinov3-vitpose"] = SOMA77

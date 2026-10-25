@@ -77,62 +77,80 @@ def _apply_rotation(img: np.ndarray, degrees: int) -> np.ndarray:
     return img
 
 
-def iter_frames(path: str, first_frame: int, last_frame: int):
-    """Yield (video_frame_index, bgr_array) for frames in [first_frame, last_frame)."""
+# A target frame this close ahead of the decoder is reached by decoding on rather than seeking:
+# a seek decodes forward from the preceding keyframe, on average half a GOP (60 frames for the
+# 120-frame GOPs of the GoPro cameras).
+_MAX_DECODE_AHEAD = 60
+
+
+def iter_frames(path: str, first_frame: int, last_frame: int, step: int = 1):
+    """Yield (video_frame_index, bgr_array) for frames in [first_frame, last_frame).
+
+    With *step* > 1 only every step-th frame, counted from *first_frame*, is yielded; the
+    others are decoded but not converted to BGR.
+    """
     _log.debug("iter_frames: opening %s (av=%s)", path, _AV_AVAILABLE)
     if _AV_AVAILABLE:
-        yield from _iter_frames_av(path, first_frame, last_frame)
+        yield from _iter_frames_av(path, first_frame, last_frame, step)
     else:
-        yield from _iter_frames_cv2(path, first_frame, last_frame)
+        yield from _iter_frames_cv2(path, first_frame, last_frame, step)
     _log.debug("iter_frames: closed %s", path)
 
 
-def _iter_frames_av(path: str, first_frame: int, last_frame: int):
+def _open_av_stream(container):
+    """Configure the first video stream; return (stream, time_base, container_fps, rotation)."""
+    stream = container.streams.video[0]
+    # NOT "AUTO": callers decode only part of the file and then close the container, i.e.
+    # always close *before* the decoder reaches the file's real EOF.
+    # With threaded decoding enabled, that close (avcodec_free_context())
+    # can hang indefinitely waiting on an FFmpeg-internal decode worker
+    # thread that's still mid-frame and never gets flushed -- confirmed
+    # live via py-spy: the main decode thread parked in
+    # avcodec_free_context()/avpriv_split_xiph_headers on a condition
+    # variable, an FFmpeg-spawned worker thread (visible as its own OS
+    # thread, created via beginthreadex) stuck inside av_parser_iterate.
+    # Single-threaded decode has no such worker thread to leak, so
+    # closing early is always safe -- the seek in _seek_av() already avoids
+    # most of the cost multi-threaded decode would have saved anyway.
+    stream.thread_type = "NONE"
+    time_base = float(stream.time_base)
+    # Use the container's own fps for seek/pts arithmetic — never
+    # actual_fps from the DB, which may reflect real-world capture rate
+    # (e.g. 120 for slow-motion) rather than the container's pts cadence.
+    container_fps = float(stream.average_rate)
+
+    # Rotation correction: PyAV does not apply container rotation
+    # automatically in to_ndarray().  Try stream metadata first (older
+    # cameras); fall back to DISPLAYMATRIX in frame side data (Pixel 7+).
+    rotation = _stream_rotation(stream)
+    rotation_source = "metadata"
+    if rotation == 0:
+        for probe_frame in container.decode(stream):
+            for sd in (probe_frame.side_data or []):
+                if "DISPLAYMATRIX" in str(sd.type).upper():
+                    rotation = _parse_displaymatrix(bytes(sd))
+                    rotation_source = "DISPLAYMATRIX"
+            break
+        container.seek(0, stream=stream, backward=True, any_frame=False)
+    if rotation:
+        _log.info("_open_av_stream: rotate=%d° from %s", rotation, rotation_source)
+    return stream, time_base, container_fps, rotation
+
+
+def _seek_av(container, stream, time_base: float, container_fps: float, first_frame: int) -> None:
+    """Position *container* at the keyframe at or before *first_frame*."""
+    if first_frame > 0:
+        seek_s = max(0.0, (first_frame - 1) / container_fps)
+        container.seek(int(seek_s / time_base), stream=stream, backward=True, any_frame=False)
+
+
+def _iter_frames_av(path: str, first_frame: int, last_frame: int, step: int):
     import av
     _log.debug("_iter_frames_av: av.open(%s)", path)
     with av.open(path) as container:
         _log.debug("_iter_frames_av: opened ok")
-        stream = container.streams.video[0]
-        # NOT "AUTO": every call here decodes only [first_frame, last_frame)
-        # and then the `with` block above closes the container -- i.e.
-        # always closes *before* the decoder reaches the file's real EOF.
-        # With threaded decoding enabled, that close (avcodec_free_context())
-        # can hang indefinitely waiting on an FFmpeg-internal decode worker
-        # thread that's still mid-frame and never gets flushed -- confirmed
-        # live via py-spy: the main decode thread parked in
-        # avcodec_free_context()/avpriv_split_xiph_headers on a condition
-        # variable, an FFmpeg-spawned worker thread (visible as its own OS
-        # thread, created via beginthreadex) stuck inside av_parser_iterate.
-        # Single-threaded decode has no such worker thread to leak, so
-        # closing early is always safe -- the seek() below already avoids
-        # most of the cost multi-threaded decode would have saved anyway.
-        stream.thread_type = "NONE"
-        time_base = float(stream.time_base)
-        # Use the container's own fps for seek/pts arithmetic — never
-        # actual_fps from the DB, which may reflect real-world capture rate
-        # (e.g. 120 for slow-motion) rather than the container's pts cadence.
-        container_fps = float(stream.average_rate)
-
-        # Rotation correction: PyAV does not apply container rotation
-        # automatically in to_ndarray().  Try stream metadata first (older
-        # cameras); fall back to DISPLAYMATRIX in frame side data (Pixel 7+).
-        rotation = _stream_rotation(stream)
-        rotation_source = "metadata"
-        if rotation == 0:
-            for probe_frame in container.decode(stream):
-                for sd in (probe_frame.side_data or []):
-                    if "DISPLAYMATRIX" in str(sd.type).upper():
-                        rotation = _parse_displaymatrix(bytes(sd))
-                        rotation_source = "DISPLAYMATRIX"
-                break
-            container.seek(0, stream=stream, backward=True, any_frame=False)
-        if rotation:
-            _log.info("_iter_frames_av: %s rotate=%d° from %s", path, rotation, rotation_source)
-
-        if first_frame > 0:
-            seek_s = max(0.0, (first_frame - 1) / container_fps)
-            seek_pts = int(seek_s / time_base)
-            container.seek(seek_pts, stream=stream, backward=True, any_frame=False)
+        stream, time_base, container_fps, rotation = _open_av_stream(container)
+        _seek_av(container, stream, time_base, container_fps, first_frame)
 
         frame_idx: int | None = None
         for av_frame in container.decode(stream):
@@ -146,14 +164,53 @@ def _iter_frames_av(path: str, first_frame: int, last_frame: int):
                 frame_idx = first_frame
             if frame_idx >= last_frame:
                 break
-            img = av_frame.to_ndarray(format="bgr24")
-            if rotation:
-                img = _apply_rotation(img, rotation)
-            yield frame_idx, img
+            # The colour conversion costs about as much as the decode at 4K, so frames the
+            # caller does not want are decoded (they are references of later ones) but not
+            # converted.
+            if (frame_idx - first_frame) % step == 0:
+                img = av_frame.to_ndarray(format="bgr24")
+                if rotation:
+                    img = _apply_rotation(img, rotation)
+                yield frame_idx, img
             frame_idx += 1
 
 
-def _iter_frames_cv2(path: str, first_frame: int, last_frame: int):
+def iter_frames_at(path: str, frame_indices):
+    """Yield (frame_index, bgr_array) at *frame_indices* of one video, through one open container.
+
+    Indices are visited in ascending order. A target shortly after the previous one is reached
+    by decoding on; a farther one by a seek, which decodes forward from the preceding keyframe.
+    Frames are labelled as ``iter_frames`` labels them: the first frame at or after the
+    target's presentation index is the target. An index past the end of the video is skipped.
+    """
+    wanted = sorted(set(frame_indices))
+    if not _AV_AVAILABLE:
+        for idx in wanted:
+            yield from _iter_frames_cv2(path, idx, idx + 1)
+        return
+    import av
+    with av.open(path) as container:
+        stream, time_base, container_fps, rotation = _open_av_stream(container)
+        decoder = None
+        last_pts_idx: int | None = None  # presentation index of the last frame decoded
+        for target in wanted:
+            if decoder is None or last_pts_idx is None or not 0 < target - last_pts_idx <= _MAX_DECODE_AHEAD:
+                _seek_av(container, stream, time_base, container_fps, target)
+                decoder = container.decode(stream)
+                last_pts_idx = None
+            for av_frame in decoder:
+                if av_frame.pts is None:
+                    continue
+                last_pts_idx = round(float(av_frame.pts) * time_base * container_fps)
+                if last_pts_idx >= target:
+                    img = av_frame.to_ndarray(format="bgr24")
+                    yield target, _apply_rotation(img, rotation) if rotation else img
+                    break
+            else:
+                decoder = None  # end of video
+
+
+def _iter_frames_cv2(path: str, first_frame: int, last_frame: int, step: int = 1):
     cap = cv2.VideoCapture(path)
     # cv2 does not auto-rotate on most backends; read the orientation flag
     # and apply it manually so the fallback path behaves the same as av.
@@ -166,8 +223,7 @@ def _iter_frames_cv2(path: str, first_frame: int, last_frame: int):
         ok, img = cap.read()
         if not ok:
             break
-        if rotation:
-            img = _apply_rotation(img, rotation)
-        yield frame_idx, img
+        if (frame_idx - first_frame) % step == 0:
+            yield frame_idx, _apply_rotation(img, rotation) if rotation else img
         frame_idx += 1
     cap.release()

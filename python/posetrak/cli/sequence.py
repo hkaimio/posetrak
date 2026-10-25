@@ -40,9 +40,23 @@ def sequence_group() -> None:
     help="With --object: also copy the run's reflective-dot candidates, for an object whose "
          "marker body has dots.",
 )
+@click.option(
+    "--dot-mask-seg-run", "dot_mask_seg_run", default=None, metavar="UUID",
+    help="Seg quality run ID (prefix accepted) whose person silhouette masks drop dot "
+         "candidates that fall well outside them -- a heuristic aid for a prop held in hand, "
+         "not a hard constraint. A frame with no stored mask keeps its candidates unfiltered.",
+)
+@click.option(
+    "--dot-mask-dilate-px", default=150.0, show_default=True, type=float,
+    help="Dilation radius, in the video's own native pixels, applied to the person silhouette "
+         "before testing dot candidates against it (--dot-mask-seg-run only).",
+)
 @click.option("--notes", default="", metavar="S")
 @click.pass_obj
-def sequence_finalise_object(obj: dict, run: str, object_ref: str | None, with_dots: bool, notes: str) -> None:
+def sequence_finalise_object(
+    obj: dict, run: str, object_ref: str | None, with_dots: bool,
+    dot_mask_seg_run: str | None, dot_mask_dilate_px: float, notes: str,
+) -> None:
     """Make the observation sequence of a tracked object from a marker run.
 
     Copies the run's coded-marker corners and reflective-dot candidates into one
@@ -67,7 +81,11 @@ def sequence_finalise_object(obj: dict, run: str, object_ref: str | None, with_d
                 run_id = derive_object_marker_run(
                     conn, run_id, _resolve_capture_object(conn, shot_id, object_ref), with_dots=with_dots,
                 )
-            sequence_id = finalise_object_to_db(conn, run_id, notes=notes)
+            seg_run_id = _resolve(conn, "seg_quality_runs", dot_mask_seg_run)
+            sequence_id = finalise_object_to_db(
+                conn, run_id, notes=notes,
+                dot_mask_seg_run_id=seg_run_id, dot_mask_dilate_px=dot_mask_dilate_px,
+            )
         except (ValueError, RuntimeError) as exc:
             raise click.ClickException(str(exc)) from exc
     finally:

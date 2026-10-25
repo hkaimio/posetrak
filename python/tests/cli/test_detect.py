@@ -159,6 +159,13 @@ class TestDetectList:
         assert result.exit_code != 0
 
 
+@pytest.fixture(autouse=True)
+def _no_model_weights_or_network(monkeypatch, tmp_path):
+    """No SOMA-77 weights on the machine."""
+    monkeypatch.setenv("POSETRAK_MODEL_DIR", str(tmp_path / "models"))
+    monkeypatch.delenv("POSETRAK_SOMA77_MODEL", raising=False)
+
+
 # ---------------------------------------------------------------------------
 # detect run (mocked)
 # ---------------------------------------------------------------------------
@@ -174,7 +181,7 @@ class TestDetectRun:
         )
 
     @patch("posetrak.cli.detect.DetectionPipeline")
-    @patch("posetrak.cli.detect.RTMPoseEstimator")
+    @patch("posetrak.cli.detect.create_estimator")
     @patch("posetrak.cli.detect.YOLOXDetector")
     def test_run_creates_db_row(
         self,
@@ -231,7 +238,7 @@ class TestDetectRun:
         mock_pipeline.run.assert_called_once()
 
     @patch("posetrak.cli.detect.DetectionPipeline")
-    @patch("posetrak.cli.detect.RTMPoseEstimator")
+    @patch("posetrak.cli.detect.create_estimator")
     @patch("posetrak.cli.detect.YOLOXDetector")
     def test_run_uses_correct_ids(
         self,
@@ -288,6 +295,321 @@ class TestDetectRun:
         result = _invoke(["detect", "run", "--capture", "x", "--sync", "y",
                           "--start", "0", "--end", "1"])
         assert result.exit_code != 0
+
+    @patch("posetrak.cli.detect.DetectionPipeline")
+    @patch("posetrak.cli.detect.create_estimator")
+    @patch("posetrak.cli.detect.YOLOXDetector")
+    def test_trial_supplies_time_range_default_and_gets_linked(
+        self, mock_det_cls, mock_rtm_cls, mock_pipeline_cls,
+        seeded_session_db_path: Path, capture_id: str, sync_id: str,
+    ) -> None:
+        """--trial with no --start/--end uses the trial's own range, and the
+        pipeline links the resulting run to it."""
+        from posetrak.db.db import generate_id as _gen_id
+
+        trial_id = _gen_id()
+        conn = sqlite3.connect(str(seeded_session_db_path))
+        conn.execute(
+            "INSERT INTO trials (id, capture_id, name, time_start_s, time_end_s) VALUES (?,?,?,?,?)",
+            (trial_id, capture_id, "Trial 1", 5.0, 15.0),
+        )
+        conn.commit()
+        conn.close()
+
+        mock_det_cls.return_value = MagicMock(name="yolo11x", _conf=0.3)
+        mock_est = MagicMock(input_size=(288, 384))
+        mock_rtm_cls.return_value = mock_est
+        expected_run_id = _gen_id()
+        mock_pipeline = MagicMock()
+        mock_pipeline.run.return_value = self._make_mock_pipeline_result(expected_run_id)
+        mock_pipeline_cls.return_value = mock_pipeline
+
+        result = _invoke(
+            ["detect", "run", "--capture", capture_id, "--sync", sync_id, "--trial", trial_id],
+            seeded_session_db_path,
+        )
+
+        assert result.exit_code == 0, result.output
+        call_kwargs = mock_pipeline_cls.call_args.kwargs
+        assert call_kwargs["time_start_s"] == 5.0
+        assert call_kwargs["time_end_s"] == 15.0
+        assert call_kwargs["trial_id"] == trial_id
+
+    def test_missing_time_range_and_trial_fails(
+        self, seeded_session_db_path: Path, capture_id: str, sync_id: str,
+    ) -> None:
+        result = _invoke(
+            ["detect", "run", "--capture", capture_id, "--sync", sync_id], seeded_session_db_path,
+        )
+        assert result.exit_code != 0
+        assert "--trial" in result.output
+
+
+# ---------------------------------------------------------------------------
+# detect run --segmentation (bbox source: existing Cutie segmentation)
+# ---------------------------------------------------------------------------
+
+
+class TestDetectRunSegmentation:
+    def _seed_segmentation(self, session_path: Path, capture_id: str) -> str:
+        from posetrak.db.db import generate_id as _gen_id
+
+        seg_id = _gen_id()
+        conn = sqlite3.connect(str(session_path))
+        # The capture's person "alice" gets registry label 1, the mask label.
+        conn.execute(
+            "INSERT INTO capture_persons (id, capture_id, name, created_at) "
+            "VALUES (?, ?, 'alice', '2026-01-01T00:00:00+00:00')",
+            (_gen_id(), capture_id),
+        )
+        conn.execute(
+            "INSERT INTO seg_quality_runs "
+            "(id, shot_id, time_start_s, time_end_s, created_at, quality_source, erosion_px) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (seg_id, capture_id, 0.0, 1.0, "2026-01-01T00:00:00+00:00", "cutie", 5),
+        )
+        conn.commit()
+        conn.close()
+        return seg_id
+
+    @patch("app.pose.finalise.auto_assign_and_finalise")
+    @patch("posetrak.cli.detect.create_estimator")
+    @patch("posetrak.cli.detect.DetectionPipeline")
+    def test_segmentation_sourced_run_bypasses_yolo(
+        self, mock_pipeline_cls, mock_create, mock_finalise,
+        seeded_session_db_path: Path, capture_id: str, sync_id: str,
+    ) -> None:
+        from posetrak.detection.box_sources import MaskBoxSource
+
+        seg_id = self._seed_segmentation(seeded_session_db_path, capture_id)
+        mock_finalise.return_value = ["seq1"]
+        mock_pipeline_cls.return_value.cameras = ["cam"]
+        mock_pipeline_cls.return_value.run.return_value = PipelineResult(detection_run_id="run-1")
+
+        result = _invoke(
+            ["detect", "run", "--capture", capture_id, "--sync", sync_id,
+             "--start", "0", "--end", "1", "--segmentation", seg_id],
+            seeded_session_db_path,
+        )
+
+        assert result.exit_code == 0, result.output
+        kwargs = mock_pipeline_cls.call_args.kwargs
+        assert isinstance(kwargs["box_source"], MaskBoxSource)
+        assert kwargs["box_source"].seg_quality_run_id == seg_id
+        assert kwargs["hand_pass"] is not None   # segmentation runs refine hands by default (RTMPose-133 fallback)
+        mock_finalise.assert_called_once()
+        finalise_kwargs = mock_finalise.call_args.kwargs
+        assert finalise_kwargs["detection_run_id"] == "run-1"
+        assert finalise_kwargs["persons_ordered"] == ["alice"]
+
+    @patch("app.pose.finalise.auto_assign_and_finalise")
+    @patch("posetrak.cli.detect.create_estimator")
+    @patch("posetrak.cli.detect.DetectionPipeline")
+    def test_mask_gate_margin_reaches_the_box_source(
+        self, mock_pipeline_cls, mock_create, mock_finalise,
+        seeded_session_db_path: Path, capture_id: str, sync_id: str,
+    ) -> None:
+        seg_id = self._seed_segmentation(seeded_session_db_path, capture_id)
+        mock_finalise.return_value = ["seq1"]
+        mock_pipeline_cls.return_value.cameras = ["cam"]
+        mock_pipeline_cls.return_value.run.return_value = PipelineResult(detection_run_id="run-1")
+        margins = []
+        for extra in ([], ["--mask-gate-margin", "0"]):
+            result = _invoke(
+                ["detect", "run", "--capture", capture_id, "--sync", sync_id,
+                 "--start", "0", "--end", "1", "--segmentation", seg_id, *extra],
+                seeded_session_db_path,
+            )
+            assert result.exit_code == 0, result.output
+            margins.append(mock_pipeline_cls.call_args.kwargs["box_source"].options()["mask_gate_margin_px"])
+        assert margins == [40.0, 0.0]
+
+    @patch("app.pose.finalise.auto_assign_and_finalise")
+    @patch("posetrak.cli.detect.create_estimator")
+    @patch("posetrak.cli.detect.DetectionPipeline")
+    def test_soma_segmentation_run_refines_hands_unless_told_not_to(
+        self, mock_pipeline_cls, mock_create, mock_finalise, monkeypatch,
+        seeded_session_db_path: Path, capture_id: str, sync_id: str,
+    ) -> None:
+        monkeypatch.setattr("posetrak.cli.detect.resolve_pose_model", lambda requested, **_: (requested, None))
+        seg_id = self._seed_segmentation(seeded_session_db_path, capture_id)
+        mock_finalise.return_value = ["seq1"]
+        mock_pipeline_cls.return_value.cameras = ["cam"]
+        mock_pipeline_cls.return_value.run.return_value = PipelineResult(detection_run_id="run-1")
+        args = ["detect", "run", "--capture", capture_id, "--sync", sync_id, "--start", "0", "--end", "1",
+                "--segmentation", seg_id, "--pose-model", "soma77-vitpose-h"]
+
+        _invoke(args, seeded_session_db_path)
+        assert mock_pipeline_cls.call_args.kwargs["hand_pass"] is not None
+        _invoke([*args, "--no-refine-hands"], seeded_session_db_path)
+        assert mock_pipeline_cls.call_args.kwargs["hand_pass"] is None
+
+    def test_segmentation_rejects_yolo_only_flags(
+        self, seeded_session_db_path: Path, capture_id: str, sync_id: str,
+    ) -> None:
+        seg_id = self._seed_segmentation(seeded_session_db_path, capture_id)
+        result = _invoke(
+            ["detect", "run", "--capture", capture_id, "--sync", sync_id,
+             "--start", "0", "--end", "1", "--segmentation", seg_id, "--detector", "yolox-m"],
+            seeded_session_db_path,
+        )
+        assert result.exit_code != 0
+        assert "--detector: not used when --segmentation" in result.output
+
+    def test_segmentation_and_from_run_are_alternatives(
+        self, seeded_session_db_path: Path, capture_id: str, sync_id: str,
+    ) -> None:
+        result = _invoke(
+            ["detect", "run", "--capture", capture_id, "--sync", sync_id, "--start", "0", "--end", "1",
+             "--segmentation", "a", "--from-run", "b"],
+            seeded_session_db_path,
+        )
+        assert result.exit_code != 0
+        assert "alternative box sources" in result.output
+
+
+# ---------------------------------------------------------------------------
+# detect run: pose model choice, box sources, hand pass
+# ---------------------------------------------------------------------------
+
+
+class TestDetectRunModels:
+    def _estimator(self, name: str = "rtmpose-l-133kp"):
+        mock_est = MagicMock(input_size=(288, 384))
+        mock_est.name = name
+        return mock_est
+
+    def _run(self, db: Path, capture_id: str, sync_id: str, *extra: str):
+        return _invoke(["detect", "run", "--capture", capture_id, "--sync", sync_id,
+                        "--start", "0", "--end", "1", *extra], db)
+
+    def test_prompt_pages_the_bundled_licence_texts_without_network(self, monkeypatch) -> None:
+        import socket
+
+        from posetrak.cli.detect import _licence_prompt
+        from posetrak.detection import model_weights
+
+        def no_network(*args, **kwargs):
+            raise AssertionError("the licence texts are bundled")
+
+        monkeypatch.setattr(socket.socket, "connect", no_network)
+        paged: list[str] = []
+        monkeypatch.setattr("click.echo_via_pager", paged.append)
+        monkeypatch.setattr("sys.stdin", MagicMock(isatty=lambda: False))
+
+        assert _licence_prompt(False)(model_weights.bundled_licences()) is False    # no terminal to confirm in
+        assert len(paged) == 2
+        assert "NVIDIA Open Model License Agreement" in paged[0] and "DINOv3 License Agreement" in paged[1]
+
+    @patch("posetrak.cli.detect.YOLOXDetector")
+    @patch("posetrak.cli.detect.create_estimator")
+    @patch("posetrak.cli.detect.DetectionPipeline")
+    def test_soma_is_the_default_and_declined_licences_fall_back_with_the_reason(
+        self, mock_pipeline_cls, mock_create, mock_det_cls, monkeypatch, tmp_path,
+        seeded_session_db_path: Path, capture_id: str, sync_id: str,
+    ) -> None:
+        monkeypatch.setenv("POSETRAK_MODEL_DIR", str(tmp_path))
+        monkeypatch.delenv("POSETRAK_SOMA77_MODEL", raising=False)
+        mock_create.return_value = self._estimator()
+        mock_pipeline_cls.return_value.cameras = ["cam"]
+        mock_pipeline_cls.return_value.run.return_value = PipelineResult(detection_run_id="run-1")
+
+        result = self._run(seeded_session_db_path, capture_id, sync_id)    # no terminal: the licences cannot be accepted
+
+        assert result.exit_code == 0, result.output
+        assert mock_create.call_args.args[0] == "rtmpose-l-133kp"
+        assert "not soma77-vitpose-h" in result.output and "not accepted" in result.output
+
+    @patch("posetrak.cli.detect.YOLOXDetector")
+    @patch("posetrak.cli.detect.create_estimator")
+    @patch("posetrak.cli.detect.DetectionPipeline")
+    def test_accept_licences_downloads_and_runs_soma(
+        self, mock_pipeline_cls, mock_create, mock_det_cls, monkeypatch, tmp_path,
+        seeded_session_db_path: Path, capture_id: str, sync_id: str,
+    ) -> None:
+        monkeypatch.setenv("POSETRAK_MODEL_DIR", str(tmp_path))
+        monkeypatch.delenv("POSETRAK_SOMA77_MODEL", raising=False)
+        downloads = []
+        monkeypatch.setattr("posetrak.detection.pose_model_choice.download_gemx",
+                            lambda accept, progress=None: downloads.append(accept([])) or tmp_path)
+        monkeypatch.setattr("posetrak.detection.pose_model_choice.soma77_model_path", lambda: None)
+        mock_create.return_value = self._estimator("soma77-vitpose-h")
+        mock_pipeline_cls.return_value.cameras = ["cam"]
+        mock_pipeline_cls.return_value.run.return_value = PipelineResult(detection_run_id="run-1")
+
+        result = self._run(seeded_session_db_path, capture_id, sync_id, "--accept-licences")
+
+        assert result.exit_code == 0, result.output
+        assert downloads == [True] and mock_create.call_args.args[0] == "soma77-vitpose-h"
+
+    @patch("posetrak.cli.detect.create_estimator")
+    @patch("posetrak.cli.detect.DetectionPipeline")
+    def test_from_run_reuses_the_boxes_and_finalises_with_the_source_assignments(
+        self, mock_pipeline_cls, mock_create, monkeypatch,
+        seeded_session_db_path: Path, capture_id: str, sync_id: str,
+    ) -> None:
+        from posetrak.detection.box_sources import RunBoxSource
+
+        source = _insert_run(seeded_session_db_path, capture_id, sync_id)
+        mock_create.return_value = self._estimator()
+        mock_pipeline_cls.return_value.cameras = ["cam"]
+        mock_pipeline_cls.return_value.run.return_value = PipelineResult(detection_run_id="run-2")
+        finalised = []
+        monkeypatch.setattr("app.pose.finalise.finalise_from_source_run",
+                            lambda session, run, src, model, **kw: finalised.append((run, src, model)) or ["seq"])
+
+        result = self._run(seeded_session_db_path, capture_id, sync_id, "--pose-model", "rtmpose-l-133kp",
+                           "--from-run", source[:8])
+
+        assert result.exit_code == 0, result.output
+        box_source = mock_pipeline_cls.call_args.kwargs["box_source"]
+        assert isinstance(box_source, RunBoxSource) and box_source.source_run_id == source
+        assert finalised == [("run-2", source, "rtmpose-l-133kp")]
+
+    @pytest.mark.parametrize("model", ["rtmpose-l-133kp", "soma77-vitpose-h"])
+    @patch("posetrak.cli.detect.YOLOXDetector")
+    @patch("posetrak.cli.detect.create_estimator")
+    @patch("posetrak.cli.detect.DetectionPipeline")
+    def test_hand_pass_runs_in_the_loop_for_yolox_boxes_by_default_for_soma_only(
+        self, mock_pipeline_cls, mock_create, mock_det_cls, model, monkeypatch,
+        seeded_session_db_path: Path, capture_id: str, sync_id: str,
+    ) -> None:
+        from posetrak.detection.hand_refinement import HandPass as RealHandPass
+
+        class StubHandPass:
+            supports = staticmethod(RealHandPass.supports)
+
+            def __init__(self, pose_model=None):
+                self.pose_model = pose_model
+
+        monkeypatch.setattr("posetrak.detection.hand_refinement.HandPass", StubHandPass)
+        monkeypatch.setattr("posetrak.cli.detect.resolve_pose_model", lambda requested, **_: (requested, None))
+        mock_create.return_value = self._estimator(model)
+        mock_pipeline_cls.return_value.cameras = ["cam"]
+        mock_pipeline_cls.return_value.run.return_value = PipelineResult(detection_run_id="run-1")
+
+        self._run(seeded_session_db_path, capture_id, sync_id, "--pose-model", model, "--refine-hands")
+        hand_pass = mock_pipeline_cls.call_args.kwargs["hand_pass"]
+        assert isinstance(hand_pass, StubHandPass) and hand_pass.pose_model == model
+        self._run(seeded_session_db_path, capture_id, sync_id, "--pose-model", model)
+        assert (mock_pipeline_cls.call_args.kwargs["hand_pass"] is not None) == model.startswith("soma77")
+
+
+def _insert_run(db: Path, capture_id: str, sync_id: str) -> str:
+    import datetime as _dt
+
+    from posetrak.db.db import generate_id
+
+    run_id = generate_id()
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO detection_runs (id, shot_id, sync_config_id, time_start_s, time_end_s, detector_model, pose_model,"
+        " status, created_at) VALUES (?,?,?,?,?,?,?,'complete',?)",
+        (run_id, capture_id, sync_id, 0.0, 10.0, "yolox-x", "rtmpose-l-133kp", _dt.datetime.now(_dt.timezone.utc).isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    return run_id
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +834,7 @@ class TestDetectRunMarkers:
             (["--type", "dots", "--dots-camera", "cam1", "--marker-ids", "3"], "--marker-ids: only for --type aruco"),
             (["--type", "aruco", "--marker-ids", "3", "--dot-threshold", "100"], "--dot-threshold: only used with --dots-camera"),
             (["--type", "dots", "--dots-camera", "cam1", "--conf", "0.5"], "--conf: only for --type pose"),
+            (["--type", "dots", "--dots-camera", "cam1", "--segmentation", "x"], "--segmentation: only for --type pose"),
             (["--type", "dots", "--dots-camera", "nope"], "no camera_instances with label 'nope'"),
             (["--type", "dots", "--dots-camera", "cam1", "--dot-threshold-by-camera", "cam1"], "expected LABEL=VALUE"),
             (["--type", "dots", "--dots-camera", "cam1", "--dot-threshold-by-camera", "cam1=high"], "bad value"),

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import Sequence
+
 import numpy as np
 
 # On Windows, onnxruntime-gpu's CUDA provider DLL looks for CUDA libraries
@@ -52,12 +54,41 @@ except ImportError:
     _RTMLIB_AVAILABLE = False
     _RTMLIB_VERSION = ""
 
+from posetrak.detection import stage_timing as st
 from posetrak.detection.backends import (
     PersonDetection,
     PoseResult,
     construct_with_corrupt_checkpoint_retry,
     register_estimator,
 )
+
+# Crops per model call. The models take any batch size; this bounds GPU memory.
+MAX_BATCH = 16
+
+
+def run_rtmlib_batch(
+    model, jobs: list[tuple[np.ndarray, np.ndarray]], max_batch: int = MAX_BATCH,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Keypoints and scores of an rtmlib pose model (RTMPose or ViTPose) on many crops in few calls.
+
+    *jobs* are ``(image, bbox_xyxy)`` pairs, the images of any size. Returns ``(keypoints [K, 2], scores [K])``
+    per job, identical to calling ``model(image, [bbox])`` per job: only the model call is batched, the crop
+    preparation and the output decoding are the model's own.
+    """
+    out: list[tuple[np.ndarray, np.ndarray]] = []
+    for lo in range(0, len(jobs), max_batch):
+        chunk = jobs[lo:lo + max_batch]
+        with st.stage("crop_preprocess"):
+            prepared = [model.preprocess(image, bbox) for image, bbox in chunk]
+            batch = np.stack([np.ascontiguousarray(img.transpose(2, 0, 1), dtype=np.float32) for img, _, _ in prepared])
+        with st.stage("inference"):
+            name = model.session.get_inputs()[0].name
+            outputs = model.session.run([o.name for o in model.session.get_outputs()], {name: batch})
+        with st.stage("heatmap_decode"):
+            for i, (_, center, scale) in enumerate(prepared):
+                kpts, scores = model.postprocess([o[i:i + 1] for o in outputs], center, scale)
+                out.append((kpts[0], scores[0]))
+    return out
 
 
 def _auto_device() -> str:
@@ -149,26 +180,27 @@ class RTMPoseEstimator:
         frame: np.ndarray,
         detections: list[PersonDetection],
     ) -> list[PoseResult]:
-        if not detections:
-            return []
+        return self.estimate_batch([(frame, detections)])[0]
 
-        # Convert xywh (centre) → xyxy for rtmlib
-        bboxes_xyxy = np.array([
-            [d.bbox[0] - d.bbox[2] / 2,
-             d.bbox[1] - d.bbox[3] / 2,
-             d.bbox[0] + d.bbox[2] / 2,
-             d.bbox[1] + d.bbox[3] / 2]
-            for d in detections
-        ], dtype=np.float32)
-
-        keypoints_all, scores_all = self._model(frame, bboxes_xyxy)
-        # keypoints_all: [N, n_kp, 2],  scores_all: [N, n_kp]
-
-        results: list[PoseResult] = []
-        for det, kp, sc in zip(detections, keypoints_all, scores_all):
-            kp_with_conf = np.concatenate(
-                [kp.astype(np.float32), sc[:, np.newaxis].astype(np.float32)],
-                axis=1,
-            )  # float32[n_kp, 3]
-            results.append(PoseResult(track_id=det.track_id, keypoints=kp_with_conf))
+    def estimate_batch(
+        self,
+        items: Sequence[tuple[np.ndarray, list[PersonDetection]]],
+    ) -> list[list[PoseResult]]:
+        jobs = [
+            (frame, np.array([d.bbox[0] - d.bbox[2] / 2, d.bbox[1] - d.bbox[3] / 2,
+                              d.bbox[0] + d.bbox[2] / 2, d.bbox[1] + d.bbox[3] / 2], dtype=np.float32))
+            for frame, detections in items for d in detections
+        ]
+        decoded = iter(run_rtmlib_batch(self._model, jobs))
+        results: list[list[PoseResult]] = []
+        for _, detections in items:
+            row = []
+            for det in detections:
+                kp, sc = next(decoded)
+                row.append(PoseResult(track_id=det.track_id, keypoints=np.concatenate(
+                    [kp.astype(np.float32), sc[:, np.newaxis].astype(np.float32)], axis=1)))
+            results.append(row)
         return results
+
+    def options(self) -> dict:
+        return {"model": self.name, "device": self.device, "max_batch": MAX_BATCH}

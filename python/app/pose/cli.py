@@ -38,8 +38,8 @@ def main() -> None:
 @click.option("--detector-conf", default=0.3, show_default=True, help="Detector confidence threshold.")
 @click.option(
     "--refine-hands/--no-refine-hands", default=True, show_default=True,
-    help="After the full-body pass, refine hand keypoints via a hand-specific "
-         "detection pass (rtmlib.Hand). Only has an effect for 133-keypoint pose models.",
+    help="Refine hand keypoints with a hand-specific model (rtmlib.Hand) on the frames already decoded. "
+         "Only has an effect for 133-keypoint pose models.",
 )
 def run(session_db, shot, sync, start, end, detector, pose_model, device, detector_conf, refine_hands):
     """Run person detection and pose estimation for a shot time range.
@@ -52,8 +52,9 @@ def run(session_db, shot, sync, start, end, detector, pose_model, device, detect
             --start 12 --end 105
     """
     from posetrak.detection.backends_rtmdet import YOLOXDetector
-    from posetrak.detection.backends_rtmpose import RTMPoseEstimator
+    from posetrak.detection.box_sources import YoloxBoxSource
     from posetrak.detection.pipeline import DetectionPipeline
+    from posetrak.detection.pose_model_choice import create_estimator
 
     session = open_session(Path(session_db))
     session.row_factory = __import__("sqlite3").Row
@@ -71,7 +72,12 @@ def run(session_db, shot, sync, start, end, detector, pose_model, device, detect
     click.echo()
 
     det = YOLOXDetector(model_name=detector, device=device, conf=detector_conf)
-    est = RTMPoseEstimator(model_name=pose_model, device=device)
+    est = create_estimator(pose_model, device=device)
+    hand_pass = None
+    if refine_hands and "133" in pose_model:
+        from posetrak.detection.hand_refinement import HandPass
+
+        hand_pass = HandPass()
 
     def on_progress(done: int, total: int, cam_id: str) -> None:
         pct = 100 * done / max(total, 1)
@@ -83,8 +89,9 @@ def run(session_db, shot, sync, start, end, detector, pose_model, device, detect
         sync_config_id=sync_id,
         time_start_s=start,
         time_end_s=end,
-        detector=det,
+        box_source=YoloxBoxSource(det),
         estimator=est,
+        hand_pass=hand_pass,
     )
 
     click.echo("Running detection + pose estimation...")
@@ -94,19 +101,6 @@ def run(session_db, shot, sync, start, end, detector, pose_model, device, detect
     click.echo(f"Cameras processed: {len(result.cameras_processed)}")
     click.echo(f"Frames processed:  {result.frames_processed}")
     click.echo(f"Status: {result.status}")
-
-    if refine_hands:
-        from posetrak.detection.hand_refinement import HandRefinementPipeline
-
-        def on_hand_progress(done: int, total: int, cam_id: str) -> None:
-            pct = 100 * done / max(total, 1)
-            click.echo(f"\r  {cam_id}: {done}/{total} frames ({pct:.0f}%)", nl=False)
-
-        click.echo("Refining hands...")
-        hand_pipeline = HandRefinementPipeline(session)
-        n_refined = hand_pipeline.run(result.detection_run_id, pipeline.cameras, on_progress=on_hand_progress)
-        click.echo()
-        click.echo(f"Hands refined: {n_refined}")
 
 
 @main.command(name="list-runs")

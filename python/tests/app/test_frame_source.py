@@ -94,3 +94,39 @@ def test_apply_rotation_90_matches_cv2_clockwise_convention():
 def test_apply_rotation_zero_is_identity():
     img = np.zeros((10, 20, 3), dtype=np.uint8)
     assert _apply_rotation(img, 0) is img
+
+
+def _write_video(path, n=30, gop=8):
+    """A video whose frame i is a flat grey of level 8*i."""
+    import av
+
+    with av.open(str(path), "w") as out:
+        stream = out.add_stream("mpeg4", rate=30)
+        stream.width, stream.height, stream.pix_fmt, stream.gop_size = 64, 48, "yuv420p", gop
+        for i in range(n):
+            frame = av.VideoFrame.from_ndarray(np.full((48, 64, 3), 8 * i, np.uint8), format="bgr24")
+            for packet in stream.encode(frame):
+                out.mux(packet)
+        for packet in stream.encode():
+            out.mux(packet)
+
+
+def _level(img) -> int:
+    return round(float(img.mean()) / 8)
+
+
+def test_iter_frames_step_yields_every_nth_frame(tmp_path):
+    from posetrak.detection.frame_source import iter_frames
+
+    _write_video(tmp_path / "v.mp4")
+    got = [(i, _level(im)) for i, im in iter_frames(str(tmp_path / "v.mp4"), 4, 28, step=6)]
+    assert got == [(4, 4), (10, 10), (16, 16), (22, 22)]
+
+
+def test_iter_frames_at_matches_single_frame_reads_for_seeks_and_decoding_on(tmp_path):
+    from posetrak.detection.frame_source import iter_frames_at
+
+    _write_video(tmp_path / "v.mp4")
+    # 5 and 7 share a GOP (decode on), 26 and 3 are out of order and far (seek), 99 is past the end
+    got = [(i, _level(im)) for i, im in iter_frames_at(str(tmp_path / "v.mp4"), [26, 5, 7, 3, 99])]
+    assert got == [(3, 3), (5, 5), (7, 7), (26, 26)]

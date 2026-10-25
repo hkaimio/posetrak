@@ -107,8 +107,10 @@ Before opening extrinsics calibration:
 
 Select the capture, then click its **Extrinsics…** button. This opens a
 status dialog — per-camera solved/not-solved summary — with
-**Calibrate…** (the native workflow this guide covers) and
-**Import TOML…** (import an externally-produced calibration instead).
+**Calibrate…** (the native workflow this guide covers),
+**Calibrate from box video…** (solve all cameras from one video of a
+handheld box, see [Calibrating from a box video](#calibrating-from-a-box-video))
+and **Import TOML…** (import an externally-produced calibration instead).
 
 > 📷 **Screenshot 2:** the Extrinsics status dialog, showing a mix of
 > solved and not-solved cameras.
@@ -279,6 +281,62 @@ session has stored — imported rig configs, and saved scene markers
 respectively — with a Delete button for pruning stale entries (a rig
 that's been physically moved, a tag that's no longer where it was saved).
 
+## Calibrating from a box video
+
+A calibration box (a [rig definition](#calibration-rig-definition-format)
+with markers on several faces) can be calibrated from, instead of placing
+points by hand. Film the box with every camera running: carry it through
+the scene so that each camera sees it, pause now and then, and finally set it
+down where it stays for a moment. Pauses can be short, and a phone-held box
+need not be held still on purpose; any moment when the box is at rest in the
+reference camera counts.
+
+Posetrak scans one **reference camera** for such *stationary windows* in the
+time range you give, and looks up the same instant in every other camera
+through the capture's sync table. Each window shows the box in one pose to
+all cameras at once, as a stationary board would.
+
+- The window seen by the most cameras fixes the world frame (the box's own
+  frame, shifted by **World Z offset** if you want Z=0 at the floor below the
+  box's reference marker). Every other window adds the box's corners as
+  unknown points. All of it is solved together.
+- When the box ended at rest in view of fewer cameras than that, the solved
+  scene is moved afterwards so that the world frame is the box at its final
+  resting position.
+- Windows with too few detected corners, or seen by fewer than two cameras,
+  are dropped and listed.
+
+**The result is judged per camera.** A table lists, for every camera, the
+windows it sees the box in, the number of observed box corners and the median,
+90th-percentile, mean and maximum reprojection error. If a camera is unsolved,
+never sees the box, has a median error above the threshold (5 px by default), or
+a 90th-percentile error above four times the threshold, the calibration
+**fails: nothing is saved**. Typical causes: a camera that sees
+the box in no window (move the box in front of it), a wrong camera label (see
+*Reassign cameras* in [Synchronizing videos](synchronizing-videos.md)), or a
+window where the box moved (exclude it and run again).
+
+In the dialog, choose the box, the reference camera and the scanned time
+range (set down the box *inside* the range), click **Run**, read the table
+and click **Save calibration** if it passed.
+
+From the command line:
+
+```
+posetrak --session session.db extrinsics box-video \
+    --capture <capture-id> --marker-body <box-id> --reference-camera gopro13_02 \
+    --time-start 6 --time-end 33
+```
+
+This is a dry run: the table is printed and the exit status is non-zero on
+failure. Add `--write` to store the result as a new calibration and link it
+to the capture. Other options: `--world-z-offset METRES`,
+`--exclude-window-ts S,S,...` (times from a previous run's window list),
+`--min-window-corners N`, `--max-median-error PX`, `--rig-dict` (ArUco
+dictionary for box markers whose definition names none) and
+`--residuals FILE.csv` (every box-corner observation's error, to find the
+window or corner that drags a camera's error up).
+
 ## Calibration rig definition format
 
 A calibration rig is described by a YAML file: a flat list of markers,
@@ -312,6 +370,9 @@ processing:
   cameras/frames, anchor, solve, and write the result.
 - `posetrak extrinsics reanchor` — re-anchor from previously-saved scene
   markers, no physical rig needed.
+- `posetrak extrinsics box-video` — calibrate all cameras from a video of a
+  handheld calibration box; fails with an error table when a camera does not
+  fit (see above).
 - `posetrak extrinsics import` / `list` — import a TOML calibration, or
   list what's stored for a session.
 - `posetrak extrinsics scene-marker list` / `groups` / `delete` — inspect

@@ -1,0 +1,285 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Joint hierarchy of the default body-and-hands skeletons: joints, types, parents, rest
+# orientations and the groups that can be solved as stages. Limits, dimensions and markers are
+# separate layers (posetrak.skeleton.compose).
+name: reallusion-no-waist
+units: meters
+joints:
+- name: hips
+  type: root
+  parent: null
+- name: spine1
+  type: ball
+  parent: hips
+  orientation: [-0.000327205897, -0.000304140645, -0.0737046003]
+- name: spine2
+  type: ball
+  parent: spine1
+  orientation: [0.00100958336, 0.000892505806, -0.0369948]
+- name: neck1
+  type: ball
+  parent: spine2
+  orientation: [-0.00510583818, -0.00576564949, 0.207596019]
+- name: neck2
+  type: ball
+  parent: neck1
+  orientation: [0.0142877866, 0.0184564609, 0.121028796]
+- name: head
+  type: ball
+  parent: neck2
+  orientation: [-0.0129507752, -0.0104207359, -0.217415422]
+- name: shoulder.L
+  type: ball
+  parent: spine2
+  orientation: [-1.28816974, -0.00925305299, -1.40826178]
+- name: upper_arm.L
+  type: ball
+  parent: shoulder.L
+  orientation: [1.19392669, 1.84219563, -1.17074692]
+- name: forearm.L
+  type: ball
+  parent: upper_arm.L
+  orientation: [-0.00623780861, -0.0444833003, 0.0176783949]
+- name: hand.L
+  type: ball
+  parent: forearm.L
+  orientation: [-0.0176529195, 0.0288651586, -0.00945848599]
+- name: f_index.01.L
+  type: ball
+  parent: hand.L
+  orientation: [-0.109849393, 1.35447419, 0.1201673]
+- name: f_index.02.L
+  type: ball
+  parent: f_index.01.L
+  orientation: [0.00540555362, -0.161000341, 0.089042604]
+- name: f_index.03.L
+  type: ball
+  parent: f_index.02.L
+  orientation: [-0.0400017835, 0.0383343399, -0.00327922124]
+- name: thumb.01.L
+  type: ball
+  parent: hand.L
+  orientation: [-0.0711261258, -2.65344453, 0.819106638]
+- name: thumb.02.L
+  type: ball
+  parent: thumb.01.L
+  orientation: [0.181572184, -0.0449371934, 0.359280646]
+- name: thumb.03.L
+  type: ball
+  parent: thumb.02.L
+  orientation: [-0.0596061833, 0.152122706, 0.0596391037]
+- name: f_middle.01.L
+  type: ball
+  parent: hand.L
+  orientation: [-0.0953940302, 1.20368302, 0.122683682]
+- name: f_middle.02.L
+  type: ball
+  parent: f_middle.01.L
+  orientation: [0.00499458984, 0.140424356, 0.0724475086]
+- name: f_middle.03.L
+  type: ball
+  parent: f_middle.02.L
+  orientation: [0.0225538351, 0.0238224734, -0.0688181594]
+- name: f_ring.01.L
+  type: ball
+  parent: hand.L
+  orientation: [-0.0235054772, 1.19417274, 0.030415399]
+- name: f_ring.02.L
+  type: ball
+  parent: f_ring.01.L
+  orientation: [-0.0191358179, -0.0155859878, 0.10829512]
+- name: f_ring.03.L
+  type: ball
+  parent: f_ring.02.L
+  orientation: [0.0534208529, -0.163941562, -0.0292077437]
+- name: f_pinky.01.L
+  type: ball
+  parent: hand.L
+  orientation: [-0.178771824, 1.22455204, 0.192099482]
+- name: f_pinky.02.L
+  type: ball
+  parent: f_pinky.01.L
+  orientation: [0.0140464446, -0.252638817, 0.0321885012]
+- name: f_pinky.03.L
+  type: ball
+  parent: f_pinky.02.L
+  orientation: [0.12319202, 0.276411355, -0.207774207]
+- name: shoulder.R
+  type: ball
+  parent: spine2
+  orientation: [1.28655994, 0.0126633001, -1.40519691]
+- name: upper_arm.R
+  type: ball
+  parent: shoulder.R
+  orientation: [-1.20916164, -1.84198916, -1.19114447]
+- name: forearm.R
+  type: ball
+  parent: upper_arm.R
+  orientation: [0.00471097464, 0.0425052904, 0.0147990594]
+- name: hand.R
+  type: ball
+  parent: forearm.R
+  orientation: [0.0172142107, -0.0291400105, -0.00809379295]
+- name: f_index.01.R
+  type: ball
+  parent: hand.R
+  orientation: [0.118751511, -1.35200548, 0.129518986]
+- name: f_index.02.R
+  type: ball
+  parent: f_index.01.R
+  orientation: [-0.00515556987, 0.158766404, 0.0867109001]
+- name: f_index.03.R
+  type: ball
+  parent: f_index.02.R
+  orientation: [0.0335074738, -0.0448503271, -0.00851854496]
+- name: thumb.01.R
+  type: ball
+  parent: hand.R
+  orientation: [0.0720367432, 2.65157604, 0.818504691]
+- name: thumb.02.R
+  type: ball
+  parent: thumb.01.R
+  orientation: [-0.182392716, 0.0456835367, 0.359039515]
+- name: thumb.03.R
+  type: ball
+  parent: thumb.02.R
+  orientation: [0.0596045144, -0.152193233, 0.0597669296]
+- name: f_middle.01.R
+  type: ball
+  parent: hand.R
+  orientation: [0.0949076191, -1.20384991, 0.122484922]
+- name: f_middle.02.R
+  type: ball
+  parent: f_middle.01.R
+  orientation: [-0.00455909735, -0.142466307, 0.0703370646]
+- name: f_middle.03.R
+  type: ball
+  parent: f_middle.02.R
+  orientation: [-0.0228675604, -0.0211911947, -0.066237025]
+- name: f_ring.01.R
+  type: ball
+  parent: hand.R
+  orientation: [0.024165988, -1.19391692, 0.0310990326]
+- name: f_ring.02.R
+  type: ball
+  parent: f_ring.01.R
+  orientation: [0.0182832386, 0.0125094699, 0.105443113]
+- name: f_ring.03.R
+  type: ball
+  parent: f_ring.02.R
+  orientation: [-0.052052252, 0.165611655, -0.0280759931]
+- name: f_pinky.01.R
+  type: ball
+  parent: hand.R
+  orientation: [0.178243876, -1.22469103, 0.192116305]
+- name: f_pinky.02.R
+  type: ball
+  parent: f_pinky.01.R
+  orientation: [-0.0128378347, 0.251890659, 0.0308531355]
+- name: f_pinky.03.R
+  type: ball
+  parent: f_pinky.02.R
+  orientation: [-0.122562237, -0.274623275, -0.20573011]
+- name: thigh.L
+  type: ball
+  parent: hips
+  orientation: [0.0175832827, -0.0175504908, -3.13976026]
+- name: shin.L
+  type: ball
+  parent: thigh.L
+  orientation: [0.00617601862, -0.00658670207, 0.0376866572]
+- name: foot.L
+  type: ball
+  parent: shin.L
+  orientation: [-0.0917255357, 0.207719207, -1.31633091]
+- name: toe.L
+  type: ball
+  parent: foot.L
+  orientation: [0.0178220123, 0.600058258, -0.11808496]
+- name: thigh.R
+  type: ball
+  parent: hips
+  orientation: [-0.0179027878, 0.0178774949, -3.14015365]
+- name: shin.R
+  type: ball
+  parent: thigh.R
+  orientation: [-0.00607771566, 0.00651109265, 0.0380907506]
+- name: foot.R
+  type: ball
+  parent: shin.R
+  orientation: [0.0933767185, -0.281359196, -1.30919957]
+- name: toe.R
+  type: ball
+  parent: foot.R
+  orientation: [-0.00785797369, -0.526981294, -0.112900972]
+groups:
+- name: main
+  joints:
+  - hips
+  - spine1
+  - spine2
+  - neck1
+  - neck2
+  - head
+  - shoulder.L
+  - upper_arm.L
+  - forearm.L
+  - hand.L
+  - shoulder.R
+  - upper_arm.R
+  - forearm.R
+  - hand.R
+  - thigh.L
+  - shin.L
+  - foot.L
+  - toe.L
+  - thigh.R
+  - shin.R
+  - foot.R
+  - toe.R
+  optional: false
+- name: HandL
+  depends_on: main
+  joints:
+  - hand.L
+  - thumb.01.L
+  - thumb.02.L
+  - thumb.03.L
+  - f_index.01.L
+  - f_index.02.L
+  - f_index.03.L
+  - f_middle.01.L
+  - f_middle.02.L
+  - f_middle.03.L
+  - f_ring.01.L
+  - f_ring.02.L
+  - f_ring.03.L
+  - f_pinky.01.L
+  - f_pinky.02.L
+  - f_pinky.03.L
+  freeflyer_joint: forearm.L
+  ref_marker: MRK-wrist.L
+- name: HandR
+  depends_on: main
+  joints:
+  - hand.R
+  - thumb.01.R
+  - thumb.02.R
+  - thumb.03.R
+  - f_index.01.R
+  - f_index.02.R
+  - f_index.03.R
+  - f_middle.01.R
+  - f_middle.02.R
+  - f_middle.03.R
+  - f_ring.01.R
+  - f_ring.02.R
+  - f_ring.03.R
+  - f_pinky.01.R
+  - f_pinky.02.R
+  - f_pinky.03.R
+  freeflyer_joint: forearm.R
+  ref_marker: MRK-wrist.R

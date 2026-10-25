@@ -878,6 +878,15 @@ TEST_CASE("find_dot_config_disagreement: names the first setting that differs",
     b = a;
     b.outlier_threshold = a.outlier_threshold + 1.0;
     REQUIRE(find_dot_config_disagreement({&a, &b}).empty());
+
+    b = a;
+    b.dot_seg_mask_enabled = !a.dot_seg_mask_enabled;
+    REQUIRE(find_dot_config_disagreement({&a, &b}) == "dot_seg_mask_enabled");
+
+    // Per-subject identity (which seg_run, which label) is NOT a TrackerConfig
+    // field -- it legitimately differs between subjects sharing one solve
+    // (segmentation-mask-dot-assignment-design.md §5.1), unlike every field
+    // checked above.
 }
 
 TEST_CASE("resolve_shared_dot_assignment: a subject cannot claim a candidate it does not own",
@@ -1276,4 +1285,741 @@ TEST_CASE("resolve_dot_assignment: per-camera noise scale composes with the stre
     REQUIRE(result.at(0).resolved.size() == 1);
     double const streak_noise = 5.0 + 2.0 / std::sqrt(12.0);
     REQUIRE(result.at(0).resolved[0].noise_std_override == Catch::Approx(streak_noise * 2.0));
+}
+
+// ---------------------------------------------------------------------------
+// AssignmentTrace: the "why was detection N (not) assigned to slot X in
+// frame F" instrumentation (sword-swing-tracking plan, 2026-09-27).
+// ---------------------------------------------------------------------------
+
+TEST_CASE(
+    "resolve_dot_assignment: trace records the clear winner, the modifier-"
+    "excluded candidate, and the gated-out-by-cost candidate",
+    "[dot_assignment]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0);
+
+    // Row 0: a clean match -- should win.
+    UnlabeledCandidate winner = make_candidate(0, 100.5, 200.5);
+    // Row 1: otherwise just as good a match, but owned by nobody --
+    // CandidateOwnershipModifier (always on by default) must exclude it.
+    UnlabeledCandidate unowned = make_candidate(0, 100.4, 200.4);
+    unowned.subject_mask = 0;
+    // Row 2: nobody excludes it, but it is nowhere near the prediction, so its
+    // own Mahalanobis cost exceeds the gate and solve_assignment() drops it.
+    UnlabeledCandidate far_away = make_candidate(0, 500.0, 900.0);
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {winner, unowned, far_away};
+
+    AssignmentTrace trace;
+    trace.start_frame = 0;
+    trace.end_frame = 0;
+
+    auto result =
+        resolve_dot_assignment({subject}, candidates, make_context(/*frame_idx=*/0), &trace);
+
+    REQUIRE(result.at(0).resolved.size() == 1);
+    REQUIRE(result.at(0).resolved[0].position == Eigen::Vector2d(100.5, 200.5));
+
+    // One column (marker 7) x three rows == three entries, in row order.
+    REQUIRE(trace.entries.size() == 3);
+
+    auto const& winner_entry = trace.entries[0];
+    CHECK(winner_entry.candidate_row == 0);
+    CHECK(winner_entry.marker_id == 7);
+    CHECK(winner_entry.subject_id == 0);
+    CHECK(winner_entry.excluded_by.empty());
+    CHECK(winner_entry.in_final_assignment);
+    CHECK(winner_entry.mahal_cost <= kGate);
+    CHECK(winner_entry.final_cost == winner_entry.mahal_cost);  // no modifier changed it
+
+    auto const& unowned_entry = trace.entries[1];
+    CHECK(unowned_entry.candidate_row == 1);
+    CHECK(unowned_entry.excluded_by == "candidate_ownership");
+    CHECK_FALSE(unowned_entry.in_final_assignment);
+
+    auto const& far_entry = trace.entries[2];
+    CHECK(far_entry.candidate_row == 2);
+    CHECK(far_entry.excluded_by.empty());  // no modifier fired -- cost alone gated it out
+    CHECK(far_entry.mahal_cost > kGate);
+    CHECK_FALSE(far_entry.in_final_assignment);
+}
+
+TEST_CASE("resolve_dot_assignment: trace outside its requested frame range stays empty",
+          "[dot_assignment]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0);
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {make_candidate(0, 100.5, 200.5)};
+
+    AssignmentTrace trace;
+    trace.start_frame = 10;
+    trace.end_frame = 20;
+
+    resolve_dot_assignment({subject}, candidates, make_context(/*frame_idx=*/0), &trace);
+
+    CHECK(trace.entries.empty());
+}
+
+TEST_CASE(
+    "resolve_dot_assignment: a marker with no valid candidate does not disturb a "
+    "different marker's already-good match",
+    "[dot_assignment]") {
+    // Reproduces a real failure found reviewing sword-swing footage: markerZ is
+    // genuinely absent this frame (occluded), but its least-bad candidate happens
+    // to be a row that is also markerY's own best match. Before the hopeless-cost
+    // clamp, the solver would displace markerY onto its own worse (but still
+    // gate-passing) second-choice candidate purely to shave a few points off
+    // markerZ's already-doomed (over-gate, always-dropped) pairing -- confirmed
+    // against scipy's linear_sum_assignment on the exact real cost matrix before
+    // fixing it. markerY must keep its true best match regardless of markerZ's
+    // hopelessness.
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][10] = make_prediction(100.0, 100.0);  // markerY
+    subject.predictions_by_camera[0][11] = make_prediction(100.0, 107.0);  // markerZ
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {
+        make_candidate(0, 100.2, 100.0),    // markerY's true best (cost ~0.01); also
+                                            // markerZ's least-bad option (cost ~12, over gate)
+        make_candidate(0, 104.5, 100.0),    // markerY's own worse-but-valid fallback (~5)
+        make_candidate(0, 1000.0, 1000.0),  // filler, hopeless for everyone
+    };
+
+    auto result = resolve_dot_assignment({subject}, candidates, make_context());
+
+    REQUIRE(result.at(0).resolved.size() == 1);
+    Observation const& obs = result.at(0).resolved[0];
+    CHECK(obs.marker_id == 10);                            // markerY, not markerZ
+    CHECK(obs.position == Eigen::Vector2d(100.2, 100.0));  // its true best, not the fallback
+}
+
+TEST_CASE("resolve_dot_assignment: a null trace pointer behaves exactly like no tracing",
+          "[dot_assignment]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0);
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {make_candidate(0, 100.5, 200.5)};
+
+    auto result = resolve_dot_assignment({subject}, candidates, make_context());
+
+    REQUIRE(result.at(0).resolved.size() == 1);
+}
+
+// ---------------------------------------------------------------------------
+// SegmentationMaskModifier (segmentation-mask-dot-assignment-design.md)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// A tiny hand-built mask: every pixel *outside* [x0,x1]x[y0,y1] is
+/// background (0), every pixel inside is *label*. native == mask resolution
+/// (no downscale), which keeps dilate_px arithmetic trivial in these tests.
+DecodedSegMask make_mask(int w, int h, int x0, int y0, int x1, int y1, int label) {
+    DecodedSegMask mask;
+    mask.mask_w = w;
+    mask.mask_h = h;
+    mask.native_w = w;
+    mask.native_h = h;
+    mask.labels.assign(static_cast<size_t>(w) * h, 0);
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            mask.labels[static_cast<size_t>(y) * w + x] = static_cast<std::uint8_t>(label);
+        }
+    }
+    mask.label_present[static_cast<size_t>(label)] = x1 >= x0 && y1 >= y0;
+    return mask;
+}
+
+DotSlotRef make_slot(int subject_id, int camera_id, int marker_id, MarkerPrediction const& pred) {
+    return DotSlotRef{subject_id, camera_id, marker_id, &pred};
+}
+
+}  // namespace
+
+TEST_CASE("SegmentationMaskModifier: no-op when the subject has no segmentation configured",
+          "[dot_assignment][seg_mask]") {
+    DotAssignmentContext context = make_context();
+    context.dot_seg_mask_min_tracklet_fraction = 0.3;
+    // seg_mask_subject deliberately left empty.
+    auto pred = make_prediction(0.0, 0.0);
+    UnlabeledCandidate cand = make_candidate(0, 500.0, 500.0);  // wildly off any real mask
+    cand.tracklet_id = 1;
+
+    SegmentationMaskModifier modifier;
+    CostSupport support = modifier.apply(make_slot(0, 0, 7, pred), cand, context);
+    REQUIRE_FALSE(support.exclude);
+    REQUIRE(support.factor == Catch::Approx(1.0));
+}
+
+TEST_CASE("SegmentationMaskModifier: mask_label<=0 for a configured subject is also a no-op",
+          "[dot_assignment][seg_mask]") {
+    DotAssignmentContext context = make_context();
+    context.seg_mask_subject[0] = SegMaskSubjectConfig{"seg-run", 0};  // label 0 = disabled
+    auto pred = make_prediction(0.0, 0.0);
+    UnlabeledCandidate cand = make_candidate(0, 500.0, 500.0);
+
+    SegmentationMaskModifier modifier;
+    CostSupport support = modifier.apply(make_slot(0, 0, 7, pred), cand, context);
+    REQUIRE_FALSE(support.exclude);
+    REQUIRE(support.factor == Catch::Approx(1.0));
+}
+
+TEST_CASE(
+    "SegmentationMaskModifier: a brand-new candidate (no tracklet history) is never "
+    "excluded, even off-mask",
+    "[dot_assignment][seg_mask]") {
+    DotAssignmentContext context = make_context();
+    context.seg_mask_subject[0] = SegMaskSubjectConfig{"seg-run", 1};
+    context.dot_seg_mask_min_tracklet_fraction = 0.9;  // strict -- would exclude if it applied
+    context.seg_masks_by_camera[0] = make_mask(100, 100, 10, 10, 20, 20, /*label=*/1);
+    TrackletMaskState state;  // empty: no history for any tracklet yet
+    context.tracklet_mask_state = &state;
+
+    // Well outside the label-1 region above.
+    UnlabeledCandidate cand = make_candidate(0, 90.0, 90.0);
+    cand.tracklet_id = 7;
+    auto pred = make_prediction(0.0, 0.0);
+
+    SegmentationMaskModifier modifier;
+    CostSupport support = modifier.apply(make_slot(0, 0, 7, pred), cand, context);
+    REQUIRE_FALSE(support.exclude);
+    REQUIRE(support.factor == Catch::Approx(1.0));
+}
+
+TEST_CASE("SegmentationMaskModifier: excludes only when off-mask now AND tracklet fraction is low",
+          "[dot_assignment][seg_mask]") {
+    DotAssignmentContext context = make_context();
+    context.seg_mask_subject[0] = SegMaskSubjectConfig{"seg-run", 1};
+    context.dot_seg_mask_min_tracklet_fraction = 0.3;
+    context.dot_seg_mask_dilate_px = 0.0;
+    context.seg_masks_by_camera[0] = make_mask(100, 100, 10, 10, 20, 20, /*label=*/1);
+
+    TrackletMaskState state;
+    // Tracklet 7's history: mostly out of mask (fraction well below 0.3).
+    for (int i = 0; i < 10; ++i)
+        state[0][0][7].add(false, 60);
+    context.tracklet_mask_state = &state;
+
+    auto pred = make_prediction(0.0, 0.0);
+    SegmentationMaskModifier modifier;
+
+    // Off-mask now AND bad history -> excluded.
+    UnlabeledCandidate off_mask_cand = make_candidate(0, 90.0, 90.0);
+    off_mask_cand.tracklet_id = 7;
+    CostSupport off_support = modifier.apply(make_slot(0, 0, 7, pred), off_mask_cand, context);
+    REQUIRE(off_support.exclude);
+
+    // Same bad-history tracklet, but this particular candidate IS in-mask now --
+    // signs disagree, so not excluded (still soft-penalised, see next test).
+    UnlabeledCandidate in_mask_cand = make_candidate(0, 15.0, 15.0);
+    in_mask_cand.tracklet_id = 7;
+    CostSupport in_support = modifier.apply(make_slot(0, 0, 7, pred), in_mask_cand, context);
+    REQUIRE_FALSE(in_support.exclude);
+}
+
+TEST_CASE("SegmentationMaskModifier: hard distance excludes a far candidate with no history",
+          "[dot_assignment][seg_mask]") {
+    DotAssignmentContext context = make_context();
+    context.seg_mask_subject[0] = SegMaskSubjectConfig{"seg-run", 1};
+    context.dot_seg_mask_dilate_px = 0.0;
+    context.dot_seg_mask_hard_distance_px = 30.0;
+    context.seg_masks_by_camera[0] = make_mask(200, 200, 10, 10, 20, 20, /*label=*/1);
+    TrackletMaskState state;  // empty: every tracklet is new
+    context.tracklet_mask_state = &state;
+
+    auto pred = make_prediction(0.0, 0.0);
+    SegmentationMaskModifier modifier;
+
+    UnlabeledCandidate far_cand = make_candidate(0, 120.0, 120.0);
+    far_cand.tracklet_id = 99;
+    REQUIRE(modifier.apply(make_slot(0, 0, 7, pred), far_cand, context).exclude);
+
+    // Beyond the dilation radius (0) but within the hard distance: not excluded.
+    UnlabeledCandidate near_cand = make_candidate(0, 40.0, 40.0);
+    near_cand.tracklet_id = 99;
+    REQUIRE_FALSE(modifier.apply(make_slot(0, 0, 7, pred), near_cand, context).exclude);
+
+    // Off (0) by default: the far candidate is judged only by history, which a
+    // new tracklet does not have.
+    context.dot_seg_mask_hard_distance_px = 0.0;
+    REQUIRE_FALSE(modifier.apply(make_slot(0, 0, 7, pred), far_cand, context).exclude);
+}
+
+TEST_CASE("SegmentationMaskModifier: hard distance is skipped when the mask lacks the label",
+          "[dot_assignment][seg_mask]") {
+    DotAssignmentContext context = make_context();
+    context.seg_mask_subject[0] = SegMaskSubjectConfig{"seg-run", 1};
+    context.dot_seg_mask_hard_distance_px = 30.0;
+    context.seg_masks_by_camera[0] = make_mask(200, 200, 10, 10, 20, 20, /*label=*/2);
+    TrackletMaskState state;
+    context.tracklet_mask_state = &state;
+
+    auto pred = make_prediction(0.0, 0.0);
+    UnlabeledCandidate cand = make_candidate(0, 120.0, 120.0);
+    cand.tracklet_id = 99;
+    SegmentationMaskModifier modifier;
+    REQUIRE_FALSE(modifier.apply(make_slot(0, 0, 7, pred), cand, context).exclude);
+}
+
+TEST_CASE(
+    "SegmentationMaskModifier: soft-scales cost by the tracklet fraction, up to the "
+    "configured ceiling",
+    "[dot_assignment][seg_mask]") {
+    DotAssignmentContext context = make_context();
+    context.seg_mask_subject[0] = SegMaskSubjectConfig{"seg-run", 1};
+    context.dot_seg_mask_cost_scale_at_zero_fraction = 4.0;
+    // No mask decoded this frame -- only the soft signal is exercised.
+    TrackletMaskState state;
+    for (int i = 0; i < 10; ++i)
+        state[0][0][7].add(false, 60);  // fraction 0.0
+    context.tracklet_mask_state = &state;
+
+    UnlabeledCandidate cand = make_candidate(0, 1.0, 1.0);
+    cand.tracklet_id = 7;
+    auto pred = make_prediction(0.0, 0.0);
+
+    SegmentationMaskModifier modifier;
+    CostSupport support = modifier.apply(make_slot(0, 0, 7, pred), cand, context);
+    REQUIRE_FALSE(support.exclude);  // no mask this frame -> hard-exclude never triggers
+    // factor = 1 / (1 + (scale-1)*(1-fraction)) = 1/(1 + 3*1) = 0.25 -> cost *= 4.
+    REQUIRE(support.factor == Catch::Approx(0.25));
+}
+
+TEST_CASE("SegmentationMaskModifier: a fully-trusted tracklet (fraction 1.0) is never penalised",
+          "[dot_assignment][seg_mask]") {
+    DotAssignmentContext context = make_context();
+    context.seg_mask_subject[0] = SegMaskSubjectConfig{"seg-run", 1};
+    TrackletMaskState state;
+    for (int i = 0; i < 10; ++i)
+        state[0][0][7].add(true, 60);  // fraction 1.0
+    context.tracklet_mask_state = &state;
+
+    UnlabeledCandidate cand = make_candidate(0, 1.0, 1.0);
+    cand.tracklet_id = 7;
+    auto pred = make_prediction(0.0, 0.0);
+
+    SegmentationMaskModifier modifier;
+    CostSupport support = modifier.apply(make_slot(0, 0, 7, pred), cand, context);
+    REQUIRE_FALSE(support.exclude);
+    REQUIRE(support.factor == Catch::Approx(1.0));
+}
+
+TEST_CASE(
+    "resolve_dot_assignment: an established bad tracklet loses to a fresh candidate "
+    "outside its mask",
+    "[dot_assignment][seg_mask]") {
+    // End-to-end: a wrong-lock tracklet (7) with a degraded in-mask history competes
+    // against a fresh candidate for the same slot; both are within the assignment
+    // gate of the prediction, but only the wrong-lock one is off-mask with a bad
+    // history, so the solver should still pick it *unless* SegmentationMaskModifier's
+    // exclusion removes it from contention -- this is the actual sword-swing failure
+    // mode (segmentation-mask-dot-assignment-design.md, intro) reproduced minimally.
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 100.0, /*std=*/20.0);
+
+    UnlabeledCandidate wrong_lock = make_candidate(0, 90.0, 90.0);  // closer to the prediction
+    wrong_lock.tracklet_id = 7;
+    UnlabeledCandidate fresh = make_candidate(0, 115.0, 100.0);  // farther, but well inside mask
+    fresh.tracklet_id = 8;
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {wrong_lock, fresh};
+
+    DotAssignmentContext context = make_context();
+    context.dot_seg_mask_enabled = true;
+    context.seg_mask_subject[0] = SegMaskSubjectConfig{"seg-run", 1};
+    context.dot_seg_mask_min_tracklet_fraction = 0.3;
+    context.dot_seg_mask_dilate_px = 0.0;
+    // Mask covers the region around (115,100) but not (90,90).
+    context.seg_masks_by_camera[0] = make_mask(200, 200, 105, 90, 125, 110, /*label=*/1);
+
+    TrackletMaskState state;
+    for (int i = 0; i < 10; ++i)
+        state[0][0][7].add(false, 60);  // tracklet 7's bad history
+    context.tracklet_mask_state = &state;
+
+    auto result = resolve_dot_assignment({subject}, candidates, context);
+
+    REQUIRE(result.count(0) == 1);
+    REQUIRE(result.at(0).resolved.size() == 1);
+    REQUIRE(result.at(0).resolved[0].tracklet_id == 8);
+}
+
+TEST_CASE("resolve_dot_assignment: updates the winning candidate's tracklet mask history",
+          "[dot_assignment][seg_mask]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(15.0, 15.0);
+
+    UnlabeledCandidate cand = make_candidate(0, 15.0, 15.0);  // inside the mask below
+    cand.tracklet_id = 42;
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {cand};
+
+    DotAssignmentContext context = make_context();
+    context.dot_seg_mask_enabled = true;
+    context.seg_mask_subject[0] = SegMaskSubjectConfig{"seg-run", 1};
+    context.seg_masks_by_camera[0] = make_mask(100, 100, 10, 10, 20, 20, /*label=*/1);
+    TrackletMaskState state;
+    context.tracklet_mask_state = &state;
+
+    auto result = resolve_dot_assignment({subject}, candidates, context);
+    REQUIRE(result.at(0).resolved.size() == 1);
+
+    auto frac = state[0][0][42].fraction(1);
+    REQUIRE(frac.has_value());
+    REQUIRE(*frac == Catch::Approx(1.0));  // the winning candidate was inside the mask
+}
+
+// ---------------------------------------------------------------------------
+// Keypoint candidates: KeypointClassModifier, the duplicate merge, and that each option of the
+// assignment changes only its own modifier.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+UnlabeledCandidate make_keypoint_candidate(int camera_id, double px, double py, int keypoint_idx,
+                                           double peak = 0.9) {
+    UnlabeledCandidate c = make_candidate(camera_id, px, py);
+    c.keypoint_idx = keypoint_idx;
+    c.confidence = peak;
+    c.crop_scale = 2.0;
+    c.merge_radius_px = 3.0;
+    return c;
+}
+
+}  // namespace
+
+TEST_CASE(
+    "KeypointClassModifier: a keypoint candidate pairs only with the marker bound to its keypoint",
+    "[dot_assignment][kp_candidates]") {
+    MarkerPrediction const prediction = make_prediction(100.0, 200.0);
+    DotAssignmentContext context = make_context();
+    context.subject_marker_keypoint[0] = {{7, 14}, {8, 19}};
+    KeypointClassModifier const modifier;
+    UnlabeledCandidate const left_hand = make_keypoint_candidate(0, 100.0, 200.0, 14);
+
+    CHECK_FALSE(modifier.apply({0, 0, 7, &prediction}, left_hand, context).exclude);
+    CHECK(modifier.apply({0, 0, 8, &prediction}, left_hand, context)
+              .exclude);  // another keypoint's marker
+    CHECK(modifier.apply({0, 0, 9, &prediction}, left_hand, context).exclude);  // a dot slot
+    CHECK(modifier.apply({1, 0, 7, &prediction}, left_hand, context)
+              .exclude);  // another subject's marker 7
+    // A dot never takes a keypoint's marker, and takes a dot slot as before.
+    UnlabeledCandidate const dot = make_candidate(0, 100.0, 200.0);
+    CHECK(modifier.apply({0, 0, 7, &prediction}, dot, context).exclude);
+    CHECK_FALSE(modifier.apply({0, 0, 9, &prediction}, dot, context).exclude);
+    CHECK(modifier.apply({0, 0, 7, &prediction}, left_hand, context).factor == 1.0);
+}
+
+TEST_CASE(
+    "default_cost_modifiers: the keypoint class is registered when a marker takes candidates, and "
+    "each "
+    "option adds only its own modifier",
+    "[dot_assignment][kp_candidates]") {
+    DotAssignmentContext context = make_context();
+    REQUIRE(default_cost_modifiers(context).size() == 1);  // ownership alone, as for dots
+
+    context.subject_marker_keypoint[0] = {{7, 14}};
+    auto modifiers = default_cost_modifiers(context);
+    REQUIRE(modifiers.size() == 2);
+    CHECK(dynamic_cast<KeypointClassModifier*>(modifiers[0].get()) != nullptr);
+    CHECK(dynamic_cast<CandidateOwnershipModifier*>(modifiers[1].get()) != nullptr);
+
+    // Strict mask adherence: SegmentationMaskModifier and nothing else.
+    DotAssignmentContext masked = context;
+    masked.dot_seg_mask_enabled = true;
+    masked.seg_mask_subject[0] = SegMaskSubjectConfig{"seg", 1};
+    TrackletMaskState state;
+    masked.tracklet_mask_state = &state;
+    modifiers = default_cost_modifiers(masked);
+    REQUIRE(modifiers.size() == 3);
+    CHECK(dynamic_cast<SegmentationMaskModifier*>(modifiers[2].get()) != nullptr);
+
+    // Multi-view agreement: CrossViewCorroborationModifier and nothing else.
+    DotAssignmentContext agreeing = context;
+    agreeing.dot_cross_view_corroboration_px = 12.0;
+    agreeing.dot_corroboration_gate_multiplier = 4.0;
+    agreeing.camera_fundamentals[(std::int64_t{0} << 32) | 1] = Eigen::Matrix3d::Identity();
+    modifiers = default_cost_modifiers(agreeing);
+    REQUIRE(modifiers.size() == 3);
+    CHECK(dynamic_cast<CandidateOwnershipModifier*>(modifiers[1].get()) != nullptr);
+    CHECK(dynamic_cast<CrossViewCorroborationModifier*>(modifiers[2].get()) != nullptr);
+}
+
+TEST_CASE(
+    "resolve_dot_assignment: keypoint candidates take the nearest candidate of the marker's own "
+    "keypoint",
+    "[dot_assignment][kp_candidates]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0, 4.0);  // keypoint 14
+    subject.predictions_by_camera[0][8] =
+        make_prediction(103.0, 200.0, 4.0);  // keypoint 19, 3 px away
+
+    DotAssignmentContext context = make_context(5, 0.5);
+    context.calib_noise_std = 5.0;
+    context.subject_marker_keypoint[0] = {{7, 14}, {8, 19}};
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {
+        make_keypoint_candidate(0, 101.0, 200.0, 19, 0.8),  // nearer to marker 7, but keypoint 19
+        make_keypoint_candidate(0, 108.0, 200.0, 14, 0.6),  // the weaker maximum of keypoint 14
+        make_keypoint_candidate(0, 103.5, 200.0, 19, 0.8),  // marker 8's best
+    };
+
+    auto result = resolve_dot_assignment({subject}, candidates, context);
+    REQUIRE(result.count(0) == 1);
+    auto const& resolved = result.at(0).resolved;
+    REQUIRE(resolved.size() == 2);
+    auto by_marker = [&](int marker_id) -> Observation const& {
+        auto it = std::find_if(resolved.begin(), resolved.end(),
+                               [&](Observation const& o) { return o.marker_id == marker_id; });
+        REQUIRE(it != resolved.end());
+        return *it;
+    };
+    // Marker 7 takes keypoint 14's only candidate, 8 px off, not the nearer keypoint 19 maximum.
+    CHECK(by_marker(7).position.x() == Catch::Approx(108.0));
+    CHECK(by_marker(8).position.x() == Catch::Approx(103.5));
+    // The observation carries what the fixed observation of the keypoint would: its peak as
+    // confidence and the crop scale for the noise model; no override.
+    CHECK(by_marker(7).confidence == Catch::Approx(0.6));
+    CHECK(by_marker(7).crop_scale == Catch::Approx(2.0));
+    CHECK(by_marker(7).noise_std_override == 0.0);
+}
+
+TEST_CASE(
+    "resolve_dot_assignment: the keypoint candidate's detection noise widens the gate like the "
+    "filter's innovation",
+    "[dot_assignment][kp_candidates]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0, 2.0);
+    DotAssignmentContext context = make_context();
+    context.subject_marker_keypoint[0] = {{7, 14}};
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {
+        make_keypoint_candidate(0, 112.0, 200.0, 14, 1.0)};  // 6 sigma of the state alone
+
+    context.calib_noise_std = 0.0;
+    CHECK(resolve_dot_assignment({subject}, candidates, context).empty());
+    context.calib_noise_std = 8.0;  // sigma^2 = 4 + 64: 12^2 / 68 = 2.1, inside the gate
+    CHECK(resolve_dot_assignment({subject}, candidates, context).size() == 1);
+    // A dot keeps the state's covariance alone, whatever the noise setting.
+    candidates[0] = {make_candidate(0, 112.0, 200.0)};
+    DotAssignmentContext dots = make_context();
+    dots.calib_noise_std = 8.0;
+    CHECK(resolve_dot_assignment({subject}, candidates, dots).empty());
+}
+
+TEST_CASE("append_unique_candidates: keypoint candidates of one image point merge across subjects",
+          "[dot_assignment][kp_candidates]") {
+    std::vector<UnlabeledCandidate> pool;
+    append_unique_candidates(pool,
+                             {make_keypoint_candidate(0, 100.0, 200.0, 14),
+                              make_keypoint_candidate(0, 300.0, 200.0, 14)},
+                             0b01);
+    // Subject 1 sees the first point 2.5 px away (within 3 px), another keypoint at the same place,
+    // and a point of keypoint 14 well away.
+    append_unique_candidates(pool,
+                             {make_keypoint_candidate(0, 102.5, 200.0, 14),
+                              make_keypoint_candidate(0, 100.0, 200.0, 19),
+                              make_keypoint_candidate(0, 150.0, 200.0, 14)},
+                             0b10);
+    REQUIRE(pool.size() == 4);
+    CHECK(pool[0].subject_mask == 0b11);                  // the union
+    CHECK(pool[0].position.x() == Catch::Approx(100.0));  // the first keeps its position
+    CHECK(pool[1].subject_mask == 0b01);
+    CHECK(pool[2].keypoint_idx == 19);
+    CHECK(pool[2].subject_mask == 0b10);
+    CHECK(pool[3].subject_mask == 0b10);
+
+    // Beyond the radius, in another frame, or another camera's: separate candidates.
+    std::vector<UnlabeledCandidate> other;
+    append_unique_candidates(other, {make_keypoint_candidate(0, 100.0, 200.0, 14)}, 0b01);
+    UnlabeledCandidate later = make_keypoint_candidate(0, 100.0, 200.0, 14);
+    later.frame_idx = 1;
+    UnlabeledCandidate far = make_keypoint_candidate(0, 103.5, 200.0, 14);
+    append_unique_candidates(other, {later, far}, 0b10);
+    CHECK(other.size() == 3);
+}
+
+TEST_CASE("append_unique_candidates: the radius is the smaller of the two candidates'",
+          "[dot_assignment][kp_candidates]") {
+    std::vector<UnlabeledCandidate> pool;
+    UnlabeledCandidate wide = make_keypoint_candidate(0, 100.0, 200.0, 14);
+    wide.merge_radius_px = 8.0;
+    append_unique_candidates(pool, {wide}, 0b01);
+    UnlabeledCandidate near =
+        make_keypoint_candidate(0, 106.0, 200.0, 14);  // 6 px: inside 8, outside 3
+    near.merge_radius_px = 3.0;
+    append_unique_candidates(pool, {near}, 0b10);
+    CHECK(pool.size() == 2);
+    UnlabeledCandidate wide2 = make_keypoint_candidate(0, 106.0, 200.0, 14);
+    wide2.merge_radius_px = 8.0;
+    append_unique_candidates(pool, {wide2}, 0b100);
+    CHECK(pool.size() == 2);
+    CHECK(pool[0].subject_mask == 0b101);
+}
+
+TEST_CASE(
+    "resolve_dot_assignment: without mask or agreement a keypoint candidate wins by prediction "
+    "alone",
+    "[dot_assignment][kp_candidates]") {
+    // Two candidates of one keypoint; the options off, the one nearer the prediction wins whatever
+    // its tracklet or position in the mask. Turning on corroboration changes only a corroborated
+    // pair's cost.
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0, 4.0);
+    DotAssignmentContext context = make_context();
+    context.subject_marker_keypoint[0] = {{7, 14}};
+    context.calib_noise_std = 5.0;
+
+    UnlabeledCandidate near = make_keypoint_candidate(0, 101.0, 200.0, 14);
+    near.tracklet_id = 1;
+    UnlabeledCandidate far = make_keypoint_candidate(0, 108.0, 200.0, 14);
+    far.tracklet_id = 2;
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {far, near};
+
+    auto plain = resolve_dot_assignment({subject}, candidates, context);
+    REQUIRE(plain.at(0).resolved.size() == 1);
+    CHECK(plain.at(0).resolved[0].tracklet_id == 1);
+
+    // A mask enabled but no subject identity or history: the modifier is not even registered.
+    DotAssignmentContext no_identity = context;
+    no_identity.dot_seg_mask_enabled = true;
+    auto same = resolve_dot_assignment({subject}, candidates, no_identity);
+    REQUIRE(same.at(0).resolved.size() == 1);
+    CHECK(same.at(0).resolved[0].position.x() == Catch::Approx(101.0));
+}
+
+TEST_CASE("resolve_dot_assignment: at equal distance the stronger keypoint candidate wins",
+          "[dot_assignment][kp_candidates]") {
+    // Symmetric about the prediction; the weak maximum's wider detection noise gives it a wider
+    // covariance. A cost on the squared Mahalanobis distance alone prefers the weak one: its
+    // distance is divided by more.
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0, 4.0);
+    DotAssignmentContext context = make_context();
+    context.subject_marker_keypoint[0] = {{7, 14}};
+    context.calib_noise_std = 5.0;
+
+    UnlabeledCandidate strong = make_keypoint_candidate(0, 103.0, 200.0, 14, 0.9);
+    strong.tracklet_id = 1;
+    UnlabeledCandidate weak = make_keypoint_candidate(0, 97.0, 200.0, 14, 0.3);
+    weak.tracklet_id = 2;
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {weak, strong};
+
+    for (double const peak_weight : {0.0, 1.0, 3.0}) {
+        context.kp_candidate_peak_weight = peak_weight;
+        auto result = resolve_dot_assignment({subject}, candidates, context);
+        REQUIRE(result.at(0).resolved.size() == 1);
+        CHECK(result.at(0).resolved[0].tracklet_id == 1);
+    }
+}
+
+TEST_CASE("resolve_dot_assignment: the likelihood terms leave the gate on the distance alone",
+          "[dot_assignment][kp_candidates]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0, 4.0);
+    DotAssignmentContext context = make_context();
+    context.subject_marker_keypoint[0] = {{7, 14}};
+    context.calib_noise_std = 5.0;
+    context.kp_candidate_peak_weight = 5.0;  // a peak above 1 makes the term negative
+
+    // Far outside the gate, however strong; and a near one that passes.
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> far_only;
+    far_only[0] = {make_keypoint_candidate(0, 160.0, 200.0, 14, 4.0)};
+    CHECK(resolve_dot_assignment({subject}, far_only, context).count(0) == 0);
+
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> both;
+    both[0] = {make_keypoint_candidate(0, 160.0, 200.0, 14, 4.0),
+               make_keypoint_candidate(0, 102.0, 200.0, 14, 0.2)};
+    auto result = resolve_dot_assignment({subject}, both, context);
+    REQUIRE(result.at(0).resolved.size() == 1);
+    CHECK(result.at(0).resolved[0].position.x() == Catch::Approx(102.0));
+}
+
+TEST_CASE("resolve_dot_assignment: the keypoint cost settings do not change a dot-only assignment",
+          "[dot_assignment][kp_candidates]") {
+    SubjectDotPredictions a;
+    a.subject_id = 0;
+    a.predictions_by_camera[0][1] = make_prediction(100.0, 100.0, 5.0);
+    a.predictions_by_camera[0][2] = make_prediction(120.0, 100.0, 5.0);
+    SubjectDotPredictions b;
+    b.subject_id = 1;
+    b.predictions_by_camera[0][1] = make_prediction(103.0, 100.0, 5.0);
+
+    UnlabeledCandidate c1 = make_candidate(0, 101.0, 100.0);
+    c1.confidence = 3.0;
+    UnlabeledCandidate c2 = make_candidate(0, 121.0, 101.0);
+    c2.confidence = 0.1;
+    UnlabeledCandidate c3 = make_candidate(0, 400.0, 400.0);
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {c1, c2, c3};
+
+    auto const base = resolve_dot_assignment({a, b}, candidates, make_context());
+    DotAssignmentContext context = make_context();
+    context.kp_candidate_peak_weight = 2.0;
+    context.kp_candidate_tracklet_multiplier = 4.0;
+    auto const changed = resolve_dot_assignment({a, b}, candidates, context);
+
+    REQUIRE(changed.size() == base.size());
+    for (auto const& [subject_id, expected] : base) {
+        REQUIRE(changed.at(subject_id).resolved.size() == expected.resolved.size());
+        for (size_t i = 0; i < expected.resolved.size(); ++i) {
+            CHECK(changed.at(subject_id).resolved[i].marker_id == expected.resolved[i].marker_id);
+            CHECK(changed.at(subject_id).resolved[i].position == expected.resolved[i].position);
+        }
+    }
+    CHECK_FALSE(base.empty());
+}
+
+TEST_CASE(
+    "resolve_dot_assignment: tracklet continuity of a keypoint candidate is per slot and keypoint",
+    "[dot_assignment][kp_candidates]") {
+    SubjectDotPredictions subject;
+    subject.subject_id = 0;
+    subject.predictions_by_camera[0][7] = make_prediction(100.0, 200.0, 4.0);
+    subject.predictions_by_camera[0][8] = make_prediction(100.0, 300.0, 4.0);
+    DotAssignmentContext context = make_context();
+    context.subject_marker_keypoint[0] = {{7, 14}, {8, 19}};
+    context.calib_noise_std = 5.0;
+    context.prev_tracklet_ids[0][0][7] = 5;
+    context.prev_tracklet_ids[0][0][8] = 6;
+
+    // 24 px from the prediction: 12.3 beyond the gate unmodified, 6.1 with a factor of 2.
+    UnlabeledCandidate continues = make_keypoint_candidate(0, 124.0, 200.0, 14);
+    continues.tracklet_id = 5;
+    UnlabeledCandidate other_keypoint = make_keypoint_candidate(0, 124.0, 300.0, 19);
+    other_keypoint.tracklet_id = 5;  // not the tracklet of marker 8's previous step
+    std::unordered_map<int, std::vector<UnlabeledCandidate>> candidates;
+    candidates[0] = {continues, other_keypoint};
+
+    CHECK(resolve_dot_assignment({subject}, candidates, context).count(0) == 0);
+
+    context.kp_candidate_tracklet_multiplier = 2.0;
+    auto result = resolve_dot_assignment({subject}, candidates, context);
+    REQUIRE(result.at(0).resolved.size() == 1);
+    CHECK(result.at(0).resolved[0].marker_id == 7);
+
+    // The dot multiplier does not apply to a keypoint candidate.
+    context.kp_candidate_tracklet_multiplier = 1.0;
+    context.dot_tracklet_gate_multiplier = 2.0;
+    CHECK(resolve_dot_assignment({subject}, candidates, context).count(0) == 0);
 }

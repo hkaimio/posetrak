@@ -37,6 +37,42 @@ struct VelocityNoiseScope {
 /**
  * @brief Configuration parameters for Tracker
  */
+/// @brief Settings of the windowed choice of keypoint candidates (keypoint_window_choice.hpp).
+/// Stored in the tracker_configs columns kp_candidate_choice, kp_choice_*, kp_strict_filter* and
+/// kp_mask_term_*; see docs/roadmap/features/keypoint-candidates/keypoint-candidates-design.md,
+/// section 10.
+struct KeypointChoiceConfig {
+    /// True: choose the candidates over a time window before the first filter step and feed the
+    /// picks to the filter as fixed observations. False: the per-step assignment of the shared
+    /// dot-assignment phase. Only read when TrackerConfig::kp_candidates_enabled.
+    bool window = false;
+    /// Half width in seconds of the window the neighbour and cross-camera support are averaged
+    /// over.
+    double support_window_s = 1.0;
+    double delta = 1.0;  ///< Weight of the cross-camera support.
+    double beta = 0.3;   ///< Weight of the multi-camera consensus flag.
+    double gamma =
+        0.2;  ///< Weight of the heatmap peak (the stored peak over the model's confidence scale).
+    int rounds = 3;
+    /// Score lost by a change of candidate (another tracklet, or a jump) between consecutive frames
+    /// in the chain the last round picks; 0 = every frame takes its best score on its own.
+    double switch_penalty = 0.0;
+    /// Box heights per frame above which a move of the pick is a change.
+    double jump_box = 0.04;
+    /// Camera ids (Camera::id()) that take no part: they keep their fixed observations.
+    std::vector<int> skip_camera_ids;
+    /// Remove candidates whose tracklet mostly lies off the person's own mask (needs masks).
+    bool strict_filter = false;
+    int strict_filter_window_frames = 10;     ///< Half width in video frames.
+    double strict_filter_min_fraction = 0.5;  ///< Smallest in-mask share of the detections.
+    /// Comma-separated keypoint classes the strict filter applies to; hand and foot masks are
+    /// too thin and too often wrong in contact for it.
+    std::string strict_filter_classes = "body";
+    double mask_term_weight = 0.0;    ///< Soft mask term in the score; 0 = off (needs masks).
+    double mask_term_window_s = 2.0;  ///< Half width in seconds of its window.
+    std::string mask_term_classes = "body";  ///< Comma-separated keypoint classes it applies to.
+};
+
 struct TrackerConfig {
     // UKF parameters
     double process_noise_std = 0.1;  ///< Process noise std for angle/position DOFs
@@ -141,6 +177,45 @@ struct TrackerConfig {
     /// the mean of every camera's median (so a camera worse than the mean is
     /// trusted less, better trusted more).
     std::unordered_map<int, double> dot_camera_noise_scale;
+
+    // === Segmentation-mask-based dot-assignment trust ===
+    // See docs/roadmap/features/marker-based-mocap/segmentation-mask-dot-assignment-design.md.
+    // Shared tunables only -- per-subject identity (which seg_run, which label) is
+    // supplied separately per subject (DotAssignmentSubject::seg_mask), not here,
+    // since it legitimately differs between subjects sharing one solve the way
+    // these tunables must not (see SegMaskSubjectConfig's own doc comment).
+    bool dot_seg_mask_enabled = false;
+    double dot_seg_mask_dilate_px = 20.0;
+    int dot_seg_mask_tracklet_window = 60;
+    double dot_seg_mask_min_tracklet_fraction = 0.3;
+    double dot_seg_mask_cost_scale_at_zero_fraction = 4.0;
+    /// A candidate farther than this many native pixels from its subject's mask label in
+    /// the current frame cannot be assigned to that subject's slots, whatever its
+    /// tracklet's history (a young tracklet has none). 0 = off. Skipped for a camera
+    /// whose mask does not contain the label at all.
+    double dot_seg_mask_hard_distance_px = 0.0;
+
+    /// Use the sequence's keypoint candidates (pose_observations source 'kp_candidates') through
+    /// the shared assignment instead of the fixed body observations, for the markers bound to the
+    /// pose model of those candidates. The dot_* settings above govern them like dots. False: the
+    /// fixed observations are used even if the sequence holds candidates. The hand stages of a
+    /// hierarchical run always keep their refined-hand observations.
+    bool kp_candidates_enabled = false;
+
+    /// Weight of the peak term in the assignment cost of a keypoint candidate: the cost is the
+    /// squared Mahalanobis distance plus ln det S (S the slot covariance with the candidate's
+    /// detection noise) minus this weight times ln(peak). 0 leaves the peak out of the cost. A dot
+    /// has no peak and no extra term.
+    double kp_candidate_peak_weight = 0.0;
+
+    /// Divides the squared Mahalanobis distance of a keypoint candidate that continues the tracklet
+    /// resolved into the same (camera, marker) slot on the previous step, like
+    /// dot_tracklet_gate_multiplier does for a dot. 1.0 turns it off.
+    double kp_candidate_tracklet_multiplier = 1.0;
+
+    /// Choice of the keypoint candidates over a time window instead of per step; see
+    /// KeypointChoiceConfig.
+    KeypointChoiceConfig kp_choice;
 
     // === Streak-derived dot velocity ===
     // See docs/roadmap/features/marker-based-mocap/streak-velocity-design.md §3/§4.
@@ -381,6 +456,22 @@ struct TrackerAppConfig {
     std::unordered_map<int, double>
         dot_camera_noise_scale;  ///< See TrackerConfig's own field doc comment.
 
+    // === Segmentation-mask-based dot-assignment trust === (see TrackerConfig's own field doc
+    // comments)
+    bool dot_seg_mask_enabled = false;
+    double dot_seg_mask_dilate_px = 20.0;
+    int dot_seg_mask_tracklet_window = 60;
+    double dot_seg_mask_min_tracklet_fraction = 0.3;
+    double dot_seg_mask_cost_scale_at_zero_fraction = 4.0;
+    /// A candidate farther than this many native pixels from its subject's mask label in
+    /// the current frame cannot be assigned to that subject's slots, whatever its
+    /// tracklet's history (a young tracklet has none). 0 = off. Skipped for a camera
+    /// whose mask does not contain the label at all.
+    double dot_seg_mask_hard_distance_px = 0.0;
+    bool kp_candidates_enabled = false;             ///< See TrackerConfig's own field doc comment.
+    double kp_candidate_peak_weight = 0.0;          ///< See TrackerConfig's own field doc comment.
+    double kp_candidate_tracklet_multiplier = 1.0;  ///< See TrackerConfig's own field doc comment.
+
     // === Streak-derived dot velocity === (see TrackerConfig's own field doc comments)
     bool dot_streak_velocity_enabled = false;
     int dot_streak_k_window = 200;
@@ -535,6 +626,15 @@ inline TrackerConfig TrackerAppConfig::to_tracker_config() const {
     tc.dot_cross_view_corroboration_px = dot_cross_view_corroboration_px;
     tc.dot_corroboration_gate_multiplier = dot_corroboration_gate_multiplier;
     tc.dot_camera_noise_scale = dot_camera_noise_scale;
+    tc.dot_seg_mask_enabled = dot_seg_mask_enabled;
+    tc.dot_seg_mask_dilate_px = dot_seg_mask_dilate_px;
+    tc.dot_seg_mask_tracklet_window = dot_seg_mask_tracklet_window;
+    tc.dot_seg_mask_min_tracklet_fraction = dot_seg_mask_min_tracklet_fraction;
+    tc.dot_seg_mask_cost_scale_at_zero_fraction = dot_seg_mask_cost_scale_at_zero_fraction;
+    tc.dot_seg_mask_hard_distance_px = dot_seg_mask_hard_distance_px;
+    tc.kp_candidates_enabled = kp_candidates_enabled;
+    tc.kp_candidate_peak_weight = kp_candidate_peak_weight;
+    tc.kp_candidate_tracklet_multiplier = kp_candidate_tracklet_multiplier;
     tc.dot_streak_velocity_enabled = dot_streak_velocity_enabled;
     tc.dot_streak_k_window = dot_streak_k_window;
     tc.dot_streak_k_min_samples = dot_streak_k_min_samples;

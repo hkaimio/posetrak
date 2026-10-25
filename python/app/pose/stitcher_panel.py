@@ -350,6 +350,12 @@ class StitcherPanel(QWidget):
         self._view_combo.addItem("By Person", userData="person")
         self._view_combo.currentIndexChanged.connect(self._on_view_mode_changed)
         header_row.addWidget(self._view_combo)
+        # stretches `detect assign` asks to check; shown only when its report exists
+        self._check_combo = QComboBox()
+        self._check_combo.setMinimumWidth(320)
+        self._check_combo.activated.connect(self._on_check_chosen)
+        self._check_combo.hide()
+        header_row.addWidget(self._check_combo)
         header_row.addStretch()
         root.addLayout(header_row)
 
@@ -455,9 +461,32 @@ class StitcherPanel(QWidget):
                 }
 
         self._populate_known_persons()
+        self._load_check_list()
         self._stitcher.load_run(self._conn, self._run_id)
         self._restore_assignments()
         self._last_applied = dict(self._assignments)
+
+    def _load_check_list(self) -> None:
+        """List the stretches the report of `detect assign` asks to check (contacts, hand-overs, splits, ...)."""
+        from posetrak.detection.assign_run import load_report
+
+        db = next((r[2] for r in self._conn.execute("PRAGMA database_list") if r[1] == "main"), "")
+        report = load_report(db, self._run_id) if db else None
+        self._check_combo.clear()
+        if not report or not report["checks"]:
+            self._check_combo.hide()
+            return
+        self._check_combo.addItem(f"To check ({len(report['checks'])})")
+        for c in sorted(report["checks"], key=lambda c: c["t0"]):
+            self._check_combo.addItem(
+                f"{c['t0']:8.2f}-{c['t1']:.2f} s  {c['kind']}  {', '.join(c['persons'])}", userData=c["t0"])
+        self._check_combo.show()
+
+    def _on_check_chosen(self, index: int) -> None:
+        t0 = self._check_combo.itemData(index)
+        if t0 is not None:
+            self._stitcher.set_current_time(float(t0))
+            self._on_time_hovered(float(t0))
 
     def _populate_known_persons(self) -> None:
         """Offer this capture's already-defined capture_persons (config-

@@ -1,0 +1,160 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Markers bound to the body, face and foot keypoints of COCO-133 (keypoint index below 91).
+pose_model: coco133
+markers:
+- name: MRK-nose
+  parent: head
+  offset: [-0.000268848584, 0.0440968424, 0.0972407088]
+  openpose_keypoint: 0
+  openpose_name: Nose
+  confidence_threshold: 0.3
+- name: MRK-ear.R
+  parent: head
+  offset: [-0.0671905875, 0.0525256544, -0.0194681846]
+  openpose_keypoint: 4
+  openpose_name: REar
+  confidence_threshold: 0.3
+- name: MRK-ear.L
+  parent: head
+  offset: [0.0666390061, 0.052533105, -0.0194756091]
+  openpose_keypoint: 3
+  openpose_name: LEar
+  confidence_threshold: 0.3
+- name: MRK-wrist.L
+  parent: hand.L
+  offset: [7.91624188e-07, -2.80311797e-05, -4.47034836e-08]
+  openpose_keypoint: 9
+  openpose_name: LWrist
+  confidence_threshold: 0.3
+- name: MRK-elbow.L
+  parent: forearm.L
+  offset: [0.0, 0.0, 0.0]
+  openpose_keypoint: 7
+  openpose_name: LElbow
+  confidence_threshold: 0.3
+- name: MRK-shoulder.L
+  parent: upper_arm.L
+  offset: [-8.84756446e-08, 1.50757842e-07, 1.11758709e-08]
+  openpose_keypoint: 5
+  openpose_name: LShoulder
+  confidence_threshold: 0.3
+- name: MRK-wrist.R
+  parent: hand.R
+  offset: [-7.43195415e-07, -2.76602805e-05, -3.35276127e-08]
+  openpose_keypoint: 10
+  openpose_name: RWrist
+  confidence_threshold: 0.3
+- name: MRK-elbow.R
+  parent: forearm.R
+  offset: [1.00582838e-07, 2.16881745e-07, -7.4505806e-09]
+  openpose_keypoint: 8
+  openpose_name: RElbow
+  confidence_threshold: 0.3
+- name: MRK-shoulder.R
+  parent: upper_arm.R
+  offset: [3.25962901e-08, -1.20024197e-07, 3.35276127e-08]
+  openpose_keypoint: 6
+  openpose_name: RShoulder
+  confidence_threshold: 0.3
+- name: MRK-bigToe.L
+  parent: foot.L
+  offset: [-0.031543646, 0.169107273, -0.00399690121]
+  openpose_keypoint: 17
+  openpose_name: LBigToe
+  confidence_threshold: 0.3
+- name: MRK-smallToe.L
+  parent: foot.L
+  offset: [-0.00885264389, 0.168520853, 0.0128456727]
+  openpose_keypoint: 18
+  openpose_name: LSmallToe
+  confidence_threshold: 0.3
+- name: MRK-Ankle.L
+  parent: foot.L
+  offset: [-0.0043794997, 0.0, 0.00070639886]
+  openpose_keypoint: 15
+  openpose_name: LAnkle
+  confidence_threshold: 0.3
+- name: MRK-heel.L
+  parent: foot.L
+  offset: [-0.0102218902, 0.00205975771, 0.067861639]
+  openpose_keypoint: 19
+  openpose_name: LHeel
+  confidence_threshold: 0.3
+- name: MRK-knee.L
+  parent: shin.L
+  offset: [8.8752131e-08, -3.97703843e-08, -1.16415322e-09]
+  openpose_keypoint: 13
+  openpose_name: LKnee
+  confidence_threshold: 0.3
+- name: MRK-hip.L
+  parent: thigh.L
+  offset: [2.81932444e-07, -1.49385869e-07, -2.6775524e-09]
+  openpose_keypoint: 11
+  openpose_name: LHip
+  confidence_threshold: 0.3
+- name: MRK-bigToe.R
+  parent: foot.R
+  offset: [0.0311765205, 0.169103906, -0.00633501541]
+  openpose_keypoint: 20
+  openpose_name: RBigToe
+  confidence_threshold: 0.3
+- name: MRK-smallToe.R
+  parent: foot.R
+  offset: [0.00978656393, 0.168521985, 0.0121322582]
+  openpose_keypoint: 21
+  openpose_name: RSmallToe
+  confidence_threshold: 0.3
+- name: MRK-Ankle.R
+  parent: foot.R
+  offset: [-9.55769792e-08, -9.31322575e-09, 7.7765435e-08]
+  openpose_keypoint: 16
+  openpose_name: RAnkle
+  confidence_threshold: 0.3
+- name: MRK-heel.R
+  parent: foot.R
+  offset: [0.0151897706, 0.00206932938, 0.0669247583]
+  openpose_keypoint: 22
+  openpose_name: RHeel
+  confidence_threshold: 0.3
+- name: MRK-knee.R
+  parent: shin.R
+  offset: [2.64772098e-08, 1.04904757e-07, 6.75208867e-09]
+  openpose_keypoint: 14
+  openpose_name: RKnee
+  confidence_threshold: 0.3
+- name: MRK-hip.R
+  parent: thigh.R
+  offset: [2.31149897e-07, 3.34277956e-08, -9.31322575e-10]
+  openpose_keypoint: 12
+  openpose_name: RHip
+  confidence_threshold: 0.3
+groups:
+  main:
+  - MRK-nose
+  - MRK-ear.R
+  - MRK-ear.L
+  - MRK-wrist.L
+  - MRK-elbow.L
+  - MRK-shoulder.L
+  - MRK-wrist.R
+  - MRK-elbow.R
+  - MRK-shoulder.R
+  - MRK-hip.L
+  - MRK-hip.R
+  - MRK-knee.L
+  - MRK-knee.R
+  - MRK-Ankle.L
+  - MRK-Ankle.R
+  - MRK-heel.L
+  - MRK-heel.R
+  - MRK-bigToe.L
+  - MRK-smallToe.L
+  - MRK-bigToe.R
+  - MRK-smallToe.R
+  HandL:
+  - MRK-wrist.L
+  HandR:
+  - MRK-wrist.R

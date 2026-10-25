@@ -7,12 +7,14 @@
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <sqlite3.h>
 
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -128,7 +130,9 @@ static void create_fixture_db() {
             dist_coeffs BLOB,
             rms_error REAL,
             notes TEXT,
-            matrix_original BLOB
+            matrix_original BLOB,
+            image_width INTEGER,
+            image_height INTEGER
         );
     )");
     exec_sql(db, R"(
@@ -214,7 +218,23 @@ static void create_fixture_db() {
             dot_reacquire_max_px REAL,
             dot_cross_view_corroboration_px REAL,
             dot_corroboration_gate_multiplier REAL,
-            dot_camera_noise_scale TEXT
+            dot_camera_noise_scale TEXT,
+            dot_seg_mask_enabled INTEGER,
+            dot_seg_mask_dilate_px REAL,
+            dot_seg_mask_tracklet_window INTEGER,
+            dot_seg_mask_min_tracklet_fraction REAL,
+            dot_seg_mask_cost_scale_at_zero_fraction REAL,
+            dot_seg_mask_hard_distance_px REAL,
+            active_joint_groups TEXT,
+            kp_candidates_enabled INTEGER,
+            kp_candidate_peak_weight REAL,
+            kp_candidate_tracklet_multiplier REAL,
+            kp_candidate_choice TEXT, kp_choice_support_window_s REAL, kp_choice_delta REAL,
+            kp_choice_beta REAL, kp_choice_gamma REAL, kp_choice_rounds INTEGER,
+            kp_choice_skip_camera_ids TEXT, kp_strict_filter INTEGER,
+            kp_strict_filter_window_frames INTEGER, kp_strict_filter_min_fraction REAL,
+            kp_mask_term_weight REAL, kp_mask_term_window_s REAL, kp_mask_term_classes TEXT, kp_strict_filter_classes TEXT,
+            kp_choice_switch_penalty REAL, kp_choice_jump_box REAL
         );
     )");
 
@@ -340,10 +360,11 @@ static void create_fixture_db() {
     exec_sql(db, R"(
         CREATE TABLE pose_sequence_keypoints (
             sequence_id TEXT NOT NULL REFERENCES pose_observation_sequences(id),
+            obs_source TEXT NOT NULL DEFAULT 'body',
             keypoint_idx INTEGER NOT NULL,
             name TEXT NOT NULL,
             source TEXT NOT NULL,
-            PRIMARY KEY (sequence_id, keypoint_idx)
+            PRIMARY KEY (sequence_id, obs_source, keypoint_idx)
         );
     )");
 
@@ -410,6 +431,22 @@ static void create_fixture_db() {
              "INSERT INTO tracker_configs "
              "(id,name,created_at,alpha,beta,process_noise_std,measurement_noise_std,tracker_fps) "
              "VALUES ('tc1','test','2024-01-01',0.5,2.0,0.15,20.0,120.0);");
+    exec_sql(db,
+             "INSERT INTO tracker_configs (id,name,created_at,tracker_fps,active_joint_groups) "
+             "VALUES ('tc_main','parent main','2024-01-01',120.0,'[\"main\"]');");
+    exec_sql(db,
+             "INSERT INTO tracker_configs (id,name,created_at,tracker_fps,kp_candidates_enabled,"
+             "kp_candidate_peak_weight,kp_candidate_tracklet_multiplier) "
+             "VALUES ('tc_kp','candidates','2024-01-01',120.0,1,1.5,3.0);");
+    exec_sql(db,
+             "INSERT INTO tracker_configs (id,name,created_at,tracker_fps,kp_candidates_enabled,"
+             "kp_candidate_choice,kp_choice_support_window_s,kp_choice_delta,kp_choice_beta,"
+             "kp_choice_gamma,kp_choice_rounds,kp_choice_skip_camera_ids,kp_strict_filter,"
+             "kp_strict_filter_window_frames,kp_strict_filter_min_fraction,kp_mask_term_weight,"
+             "kp_mask_term_window_s,kp_mask_term_classes,kp_strict_filter_classes,"
+             "kp_choice_switch_penalty,kp_choice_jump_box) "
+             "VALUES ('tc_win','window','2024-01-01',120.0,1,'window',1.5,0.5,0.4,0.1,2,'[3,4]',"
+             "1,8,0.6,0.3,2.5,'body,feet','body,hands',0.7,0.06);");
 
     // Pose observation sequence
     exec_sql(db,
@@ -684,6 +721,105 @@ static void create_fixture_db() {
         insert_dots_row(1, {{{450.f, 460.f, 8.0f, 0.80f, 3.2f, 3.2f, 0.6f, 0.8f, 7.0f}}});
     }
 
+    // ---------- Pose model manifests per observation source ----------
+    // Row (frame 0, camera inst1): slot i of a blob of width `n` is at (base + i, base_y + i)
+    // with confidence 1.
+    auto insert_blob_row = [&](std::string const& seq, std::string const& source, int n,
+                               float base_x, float base_y) {
+        std::vector<float> kps;
+        for (int i = 0; i < n; ++i) {
+            kps.push_back(base_x + static_cast<float>(i));
+            kps.push_back(base_y + static_cast<float>(i));
+            kps.push_back(1.f);
+        }
+        auto blob = encode_float32_blob(kps);
+        std::string sql =
+            "INSERT INTO pose_observations "
+            "(sequence_id, camera_instance_id, video_frame, timestamp_s, person_id, source, "
+            "kp_blob, noise_scale) VALUES ('" +
+            seq + "', 'inst1', 0, 0.0, 0, '" + source + "', ?, 1.0)";
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
+        sqlite3_bind_blob(stmt, 1, blob.data(), static_cast<int>(blob.size()), SQLITE_STATIC);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    };
+    auto insert_manifest = [&](std::string const& seq, std::string const& obs_source, int n,
+                               std::string const& model,
+                               std::vector<std::pair<int, std::string>> const& named) {
+        for (int i = 0; i < n; ++i) {
+            std::string name = model + ":slot" + std::to_string(i);
+            for (auto const& [idx, nm] : named)
+                if (idx == i)
+                    name = nm;
+            exec_sql(db,
+                     "INSERT INTO pose_sequence_keypoints "
+                     "(sequence_id, obs_source, keypoint_idx, name, source) VALUES ('" +
+                         seq + "', '" + obs_source + "', " + std::to_string(i) + ", '" + name +
+                         "', '" + model + "')");
+        }
+    };
+    for (char const* id :
+         {"seq_soma", "seq_soma_bare", "seq_coco_manifest", "seq_unbound", "seq_kpc"})
+        exec_sql(db, std::string("INSERT INTO pose_observation_sequences "
+                                 "(id,shot_id,sync_config_id,time_start_s,time_end_s) "
+                                 "VALUES ('") +
+                         id + "','shot1','sc1',0.0,1.0)");
+    // A SOMA-77 body blob (x = 1000 + slot) with refined left-hand rows (x = 2000 + slot).
+    insert_blob_row("seq_soma", "body", 77, 1000.f, 500.f);
+    insert_blob_row("seq_soma", "hand_l", 21, 2000.f, 600.f);
+    insert_manifest(
+        "seq_soma", "body", 77, "soma77",
+        {{14, "soma77:LeftHand"}, {15, "soma77:LeftHandThumb1"}, {19, "soma77:LeftHandIndex1"}});
+    insert_manifest("seq_soma", "hand_l", 21, "hand21",
+                    {{0, "hand21:left_hand_root"}, {5, "hand21:left_index_1"}});
+    // SOMA names written before landmarks were model-qualified.
+    insert_blob_row("seq_soma_bare", "body", 20, 1000.f, 500.f);
+    insert_manifest("seq_soma_bare", "body", 20, "soma77", {{14, "LeftHand"}});
+    {
+        // The bare names are exactly the model's names without the prefix.
+        exec_sql(db,
+                 "UPDATE pose_sequence_keypoints SET name = substr(name, 8) "
+                 "WHERE sequence_id = 'seq_soma_bare' AND name LIKE 'soma77:%'");
+    }
+    // A SOMA body row plus keypoint candidates: keypoint 14 (LeftHand) has a strong and a weaker
+    // maximum, keypoint 19 (LeftHandIndex1) one, keypoint 5 (no marker) one, keypoint 14 a last one
+    // below the confidence floor. Blob layout: int32 n, int32 n_fields = 6, float32[n, 6]
+    // keypoint_idx, x, y, peak, rank, tracklet_id.
+    insert_blob_row("seq_kpc", "body", 77, 1000.f, 500.f);
+    insert_manifest("seq_kpc", "body", 77, "soma77",
+                    {{14, "soma77:LeftHand"}, {19, "soma77:LeftHandIndex1"}});
+    insert_manifest("seq_kpc", "kp_candidates", 77, "soma77",
+                    {{14, "soma77:LeftHand"}, {19, "soma77:LeftHandIndex1"}});
+    {
+        std::vector<std::array<float, 6>> const rows = {{14.f, 1100.f, 500.f, 0.9f, 0.f, 3.f},
+                                                        {14.f, 1130.f, 520.f, 0.3f, 1.f, 4.f},
+                                                        {19.f, 1200.f, 600.f, 0.8f, 0.f, -1.f},
+                                                        {5.f, 900.f, 900.f, 0.7f, 0.f, 8.f},
+                                                        {14.f, 1300.f, 700.f, 0.05f, 2.f, 9.f}};
+        std::vector<uint8_t> blob(8 + rows.size() * 6 * 4);
+        int32_t const header[2] = {static_cast<int32_t>(rows.size()), 6};
+        std::memcpy(blob.data(), header, 8);
+        std::memcpy(blob.data() + 8, rows.data(), rows.size() * 6 * 4);
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(
+            db,
+            "INSERT INTO pose_observations (sequence_id, camera_instance_id, video_frame, "
+            "timestamp_s, person_id, source, kp_blob, noise_scale) "
+            "VALUES ('seq_kpc', 'inst1', 0, 0.0, 0, 'kp_candidates', ?, 2.0)",
+            -1, &stmt, nullptr);
+        sqlite3_bind_blob(stmt, 1, blob.data(), static_cast<int>(blob.size()), SQLITE_STATIC);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+    // A COCO-133 body blob with a manifest of coco133 landmarks.
+    insert_blob_row("seq_coco_manifest", "body", 133, 1000.f, 500.f);
+    insert_manifest("seq_coco_manifest", "body", 133, "coco133",
+                    {{9, "coco133:left_wrist"}, {15, "coco133:left_ankle"}});
+    // A SOMA body blob that no marker of the test skeletons claims.
+    insert_blob_row("seq_unbound", "body", 77, 1000.f, 500.f);
+    insert_manifest("seq_unbound", "body", 77, "soma77", {});
+
     sqlite3_close(db);
 }
 
@@ -793,6 +929,74 @@ TEST_CASE("SessionReader load_tracker_config", "[session_reader]") {
             Catch::Approx(TrackerConfig{}.dot_tracklet_gate_multiplier));
 }
 
+TEST_CASE("SessionReader load_tracker_config reads the parent stage's joint groups",
+          "[session_reader]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    REQUIRE(reader.load_tracker_config("tc1").tracker.active_joint_groups.empty());
+    REQUIRE(reader.load_tracker_config("tc_main").tracker.active_joint_groups ==
+            std::vector<std::string>{"main"});
+}
+
+TEST_CASE("SessionReader load_tracker_config reads kp_candidates_enabled", "[session_reader]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    REQUIRE_FALSE(reader.load_tracker_config("tc1").tracker.kp_candidates_enabled);
+    REQUIRE(reader.load_tracker_config("tc_kp").tracker.kp_candidates_enabled);
+    // Not set: the cost without a peak term and without continuity.
+    REQUIRE(reader.load_tracker_config("tc1").tracker.kp_candidate_peak_weight == 0.0);
+    REQUIRE(reader.load_tracker_config("tc1").tracker.kp_candidate_tracklet_multiplier == 1.0);
+    REQUIRE(reader.load_tracker_config("tc_kp").tracker.kp_candidate_peak_weight ==
+            Catch::Approx(1.5));
+    REQUIRE(reader.load_tracker_config("tc_kp").tracker.kp_candidate_tracklet_multiplier ==
+            Catch::Approx(3.0));
+}
+
+TEST_CASE("SessionReader load_tracker_config reads the windowed choice settings",
+          "[session_reader]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    // Not set: the per-step assignment, the prototype's weights, filter and mask term off.
+    auto const& off = reader.load_tracker_config("tc_kp").tracker.kp_choice;
+    REQUIRE_FALSE(off.window);
+    REQUIRE(off.support_window_s == Catch::Approx(1.0));
+    REQUIRE(off.delta == Catch::Approx(1.0));
+    REQUIRE(off.beta == Catch::Approx(0.3));
+    REQUIRE(off.gamma == Catch::Approx(0.2));
+    REQUIRE(off.rounds == 3);
+    REQUIRE(off.skip_camera_ids.empty());
+    REQUIRE_FALSE(off.strict_filter);
+    REQUIRE(off.strict_filter_window_frames == 10);
+    REQUIRE(off.strict_filter_min_fraction == Catch::Approx(0.5));
+    REQUIRE(off.mask_term_weight == 0.0);
+    REQUIRE(off.mask_term_window_s == Catch::Approx(2.0));
+    REQUIRE(off.mask_term_classes == "body");
+    REQUIRE(off.strict_filter_classes == "body");
+    REQUIRE(off.switch_penalty == 0.0);
+    REQUIRE(off.jump_box == Catch::Approx(0.04));
+
+    auto const& on = reader.load_tracker_config("tc_win").tracker.kp_choice;
+    REQUIRE(on.window);
+    REQUIRE(on.support_window_s == Catch::Approx(1.5));
+    REQUIRE(on.delta == Catch::Approx(0.5));
+    REQUIRE(on.beta == Catch::Approx(0.4));
+    REQUIRE(on.gamma == Catch::Approx(0.1));
+    REQUIRE(on.rounds == 2);
+    REQUIRE(on.skip_camera_ids == std::vector<int>{3, 4});
+    REQUIRE(on.strict_filter);
+    REQUIRE(on.strict_filter_window_frames == 8);
+    REQUIRE(on.strict_filter_min_fraction == Catch::Approx(0.6));
+    REQUIRE(on.mask_term_weight == Catch::Approx(0.3));
+    REQUIRE(on.mask_term_window_s == Catch::Approx(2.5));
+    REQUIRE(on.mask_term_classes == "body,feet");
+    REQUIRE(on.strict_filter_classes == "body,hands");
+    REQUIRE(on.switch_penalty == Catch::Approx(0.7));
+    REQUIRE(on.jump_box == Catch::Approx(0.06));
+}
+
 TEST_CASE("SessionReader load_sequence_info", "[session_reader]") {
     auto db_path = ensure_fixture();
     SessionReader reader(db_path.string());
@@ -800,6 +1004,28 @@ TEST_CASE("SessionReader load_sequence_info", "[session_reader]") {
     auto info = reader.load_sequence_info("seq1");
     REQUIRE(info.time_start_s == Catch::Approx(0.0));
     REQUIRE(info.time_end_s == Catch::Approx(1.0));
+}
+
+TEST_CASE("SessionReader load_cameras: the calibration's image size wins over the camera mode's",
+          "[session_reader]") {
+    auto db_path = ensure_fixture();
+    auto copy = db_path.parent_path() / "session_reader_mode_mismatch.db";
+    fs::copy_file(db_path, copy, fs::copy_options::overwrite_existing);
+    {
+        sqlite3* db = nullptr;
+        REQUIRE(sqlite3_open(copy.string().c_str(), &db) == SQLITE_OK);
+        exec_sql(db, "UPDATE camera_modes SET width_px = 1950;");
+        exec_sql(db, "UPDATE intrinsics_calibrations SET image_width = 1920, image_height = 1080;");
+        sqlite3_close(db);
+    }
+    {
+        SessionReader reader(copy.string());
+        auto const cameras = reader.load_cameras("sess1", "ec1", "sc1");
+        REQUIRE(cameras.at("cam1").intrinsics().width == 1920);
+        REQUIRE(cameras.at("cam1").intrinsics().height == 1080);
+    }
+    std::error_code ignored;
+    fs::remove(copy, ignored);
 }
 
 TEST_CASE("SessionReader load_cameras", "[session_reader]") {
@@ -855,6 +1081,31 @@ TEST_CASE("SessionReader load_observations", "[session_reader]") {
     REQUIRE(first.marker_id >= 0);
     REQUIRE(first.marker_id < 4);
     REQUIRE(first.camera_id == 0);
+}
+
+TEST_CASE("SessionReader load_observations loads only the requested time window",
+          "[session_reader]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+
+    auto cameras = reader.load_cameras("sess1", "ec1", "sc1");
+    auto skeleton = make_test_skeleton();
+
+    // The fixture has frames at t = 0 and t = 1/120 s, four keypoints each.
+    auto const half_step = 0.5 / 120.0;
+    auto const first_only = reader.load_observations("seq1", cameras, skeleton, 0.1, 0, false, 0.5,
+                                                     0.0, 0.0, 10, 0.0, {}, 0.0, 0.0, half_step);
+    REQUIRE(first_only.total_observations() == 4);
+    REQUIRE(first_only.max_time() == Catch::Approx(0.0));
+
+    auto const second_only = reader.load_observations("seq1", cameras, skeleton, 0.1, 0, false, 0.5,
+                                                      0.0, 0.0, 10, 0.0, {}, 0.0, half_step);
+    REQUIRE(second_only.total_observations() == 4);
+    REQUIRE(second_only.min_time() == Catch::Approx(1.0 / 120.0).margin(1e-5));
+
+    REQUIRE_THROWS_AS(reader.load_observations("seq1", cameras, skeleton, 0.1, 0, false, 0.5, 0.0,
+                                               0.0, 10, 0.0, {}, 0.0, 5.0, 6.0),
+                      std::runtime_error);
 }
 
 TEST_CASE("SessionReader load_cameras_for_sequence", "[session_reader]") {
@@ -1192,4 +1443,300 @@ TEST_CASE("SessionReader load_unlabeled_candidates returns empty for a sequence 
     auto cameras = reader.load_cameras_for_sequence("seq1");
     auto candidates = reader.load_unlabeled_candidates("seq1", cameras);
     REQUIRE(candidates.empty());
+}
+
+// ---------------------------------------------------------------------------
+// Pose model binding: a manifest per observation source
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A skeleton carrying both marker sets: the COCO left ankle (COCO index 15) and SOMA markers by
+// landmark, one of them (LeftHandThumb1, SOMA slot 15) deliberately left out.
+Skeleton make_dual_set_skeleton() {
+    Skeleton s;
+    s.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
+    s.add_marker("left_wrist", 0, Eigen::Vector3d::Zero(), 9, "", "coco133:left_wrist");
+    s.add_marker("left_ankle", 0, Eigen::Vector3d::Zero(), 15, "", "coco133:left_ankle");
+    s.add_marker("LeftHand", 0, Eigen::Vector3d::Zero(), std::nullopt, "", "soma77:LeftHand");
+    s.add_marker("LeftHandIndex1", 0, Eigen::Vector3d::Zero(), std::nullopt, "",
+                 "soma77:LeftHandIndex1");
+    s.add_marker("hand_l_index", 0, Eigen::Vector3d::Zero(), 96, "", "hand21:left_index_1");
+    s.add_marker("hand_l_root", 0, Eigen::Vector3d::Zero(), 91, "", "hand21:left_hand_root");
+    return s;
+}
+
+std::map<std::string, double> x_by_marker(ObservationSet const& set, Skeleton const& skeleton) {
+    std::map<std::string, double> out;
+    for (auto const& [id, seq] : set.sequences())
+        for (auto const& o : seq.observations)
+            out[skeleton.markers()[static_cast<size_t>(o.marker_id)].name] =
+                o.position_distorted.x();
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("SOMA slots that no marker claims do not fall through to the COCO markers",
+          "[session_reader][pose_model]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto skeleton = make_dual_set_skeleton();
+    auto cameras = reader.load_cameras_for_sequence("seq_soma");
+
+    auto xs =
+        x_by_marker(reader.load_observations("seq_soma", cameras, skeleton, 0.1, 0), skeleton);
+
+    // Slot 15 (LeftHandThumb1) has no landmark marker and COCO index 15 is the left ankle.
+    CHECK(xs.count("left_ankle") == 0);
+    CHECK(xs.count("left_wrist") == 0);
+    CHECK(xs.at("LeftHand") == Catch::Approx(1014.0));
+    CHECK(xs.at("LeftHandIndex1") == Catch::Approx(1019.0));
+}
+
+TEST_CASE("Refined hand rows of a SOMA sequence bind through their own manifest",
+          "[session_reader][pose_model]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto skeleton = make_dual_set_skeleton();
+    auto cameras = reader.load_cameras_for_sequence("seq_soma");
+
+    auto xs =
+        x_by_marker(reader.load_observations("seq_soma", cameras, skeleton, 0.1, 0), skeleton);
+
+    CHECK(xs.at("hand_l_root") == Catch::Approx(2000.0));
+    CHECK(xs.at("hand_l_index") == Catch::Approx(2005.0));
+}
+
+TEST_CASE("A bare SOMA manifest name binds the model-qualified landmark",
+          "[session_reader][pose_model]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto skeleton = make_dual_set_skeleton();
+    auto cameras = reader.load_cameras_for_sequence("seq_soma_bare");
+
+    auto xs =
+        x_by_marker(reader.load_observations("seq_soma_bare", cameras, skeleton, 0.1, 0), skeleton);
+
+    CHECK(xs.at("LeftHand") == Catch::Approx(1014.0));
+    CHECK(xs.count("left_ankle") == 0);
+}
+
+TEST_CASE("A COCO-133 manifest binds markers by landmark and by COCO index",
+          "[session_reader][pose_model]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto cameras = reader.load_cameras_for_sequence("seq_coco_manifest");
+
+    // Dual-set skeleton: the COCO markers bind, the SOMA markers get nothing.
+    auto dual = make_dual_set_skeleton();
+    auto xs =
+        x_by_marker(reader.load_observations("seq_coco_manifest", cameras, dual, 0.1, 0), dual);
+    CHECK(xs.at("left_ankle") == Catch::Approx(1015.0));
+    CHECK(xs.at("left_wrist") == Catch::Approx(1009.0));
+    CHECK(xs.count("LeftHand") == 0);
+
+    // A skeleton that only has openpose_keypoint markers (no landmarks) keeps working.
+    Skeleton coco_only;
+    coco_only.add_joint("root", std::nullopt, JointType::FIXED, Eigen::Vector3d::Zero());
+    coco_only.add_marker("nose", 0, Eigen::Vector3d::Zero(), 0);
+    coco_only.add_marker("left_ankle", 0, Eigen::Vector3d::Zero(), 15);
+    auto xs2 = x_by_marker(
+        reader.load_observations("seq_coco_manifest", cameras, coco_only, 0.1, 0), coco_only);
+    CHECK(xs2.at("left_ankle") == Catch::Approx(1015.0));
+    CHECK(xs2.at("nose") == Catch::Approx(1000.0));
+}
+
+TEST_CASE("A skeleton that binds no marker of the manifest names the pose model",
+          "[session_reader][pose_model]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto cameras = reader.load_cameras_for_sequence("seq_unbound");
+    auto skeleton = make_test_skeleton();  // COCO markers only
+
+    CHECK_THROWS_WITH(reader.load_observations("seq_unbound", cameras, skeleton, 0.1, 0),
+                      Catch::Matchers::ContainsSubstring("soma77"));
+}
+
+// ---------------------------------------------------------------------------
+// Keypoint candidates
+// ---------------------------------------------------------------------------
+
+TEST_CASE("load_keypoint_candidates reads the candidates of the keypoints the skeleton binds",
+          "[session_reader][kp_candidates]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto skeleton = make_dual_set_skeleton();
+    auto cameras = reader.load_cameras_for_sequence("seq_kpc");
+
+    auto kp = reader.load_keypoint_candidates("seq_kpc", cameras, skeleton, 0.1, 0);
+
+    // Markers by index in make_dual_set_skeleton(): LeftHand 2, LeftHandIndex1 3.
+    CHECK(kp.marker_keypoint == std::unordered_map<int, int>{{2, 14}, {3, 19}});
+    // Keypoint 5 has no marker and the 0.05 maximum is under the confidence floor.
+    REQUIRE(kp.candidates.size() == 3);
+    auto const& strong = kp.candidates[0];
+    CHECK(strong.keypoint_idx == 14);
+    CHECK(strong.position_distorted.x() == Catch::Approx(1100.0));
+    CHECK(strong.position.isApprox(
+        strong.position_distorted));  // the fixture's pixels are undistorted
+    CHECK(strong.confidence == Catch::Approx(0.9));
+    CHECK(strong.tracklet_id == 3);
+    CHECK(strong.crop_scale == Catch::Approx(2.0));
+    CHECK(strong.merge_radius_px ==
+          Catch::Approx(3.0));  // 0.5% of the 320 px box is 1.6 px, under the floor
+    CHECK(strong.subject_mask == ~std::uint64_t{0});
+    CHECK(kp.candidates[1].keypoint_idx == 14);
+    CHECK(kp.candidates[1].tracklet_id == 4);
+    CHECK(kp.candidates[2].keypoint_idx == 19);
+    CHECK(kp.candidates[2].tracklet_id == -1);
+
+    // A higher floor drops the weaker maximum too.
+    CHECK(reader.load_keypoint_candidates("seq_kpc", cameras, skeleton, 0.5, 0).candidates.size() ==
+          2);
+}
+
+TEST_CASE("load_keypoint_choice_data keeps every keypoint of the manifest and every peak",
+          "[session_reader][kp_candidates]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto skeleton = make_dual_set_skeleton();
+    auto cameras = reader.load_cameras_for_sequence("seq_kpc");
+
+    auto data = reader.load_keypoint_choice_data("seq_kpc", cameras, skeleton, 0);
+
+    CHECK(data.marker_keypoint == std::unordered_map<int, int>{{2, 14}, {3, 19}});
+    REQUIRE(data.keypoint_landmark.size() == 77);
+    CHECK(data.keypoint_landmark[14] == "soma77:LeftHand");
+    CHECK(data.keypoint_landmark[19] == "soma77:LeftHandIndex1");
+    CHECK(data.keypoint_landmark[5] == "soma77:slot5");  // named, but no marker is bound to it
+    REQUIRE(data.cameras.size() == 1);
+    REQUIRE(data.cameras[0].frames.size() == 1);
+    CHECK(data.cameras[0].frames[0].video_frame == 0);
+    CHECK(data.cameras[0].frames[0].crop_scale == Catch::Approx(2.0));
+    // All five maxima, including keypoint 5 (no marker) and the 0.05 one (under any floor).
+    REQUIRE(data.candidates.size() == 5);
+    CHECK(data.candidates[0].keypoint == 14);
+    CHECK(data.candidates[0].rank == 0);
+    CHECK(data.candidates[0].tracklet_id == 3);
+    CHECK(data.candidates[0].x == Catch::Approx(1100.0));
+    CHECK(data.candidates[0].ux == Catch::Approx(1100.0));  // the fixture's pixels are undistorted
+    CHECK(data.candidates[0].peak == Catch::Approx(0.9));
+    CHECK(data.candidates[4].peak == Catch::Approx(0.05));
+    CHECK(data.candidates[4].rank == 2);
+
+    // A window that excludes the row's timestamp (0.0 s) leaves nothing to choose from.
+    CHECK(reader.load_keypoint_choice_data("seq_kpc", cameras, skeleton, 0, 1.0, 2.0)
+              .candidates.empty());
+}
+
+TEST_CASE("load_keypoint_candidates is empty without candidates or without a bound marker",
+          "[session_reader][kp_candidates]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto cameras = reader.load_cameras_for_sequence("seq_soma");
+    auto skeleton = make_dual_set_skeleton();
+    auto none = reader.load_keypoint_candidates("seq_soma", cameras, skeleton);
+    CHECK(none.candidates.empty());
+    CHECK(none.marker_keypoint.empty());
+
+    auto coco_only = make_test_skeleton();
+    CHECK(reader
+              .load_keypoint_candidates("seq_kpc", reader.load_cameras_for_sequence("seq_kpc"),
+                                        coco_only)
+              .candidates.empty());
+}
+
+TEST_CASE("load_observations leaves the candidate rows and their manifest out",
+          "[session_reader][kp_candidates]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto skeleton = make_dual_set_skeleton();
+    auto cameras = reader.load_cameras_for_sequence("seq_kpc");
+
+    auto xs = x_by_marker(reader.load_observations("seq_kpc", cameras, skeleton, 0.1, 0), skeleton);
+    CHECK(xs.at("LeftHand") == Catch::Approx(1014.0));  // the body row, not a candidate
+    CHECK(xs.at("LeftHandIndex1") == Catch::Approx(1019.0));
+}
+
+TEST_CASE("load_observations builds the observations of a frame from overriding rows",
+          "[session_reader][kp_candidates]") {
+    auto db_path = ensure_fixture();
+    SessionReader reader(db_path.string());
+    auto skeleton = make_dual_set_skeleton();
+    auto cameras = reader.load_cameras_for_sequence("seq_kpc");
+
+    // The picks of a windowed choice: keypoint 14 moved to another candidate, keypoint 19 without a
+    // pick, every other keypoint without one as well.
+    KeypointRowOverrides overrides;
+    std::vector<db::Keypoint> row(77);
+    row[14] = {2000.f, 700.f, 0.9f};
+    overrides.rows["inst1"][0] = row;
+    auto xs = x_by_marker(
+        reader.load_observations("seq_kpc", cameras, skeleton, 0.1, 0, false, 0.5, 0.0, 0.0, 10,
+                                 0.0, {}, 0.0, -std::numeric_limits<double>::infinity(),
+                                 std::numeric_limits<double>::infinity(), &overrides),
+        skeleton);
+    CHECK(xs.at("LeftHand") == Catch::Approx(2000.0));
+    CHECK(xs.count("LeftHandIndex1") == 0);  // confidence 0: no observation
+
+    // A frame the overrides do not name keeps its stored row.
+    KeypointRowOverrides elsewhere;
+    elsewhere.rows["inst1"][7] = row;
+    auto kept = x_by_marker(
+        reader.load_observations("seq_kpc", cameras, skeleton, 0.1, 0, false, 0.5, 0.0, 0.0, 10,
+                                 0.0, {}, 0.0, -std::numeric_limits<double>::infinity(),
+                                 std::numeric_limits<double>::infinity(), &elsewhere),
+        skeleton);
+    CHECK(kept.at("LeftHand") == Catch::Approx(1014.0));
+}
+
+// ---------------------------------------------------------------------------
+// Segmentation mask revisions: a job reads every mask at one closed revision.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SessionReader reads segmentation masks at a pinned revision", "[session_reader][seg]") {
+    fs::path path = fs::temp_directory_path() / "posetrak_test_seg_revisions.db";
+    if (fs::exists(path))
+        fs::remove(path);
+    {
+        sqlite3* db = nullptr;
+        REQUIRE(sqlite3_open_v2(path.string().c_str(), &db,
+                                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) == SQLITE_OK);
+        exec_sql(db, R"(
+            CREATE TABLE seg_mask_revisions (
+                seg_quality_run_id TEXT NOT NULL, revision INTEGER NOT NULL,
+                created_at TEXT NOT NULL, closed_at TEXT, note TEXT,
+                PRIMARY KEY (seg_quality_run_id, revision));
+            CREATE TABLE seg_masks (
+                seg_quality_run_id TEXT NOT NULL, shot_video_id TEXT NOT NULL,
+                frame_idx INTEGER NOT NULL, revision INTEGER NOT NULL DEFAULT 0, mask_blob BLOB,
+                PRIMARY KEY (seg_quality_run_id, shot_video_id, frame_idx, revision));
+            INSERT INTO seg_mask_revisions VALUES ('s', 0, 't0', 't0', NULL);
+            INSERT INTO seg_mask_revisions VALUES ('s', 1, 't1', 't1', NULL);
+            INSERT INTO seg_mask_revisions VALUES ('s', 2, 't2', NULL, NULL);
+            INSERT INTO seg_masks VALUES ('s', 'v', 1, 0, x'AA');
+            INSERT INTO seg_masks VALUES ('s', 'v', 2, 0, x'BB');
+            INSERT INTO seg_masks VALUES ('s', 'v', 1, 1, x'CC');
+            INSERT INTO seg_masks VALUES ('s', 'v', 2, 1, NULL);
+            INSERT INTO seg_masks VALUES ('s', 'v', 1, 2, x'DD');
+        )");
+        sqlite3_close(db);
+    }
+    {
+        SessionReader reader(path.string());
+        // The open revision 2 is not the newest closed one.
+        REQUIRE(reader.newest_closed_seg_revision("s") == 1);
+        REQUIRE_FALSE(reader.newest_closed_seg_revision("other").has_value());
+
+        auto blob = [&](int frame, int revision) {
+            return reader.load_seg_mask_blob("s", "v", frame, revision);
+        };
+        CHECK(blob(1, 0) == std::string("\xAA"));
+        CHECK(blob(1, 1) == std::string("\xCC"));
+        CHECK(blob(2, 0) == std::string("\xBB"));
+        CHECK_FALSE(blob(2, 1).has_value());  // NULL blob: no mask from revision 1 on
+        CHECK_FALSE(blob(3, 1).has_value());  // never had a mask
+    }
+    fs::remove(path);
 }

@@ -41,6 +41,11 @@ def dummy_db(tmp_path):
 
 
 def _insert_mask(conn, mask: np.ndarray, frame_idx: int = 0) -> None:
+    # A run starts with a closed revision 0 (trigger); masks of a run without a row would be invisible.
+    conn.execute(
+        "INSERT OR IGNORE INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at) "
+        "VALUES ('sqr1', 'sh1', 0, 1, '2026-01-01T00:00:00+00:00')"
+    )
     conn.execute(
         "INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
         "VALUES ('sqr1', 'sv1', ?, ?)",
@@ -77,7 +82,8 @@ def test_blend_paints_masked_pixels_with_track_color(qapp, dummy_db):
     expected = np.array(
         [10 * 0.55 + c * 0.45 for c in _DAVIS_FIRST_BGR], dtype=np.float32
     ).astype(np.uint8)
-    assert np.array_equal(out[0, 0], expected)
+    # The blend rounds to the nearest value; the exact rounding is not the point.
+    assert np.allclose(out[0, 0], expected, atol=1)
     assert np.array_equal(out[3, 3], [10, 10, 10])  # outside the masked region: untouched
 
 
@@ -136,9 +142,10 @@ def test_display_crop_result_blends_when_track_id_and_show_seg_given(qapp):
     assert args[1:4] == ("sv1", 0, 3)
 
 
-def test_display_crop_result_skips_blend_without_track_id(qapp):
-    """The backfill/ghost path (no detection at this frame -> no track_id)
-    must not attempt a mask blend, even if show_seg is set."""
+def test_display_crop_result_blends_all_labels_without_track_id(qapp):
+    """The backfill/ghost path (no detection at this frame, and every frame
+    of an object sequence -> no track_id) blends every label present when
+    show_seg is set."""
     w = _make_display_widget()
     cell = MagicMock()
 
@@ -147,7 +154,8 @@ def test_display_crop_result_skips_blend_without_track_id(qapp):
         show_seg=True,
     )
 
-    w._blend_seg_mask.assert_not_called()
+    w._blend_seg_mask.assert_called_once()
+    assert w._blend_seg_mask.call_args.args[3] is None
 
 
 def test_display_crop_result_skips_blend_when_show_seg_false(qapp):
@@ -160,3 +168,103 @@ def test_display_crop_result_skips_blend_when_show_seg_false(qapp):
     )
 
     w._blend_seg_mask.assert_not_called()
+
+
+def test_blend_without_track_id_paints_every_label(qapp, dummy_db):
+    """An object sequence has no person track to pick a label by (and its
+    labels are not in persons_json): every non-zero label is painted."""
+    mask = np.zeros((4, 4), dtype=np.uint8)
+    mask[0, 0] = 1
+    mask[3, 3] = 3
+    _insert_mask(dummy_db, mask)
+    w = _make_widget(dummy_db)
+    crop = np.full((4, 4, 3), 10, dtype=np.uint8)
+
+    out = w._blend_seg_mask(crop, "sv1", 0, None, 0.0, 0.0, 4.0, 4.0)
+
+    assert not np.array_equal(out[0, 0], [10, 10, 10])
+    assert not np.array_equal(out[3, 3], [10, 10, 10])
+    assert not np.array_equal(out[0, 0], out[3, 3])  # different colours per label
+    assert np.array_equal(out[1, 1], [10, 10, 10])
+
+
+def test_blend_uses_the_editors_label_palette(qapp, dummy_db):
+    """Same colour per label as the segmentation editor (video_canvas.label_to_color)."""
+    from app.pose.video_canvas import label_to_color
+
+    mask = np.zeros((4, 4), dtype=np.uint8)
+    mask[0, 0] = 3
+    _insert_mask(dummy_db, mask)
+    w = _make_widget(dummy_db)
+    crop = np.full((4, 4, 3), 10, dtype=np.uint8)
+
+    out = w._blend_seg_mask(crop, "sv1", 0, 3, 0.0, 0.0, 4.0, 4.0)
+
+    r, g, b = label_to_color(3)
+    expected = np.array([10 * 0.55 + c * 0.45 for c in (b, g, r)], dtype=np.float32).astype(np.uint8)
+    assert np.allclose(out[0, 0], expected, atol=1)
+
+
+def test_blend_collects_a_legend_with_subject_names_and_leaves_the_image_alone(qapp, dummy_db):
+    from posetrak.db.manage_person import create_person
+
+    dummy_db.execute("INSERT INTO mocap_sessions (id, recorded_at) VALUES ('s', '2026-01-01')")
+    dummy_db.execute("INSERT INTO captures (id, session_id, capture_number) VALUES ('cap1', 's', 1)")
+    create_person(dummy_db, "cap1", "Harri")   # registry label 1
+    dummy_db.execute(
+        "INSERT INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at) "
+        "VALUES ('sqr1', 'cap1', 0, 1, '2026-01-01')"
+    )
+    mask = np.zeros((200, 200), dtype=np.uint8)
+    mask[150:190, 150:190] = 1   # far from the top-left legend area
+    _insert_mask(dummy_db, mask)
+    w = _make_widget(dummy_db)
+    w._video_dims = {"sv1": (200, 200)}
+    crop = np.full((200, 200, 3), 10, dtype=np.uint8)
+
+    out = w._blend_seg_mask(crop, "sv1", 0, None, 0.0, 0.0, 200.0, 200.0)
+
+    # The legend is drawn by the canvas on top of the image, not into it.
+    assert np.array_equal(out[0:100, 0:100], crop[0:100, 0:100])
+    assert [text for _color, text in w._seg_legend] == ["Harri"]
+
+
+def test_seg_source_prefers_newest_run_among_equal_mask_counts(dummy_db):
+    from app.ui.content_panels import _seg_source_for_video
+
+    for rid, created in (("old", "2026-05-31T10:00:00+00:00"), ("new", "2026-05-31T17:00:00+00:00")):
+        dummy_db.execute("INSERT INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at) VALUES (?, 'sh1', 0, 1, ?)", (rid, created))
+        for f in range(2):
+            dummy_db.execute("INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) VALUES (?, 'sv1', ?, x'00')", (rid, f))
+    assert _seg_source_for_video(dummy_db, "sv1") == "new"
+    dummy_db.execute("INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) VALUES ('old', 'sv1', 5, x'00')")
+    assert _seg_source_for_video(dummy_db, "sv1") == "old"  # more masks wins over newer
+    assert _seg_source_for_video(dummy_db, "nope") is None
+
+
+def test_overlay_shows_current_masks_or_the_revision_a_tracking_run_used(qapp, dummy_db):
+    from posetrak.db import seg_revisions as sr
+
+    old = np.zeros((4, 4), dtype=np.uint8)
+    old[0:2, 0:2] = 1
+    _insert_mask(dummy_db, old)                      # revision 0
+    new = np.zeros((4, 4), dtype=np.uint8)
+    new[2:4, 2:4] = 1
+    rev = sr.open_revision(dummy_db, "sqr1")
+    sr.write_mask(dummy_db, "sqr1", "sv1", 0, rev, _encode_png(new))
+    sr.close_revision(dummy_db, "sqr1", rev)
+    dummy_db.execute(
+        "INSERT INTO tracking_runs (id, observation_sequence_id, tracker_config_id, skeleton_id, extrinsic_calibration_id, sync_config_id, posetrak_version, active_camera_ids, marker_names, ran_at)"
+        " VALUES ('tr', 'seq', 'cfg', 'sk', 'ex', 'sy', 'v', '[]', '[]', 't')")
+    dummy_db.execute(
+        "INSERT INTO tracking_run_persons (run_id, person_id, skeleton_id, seg_quality_run_id, seg_mask_label, seg_revision)"
+        " VALUES ('tr', 0, 'sk', 'sqr1', 1, 0)")
+    dummy_db.commit()
+    w = _make_widget(dummy_db)
+
+    assert np.array_equal(w._decoded_seg_mask("sqr1", "sv1", 0), new)      # no run shown: current masks
+    w._tracking_seg = w._recorded_seg("tr")
+    assert w._tracking_seg == ("sqr1", 0)
+    assert np.array_equal(w._decoded_seg_mask("sqr1", "sv1", 0), old)      # the run's own revision
+    w._tracking_seg = w._recorded_seg(None)
+    assert np.array_equal(w._decoded_seg_mask("sqr1", "sv1", 0), new)

@@ -10,6 +10,9 @@ import collections
 import json
 import logging
 import sqlite3
+from posetrak.db.db import _connect
+from posetrak.db.run_status import display_status
+from posetrak.db.seg_revisions import mask_at
 import sys
 import threading
 from pathlib import Path
@@ -266,7 +269,7 @@ def _db_path_of(conn: sqlite3.Connection) -> "str | None":
 
 
 _RUN_INFO_SQL = (
-    "SELECT tr.id AS run_id, tr.ran_at, tr.posetrak_version, "
+    "SELECT tr.id AS run_id, tr.ran_at, tr.posetrak_version, tr.status, tr.failure, "
     "       tr.tracker_config_id, tr.skeleton_id, tr.notes, "
     "       tr.observation_sequence_id, tr.active_camera_ids, "
     "       s.name AS skel_name, "
@@ -934,6 +937,10 @@ class CapturePanel(QWidget):
         self._ext_btn = QPushButton("Extrinsics…")
         self._ext_btn.clicked.connect(self._open_extrinsics)
 
+        cameras_btn = QPushButton("Cameras…")
+        cameras_btn.setToolTip("Fix which camera recorded each video (keeps the sync points)")
+        cameras_btn.clicked.connect(self._open_reassign_cameras)
+
         self._detect_btn = QPushButton("New trial…")
         self._detect_btn.clicked.connect(self._open_new_trial_dialog)
         self._detect_btn.setEnabled(has_sync and bool(videos))
@@ -947,6 +954,7 @@ class CapturePanel(QWidget):
         toolbar.addWidget(mark_end_btn)
         toolbar.addStretch()
         toolbar.addWidget(sync_btn)
+        toolbar.addWidget(cameras_btn)
         toolbar.addWidget(self._ext_btn)
         toolbar.addWidget(self._detect_btn)
 
@@ -1010,6 +1018,13 @@ class CapturePanel(QWidget):
             for r in sp_rows
         ]
         self._scrubber.reload_sync(SyncTable(sync_pts, fps_by_video))
+
+    def _open_reassign_cameras(self) -> None:
+        from app.ui.reassign_camera_dialog import ReassignCameraDialog
+        dlg = ReassignCameraDialog(self._conn, self._capture_id, parent=self)
+        dlg.exec()
+        if dlg.changed:
+            self.data_changed.emit()
 
     def _open_extrinsics(self) -> None:
         from app.setup.page_extrinsics import ExtrinsicsStatusDialog
@@ -1241,7 +1256,7 @@ class TrialPanel(QWidget):
         ).fetchall()
 
         tracking_runs = self._conn.execute(
-            "SELECT tr.id, COALESCE(sp.person_name, 'Unnamed') AS person_name, "
+            "SELECT tr.id, tr.name, COALESCE(sp.person_name, 'Unnamed') AS person_name, "
             "       tr.ran_at "
             "FROM tracking_runs tr "
             "LEFT JOIN pose_observation_sequences pos ON pos.id = tr.observation_sequence_id "
@@ -1294,7 +1309,7 @@ class TrialPanel(QWidget):
         if start_s is not None and end_s is not None:
             covering_segs = self._conn.execute(
                 "SELECT sq.id, sq.name, sq.time_start_s, sq.time_end_s, sq.quality_source, "
-                "       (SELECT COUNT(*) FROM seg_masks m WHERE m.seg_quality_run_id = sq.id) "
+                "       (SELECT COUNT(*) FROM seg_masks_latest m WHERE m.seg_quality_run_id = sq.id) "
                 "           AS n_masks "
                 "FROM seg_quality_runs sq "
                 "WHERE sq.shot_id = ? AND sq.time_start_s <= ? AND sq.time_end_s >= ? "
@@ -1374,8 +1389,8 @@ class TrialPanel(QWidget):
             self._trk_list.setAlternatingRowColors(True)
             for r in tracking_runs:
                 label = (
-                    f"{r['person_name']}"
-                    f"  {_fmt_ts(r['ran_at'])}"
+                    f"{r['name'] + '  ' if r['name'] else ''}{r['person_name']}"
+                    f"  {_fmt_ts(r['ran_at'])}  ·{r['id'][:8]}·"
                 )
                 item = QListWidgetItem(label)
                 item.setData(Qt.ItemDataRole.UserRole, r["id"])
@@ -1645,6 +1660,56 @@ class StandaloneRunPanel(QWidget):
         self.navigate_object_track.emit(seq_id)
 
 
+def _seg_label_color_bgr(label: int) -> tuple[int, int, int]:
+    """BGR colour of a segmentation mask label -- the same palette the
+    segmentation editor uses (app.pose.video_canvas.label_to_color), so a
+    subject looks the same in both."""
+    from app.pose.video_canvas import label_to_color
+
+    r, g, b = label_to_color(label)
+    return (b, g, r)
+
+
+def _labels_present_in_run(
+    conn: sqlite3.Connection, seg_run_id: str, n_samples: int = 12
+) -> list[int]:
+    """Non-zero mask labels found in *seg_run_id*'s masks, sampled.
+
+    Decodes *n_samples* masks spread evenly over the camera with the most
+    masks (a label that appears in only a few frames can be missed) and
+    returns the sorted labels seen.
+    """
+    import cv2
+    import numpy as np
+
+    row = conn.execute(
+        "SELECT shot_video_id, COUNT(*) n FROM seg_masks_latest WHERE seg_quality_run_id = ? "
+        "GROUP BY shot_video_id ORDER BY n DESC LIMIT 1",
+        (seg_run_id,),
+    ).fetchone()
+    if row is None:
+        return []
+    frames = [
+        r["frame_idx"] for r in conn.execute(
+            "SELECT frame_idx FROM seg_masks_latest WHERE seg_quality_run_id = ? AND shot_video_id = ? "
+            "ORDER BY frame_idx",
+            (seg_run_id, row["shot_video_id"]),
+        )
+    ]
+    step = max(1, len(frames) // max(1, n_samples))
+    labels: set[int] = set()
+    for frame_idx in frames[::step]:
+        blob = conn.execute(
+            "SELECT mask_blob FROM seg_masks_latest WHERE seg_quality_run_id = ? "
+            "AND shot_video_id = ? AND frame_idx = ?",
+            (seg_run_id, row["shot_video_id"], frame_idx),
+        ).fetchone()["mask_blob"]
+        mask = cv2.imdecode(np.frombuffer(bytes(blob), dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+        if mask is not None:
+            labels.update(int(v) for v in np.unique(mask) if v != 0)
+    return sorted(labels)
+
+
 class SegmentationRunPanel(QWidget):
     """Summary view for a single seg_quality_runs row, reached by clicking
     a segmentation node in the session tree (segmentation-ui-improvements
@@ -1669,9 +1734,9 @@ class SegmentationRunPanel(QWidget):
         row = self._conn.execute(
             "SELECT sq.id, sq.name, sq.time_start_s, sq.time_end_s, sq.created_at, "
             "       sq.quality_source, sq.notes, c.label AS capture_label, "
-            "       (SELECT COUNT(*) FROM seg_masks m WHERE m.seg_quality_run_id = sq.id) "
+            "       (SELECT COUNT(*) FROM seg_masks_latest m WHERE m.seg_quality_run_id = sq.id) "
             "           AS n_masks, "
-            "       (SELECT COUNT(DISTINCT shot_video_id) FROM seg_masks m "
+            "       (SELECT COUNT(DISTINCT shot_video_id) FROM seg_masks_latest m "
             "           WHERE m.seg_quality_run_id = sq.id) AS n_cameras "
             "FROM seg_quality_runs sq "
             "LEFT JOIN captures c ON c.id = sq.shot_id "
@@ -1709,6 +1774,8 @@ class SegmentationRunPanel(QWidget):
             lbl.setWordWrap(True)
             vbox.addWidget(lbl)
 
+        self._build_label_table(vbox)
+
         open_btn = QPushButton("Open / Continue…")
         open_btn.setToolTip(
             "Open the segmentation editor, continuing this run instead of "
@@ -1718,6 +1785,47 @@ class SegmentationRunPanel(QWidget):
         vbox.addWidget(open_btn, alignment=Qt.AlignmentFlag.AlignLeft)
 
         vbox.addStretch()
+
+    def _build_label_table(self, vbox: QVBoxLayout) -> None:
+        """Which subject each mask label means in this segmentation, with a
+        picker to correct it (subject-identity-design.md, seg_quality_run_
+        subjects). A label whose subject cannot be told stays unassigned."""
+        from posetrak.db.manage_subject import (
+            list_subjects, set_run_label_subject, subject_for_label_in_run,
+        )
+
+        capture_id = self._conn.execute(
+            "SELECT shot_id FROM seg_quality_runs WHERE id = ?", (self._seg_run_id,)
+        ).fetchone()["shot_id"]
+        subjects = list_subjects(self._conn, capture_id)
+        labels = _labels_present_in_run(self._conn, self._seg_run_id)
+        if not labels:
+            return
+        head = QLabel("Mask labels")
+        head.setStyleSheet("font-weight: bold;")
+        vbox.addWidget(head)
+        for label in labels:
+            b, g, r = _seg_label_color_bgr(label)
+            swatch = QLabel(f" {label} ")
+            swatch.setStyleSheet(f"background: rgb({r},{g},{b}); color: black;")
+            combo = QComboBox()
+            combo.addItem("(unassigned)", None)
+            for subj in subjects:
+                combo.addItem(f"{subj['name']} ({subj['kind']})", subj["id"])
+            current = subject_for_label_in_run(self._conn, self._seg_run_id, label)
+            combo.setCurrentIndex(combo.findData(current["id"]) if current else 0)
+
+            def _changed(_i, lab=label, cb=combo) -> None:
+                set_run_label_subject(self._conn, self._seg_run_id, lab, cb.currentData())
+                self.data_changed.emit()
+
+            combo.currentIndexChanged.connect(_changed)
+            row_w = QWidget()
+            row_l = QHBoxLayout(row_w)
+            row_l.setContentsMargins(0, 0, 0, 0)
+            row_l.addWidget(swatch)
+            row_l.addWidget(combo, stretch=1)
+            vbox.addWidget(row_w)
 
 
 # ---------------------------------------------------------------------------
@@ -1817,8 +1925,7 @@ class CropBackfillWorker(QThread):
 
         _log.info("backfill worker: thread started  db=%s", self._db_path)
         try:
-            conn = sqlite3.connect(self._db_path)
-            conn.row_factory = sqlite3.Row
+            conn = _connect(Path(self._db_path))
         except Exception:
             _log.exception("backfill worker: failed to open DB")
             return
@@ -2607,6 +2714,14 @@ class _ImageCanvas(QWidget):
         self._joint_xy: dict | None = None    # joint_name → [u, v] full-frame
         self._bone_pairs: list = []
         self._marker_xy = None                 # (N, 2) float32 full-frame
+        self._dot_xy = None                    # (N, 2) float32 full-frame -- raw detected
+                                                # reflective-dot candidates (distinct from
+                                                # marker_xy, which is a tracked/predicted
+                                                # projection, not a raw detection)
+        self._dot_status = None                # list[(status, label)] parallel to _dot_xy,
+                                                # status in {"inlier","outlier","unassigned"};
+                                                # None (or a shorter list) means "no status
+                                                # known yet" -- draws the old uniform colour
         # Visibility flags
         self._show_detected: bool = True
         self._show_tracked: bool = True
@@ -2628,6 +2743,9 @@ class _ImageCanvas(QWidget):
         # Zoom/pan: desired view, full-frame pixel coords; None = fit whatever
         # crop is given (today's default). See _compute_view_transform.
         self._zoom_rect: tuple[float, float, float, float] | None = None
+        # Called (no arguments) whenever zoom or pan changes the view, so the
+        # owner can fetch image data that matches the new view.
+        self.on_view_changed = None
         self._pan_active: bool = False
         self._pan_start_disp: tuple[float, float] | None = None
         self._pan_start_rect: tuple[float, float, float, float] | None = None
@@ -2645,6 +2763,9 @@ class _ImageCanvas(QWidget):
         # see "Debug overlay" in the design doc. None = hidden (checkbox off
         # or nothing to report yet).
         self._debug_label: str | None = None
+        # (colour, name) per segmentation label painted into the current image;
+        # drawn by Qt at the viewport's top-left, not into the image.
+        self._legend: list[tuple[QColor, str]] = []
 
     def set_placement_active(self, active: bool) -> None:
         self._placement_active = active
@@ -2661,7 +2782,10 @@ class _ImageCanvas(QWidget):
         self._outlier_kp_mask = None
         self._joint_xy = None
         self._marker_xy = None
+        self._dot_xy = None
+        self._dot_status = None
         self._debug_label = None
+        self._legend = []
         self.update()
 
     def show_loading(self) -> None:
@@ -2672,7 +2796,10 @@ class _ImageCanvas(QWidget):
         self._outlier_kp_mask = None
         self._joint_xy = None
         self._marker_xy = None
+        self._dot_xy = None
+        self._dot_status = None
         self._debug_label = None
+        self._legend = []
         self.update()
 
     def show_image(self, pixmap: QPixmap, x1: float, y1: float, src_scale: float) -> None:
@@ -2692,11 +2819,15 @@ class _ImageCanvas(QWidget):
         show_detected: bool,
         show_tracked: bool,
         outlier_mask=None,
+        dot_xy=None,
+        dot_status=None,
     ) -> None:
         self._obs_kp = obs_kp
         self._joint_xy = joint_xy
         self._bone_pairs = bone_pairs
         self._marker_xy = marker_xy
+        self._dot_xy = dot_xy
+        self._dot_status = dot_status
         self._show_detected = show_detected
         self._show_tracked = show_tracked
         self._outlier_kp_mask = outlier_mask
@@ -2705,6 +2836,11 @@ class _ImageCanvas(QWidget):
     def set_debug_label(self, text: "str | None") -> None:
         if text != self._debug_label:
             self._debug_label = text
+            self.update()
+
+    def set_legend(self, entries: "list[tuple[QColor, str]]") -> None:
+        if entries != self._legend:
+            self._legend = list(entries)
             self.update()
 
     def set_edit_mode(self, enabled: bool) -> None:
@@ -2773,6 +2909,11 @@ class _ImageCanvas(QWidget):
         if self._zoom_rect is not None:
             self._zoom_rect = None
             self.update()
+            self._view_changed()
+
+    def _view_changed(self) -> None:
+        if self.on_view_changed is not None:
+            self.on_view_changed()
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
         self.reset_zoom()
@@ -2868,6 +3009,7 @@ class _ImageCanvas(QWidget):
                     # rect moves opposite to the drag direction.
                     self._zoom_rect = _panned_rect(self._pan_start_rect, -fdx, -fdy)
                     self.update()
+                    self._view_changed()
             return
 
         if self._drag_kp is not None and (event.buttons() & Qt.MouseButton.LeftButton):
@@ -2986,6 +3128,7 @@ class _ImageCanvas(QWidget):
         else:
             self._zoom_rect = new_rect
         self.update()
+        self._view_changed()
 
     def _apply_pan_delta(self, disp_dx: float, disp_dy: float) -> None:
         extent = self._pixmap_extent()
@@ -2999,6 +3142,24 @@ class _ImageCanvas(QWidget):
             return
         self._zoom_rect = _panned_rect(self._zoom_rect, -disp_dx / scale, -disp_dy / scale)
         self.update()
+        self._view_changed()
+
+    @staticmethod
+    def _draw_label(painter: QPainter, pt: QPointF, text: str, color: QColor) -> None:
+        """Small text label in *color*, black rounded-rect background, offset from
+        *pt* -- same background-chip idiom as the edit-mode selected-keypoint name
+        label below, parameterized so overlays other than that one can use it too."""
+        fm = painter.fontMetrics()
+        text_w = fm.horizontalAdvance(text)
+        text_h = fm.height()
+        lx = pt.x() + 8
+        ly = pt.y() - text_h / 2
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 170))
+        painter.drawRoundedRect(QRectF(lx - 2, ly - 1, text_w + 5, text_h + 2), 2.0, 2.0)
+        painter.setPen(color)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawText(QPointF(lx, ly + fm.ascent()), text)
 
     def paintEvent(self, _event) -> None:
         from math import isnan
@@ -3025,6 +3186,28 @@ class _ImageCanvas(QWidget):
             painter.drawRect(QRectF(pad, pad, tw + 2 * pad, fm.height() + 2 * pad))
             painter.setPen(QColor(255, 220, 0))
             painter.drawText(QPointF(2 * pad, pad + fm.ascent() + pad), self._debug_label)
+
+        def _draw_legend() -> None:
+            # Segmentation legend: a colour swatch and the subject's name per
+            # label, at the top-left of the viewport (below the debug label).
+            if not self._legend:
+                return
+            fm = painter.fontMetrics()
+            pad = 3
+            row_h = fm.height() + 2 * pad
+            y = pad + ((fm.height() + 3 * pad) if self._debug_label else 0)
+            for color, text in self._legend:
+                tw = fm.horizontalAdvance(text)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(0, 0, 0, 160))
+                painter.drawRect(QRectF(pad, y, row_h + tw + 2 * pad, row_h))
+                painter.setBrush(color)
+                painter.drawRect(QRectF(2 * pad, y + pad, fm.height(), fm.height()))
+                painter.setPen(QColor(255, 255, 255))
+                painter.drawText(
+                    QPointF(2 * pad + fm.height() + pad, y + pad + fm.ascent()), text
+                )
+                y += row_h + 2
 
         def _draw_placement_label() -> None:
             # Chain-placement mode: names which keypoint the next click will
@@ -3129,6 +3312,52 @@ class _ImageCanvas(QWidget):
                 else:
                     painter.setBrush(QColor(220, 40, 40))   # red
                 painter.drawEllipse(to_pt(kp_x, kp_y), 5.0, 5.0)
+
+        if self._show_detected and self._dot_xy is not None:
+            # Raw detected reflective-dot candidates. Gated with the other
+            # *detected* overlays (show_detected), not show_tracked: a
+            # candidate is a raw detection, not a tracked/predicted result,
+            # and a widget with no "tracked" concept at all
+            # (ObjectCropGridWidget always passes show_tracked=False) must
+            # still be able to show it.
+            #
+            # Colour encodes the tracker's own assignment decision for this
+            # candidate (see _TrackingRunLoader's resolved-marker pass and
+            # PersonCropGridWidget._apply_overlay's nearest-position join):
+            # magenta/default when that decision isn't known (no status
+            # array -- e.g. ObjectCropGridWidget, which has no tracking run
+            # to ask), green when the candidate was assigned to a marker
+            # slot and accepted as an inlier, orange when assigned but
+            # rejected by the UKF's outlier check, and blue when never
+            # assigned to any slot at all. Blue rather than grey: grey
+            # disappears against the kind of dark background these crops
+            # usually have.
+            status = self._dot_status
+            n_status = len(status) if status is not None else 0
+            _DOT_COLORS = {
+                "inlier": QColor(0, 220, 60),
+                "outlier": QColor(255, 140, 0),
+                "unassigned": QColor(60, 140, 255),
+            }
+            _DEFAULT_DOT_COLOR = QColor(230, 0, 230)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for i in range(self._dot_xy.shape[0]):
+                du, dv = float(self._dot_xy[i, 0]), float(self._dot_xy[i, 1])
+                if isnan(du) or isnan(dv):
+                    continue
+                label = None
+                if i < n_status and status[i] is not None:
+                    st, label = status[i]
+                    color = _DOT_COLORS.get(st, _DEFAULT_DOT_COLOR)
+                else:
+                    color = _DEFAULT_DOT_COLOR
+                pen = QPen(color)
+                pen.setWidthF(1.5)
+                painter.setPen(pen)
+                pt = to_pt(du, dv)
+                painter.drawEllipse(pt, 4.0, 4.0)
+                if label:
+                    self._draw_label(painter, pt, label, color)
 
         # ---- Tracked skeleton (cyan lines + yellow dots) ----
         if self._show_tracked:
@@ -3240,6 +3469,7 @@ class _ImageCanvas(QWidget):
             ))
 
         _draw_debug_label()
+        _draw_legend()
         _draw_placement_label()
         painter.end()
 
@@ -3294,6 +3524,9 @@ class _CropCell(QWidget):
     def show_image(self, pixmap: QPixmap, x1: float, y1: float, src_scale: float) -> None:
         self._canvas.show_image(pixmap, x1, y1, src_scale)
 
+    def set_legend(self, entries) -> None:
+        self._canvas.set_legend(entries)
+
     def set_overlay(
         self,
         obs_kp,
@@ -3303,10 +3536,12 @@ class _CropCell(QWidget):
         show_detected: bool,
         show_tracked: bool,
         outlier_mask=None,
+        dot_xy=None,
+        dot_status=None,
     ) -> None:
         self._canvas.set_overlay(
             obs_kp, joint_xy, bone_pairs, marker_xy, show_detected, show_tracked,
-            outlier_mask=outlier_mask,
+            outlier_mask=outlier_mask, dot_xy=dot_xy, dot_status=dot_status,
         )
 
     def set_edit_mode(self, enabled: bool) -> None:
@@ -3358,8 +3593,9 @@ class _TrackingRunLoader(QThread):
     loading fails.
     """
 
-    loaded = Signal(list, dict, dict, list, dict)
-    # args: tracking_timestamps, marker_proj, joint_proj, bone_pairs, outlier_masks
+    loaded = Signal(list, dict, dict, list, dict, dict, dict)
+    # args: tracking_timestamps, marker_proj, joint_proj, bone_pairs, outlier_masks,
+    #       resolved_markers, cam_intrinsics
 
     def __init__(self, db_path: str, run_id: str) -> None:
         super().__init__()   # no Qt parent — lifetime managed via _ACTIVE_LOADERS
@@ -3384,7 +3620,7 @@ class _TrackingRunLoader(QThread):
             conn.row_factory = _sqlite3.Row
             self._do_load(conn, np, json, SkeletonLayout)
         except Exception:
-            self.loaded.emit([], {}, {}, [], {})
+            self.loaded.emit([], {}, {}, [], {}, {}, {})
         finally:
             if conn is not None:
                 conn.close()
@@ -3398,14 +3634,14 @@ class _TrackingRunLoader(QThread):
             (run_id,),
         ).fetchone()
         if run is None:
-            self.loaded.emit([], {}, {}, [], {})
+            self.loaded.emit([], {}, {}, [], {}, {}, {})
             return
 
         cam_labels: list[str] = json.loads(run["active_camera_ids"] or "[]")
         marker_names: list[str] = json.loads(run["marker_names"] or "[]")
         n_cams, n_markers = len(cam_labels), len(marker_names)
         if n_cams == 0 or n_markers == 0:
-            self.loaded.emit([], {}, {}, [], {})
+            self.loaded.emit([], {}, {}, [], {}, {}, {})
             return
 
         # Map camera label → camera_instance_id
@@ -3433,7 +3669,7 @@ class _TrackingRunLoader(QThread):
             (run["skeleton_id"],),
         ).fetchone()
         if not skel or not skel["yaml_content"]:
-            self.loaded.emit([], {}, {}, [], {})
+            self.loaded.emit([], {}, {}, [], {}, {}, {})
             return
         layout = SkeletonLayout(skel["yaml_content"])
         bone_pairs = layout.bone_pairs
@@ -3500,40 +3736,77 @@ class _TrackingRunLoader(QThread):
         # corrected skeleton on a fast-motion frame. Projecting both markers
         # and joints from the same posterior state keeps the two overlays
         # from ever visually disagreeing.
+        # resolved_markers: cam_id -> step -> {marker_name: (u, v, is_outlier)} --
+        # every marker with a non-NaN obs_blob position this step, keyed by name
+        # rather than COCO id so it covers dot/prop markers too (mi_to_coco is
+        # empty for a dots-only skeleton, unlike outlier_masks below). This is
+        # what PersonCropGridWidget._apply_overlay correlates raw dot_xy
+        # candidates against to decide each one's assigned/inlier/unassigned
+        # colour -- see that method and _ImageCanvas's dot_xy drawing block.
         outlier_masks: dict[str, dict[int, object]] = {}
-        if mi_to_coco:
-            obs_rows = conn.execute(
-                "SELECT tracker_step, obs_blob FROM tracking_obs_results "
-                "WHERE run_id=? AND person_id=0 ORDER BY tracker_step",
-                (run_id,),
-            ).fetchall()
-            expected_obs = n_cams * n_markers * 8
-            for obs_row in obs_rows:
-                step = obs_row["tracker_step"]
-                blob = np.frombuffer(bytes(obs_row["obs_blob"]), dtype="<f4")
-                if len(blob) != expected_obs:
+        resolved_markers: dict[str, dict[int, dict[str, tuple]]] = {}
+        obs_rows = conn.execute(
+            "SELECT tracker_step, obs_blob FROM tracking_obs_results "
+            "WHERE run_id=? AND person_id=0 ORDER BY tracker_step",
+            (run_id,),
+        ).fetchall()
+        expected_obs = n_cams * n_markers * 8
+        for obs_row in obs_rows:
+            step = obs_row["tracker_step"]
+            blob = np.frombuffer(bytes(obs_row["obs_blob"]), dtype="<f4")
+            if len(blob) != expected_obs:
+                continue
+            obs = blob.reshape(n_cams, n_markers, 8)
+            for ci, label in enumerate(cam_labels):
+                cam_id = label_to_cam_id.get(label)
+                if cam_id is None:
                     continue
-                obs = blob.reshape(n_cams, n_markers, 8)
-                for ci, label in enumerate(cam_labels):
-                    cam_id = label_to_cam_id.get(label)
-                    if cam_id is None:
-                        continue
+                if mi_to_coco:
                     mask = np.zeros(n_coco_kp, dtype=bool)
                     for mi, coco_id in mi_to_coco.items():
                         is_out = obs[ci, mi, 6]
                         if np.isfinite(is_out) and is_out != 0.0:
                             mask[coco_id] = True
                     outlier_masks.setdefault(cam_id, {})[step] = mask
+                by_marker: dict[str, tuple] = {}
+                for mi, marker_name in enumerate(marker_names):
+                    u, v, is_out = obs[ci, mi, 0], obs[ci, mi, 1], obs[ci, mi, 6]
+                    if np.isfinite(u) and np.isfinite(v):
+                        by_marker[marker_name] = (float(u), float(v), bool(is_out != 0.0))
+                # Recorded even when empty: an obs_blob row exists for this step, so
+                # "zero markers resolved for this camera" is a real, known answer (every
+                # candidate is unassigned), not "no data" -- collapsing the two here
+                # would make _classify_dot_candidates fall back to its no-data default
+                # (undifferentiated magenta) on exactly the frames most worth marking
+                # blue: the ones where assignment failed for every slot on this camera.
+                resolved_markers.setdefault(cam_id, {})[step] = by_marker
 
         # State blobs → joint + marker projections via FK, both from the same
-        # posterior (corrected) state.
+        # posterior (corrected) state. Prefer the RTS-smoothed state (uses
+        # future information too, strictly the better final estimate) over
+        # the forward-pass-only one -- falling back to unsmoothed only for a
+        # run made with --no-smooth, which never gets is_smoothed=1 rows at
+        # all. This is the tracked overlay a person reviews to judge fit
+        # quality; showing them the pre-smoothing estimate instead of the
+        # tracker's own final answer was never intentional (nothing here
+        # ever meant "unsmoothed" specifically -- see the diagnostic-metric
+        # queries elsewhere in this file, which correctly stay on
+        # is_smoothed=0 since NIS/inlier-count/condition-number describe the
+        # forward filter's own per-step update and aren't recomputed by
+        # smoothing at all).
         joint_proj: dict[str, dict[int, dict]] = {}
         marker_proj: dict[str, dict[int, object]] = {}
         state_rows = conn.execute(
             "SELECT tracker_step, state FROM tracking_results "
-            "WHERE run_id=? AND person_id=0 AND is_smoothed=0 ORDER BY tracker_step",
+            "WHERE run_id=? AND person_id=0 AND is_smoothed=1 ORDER BY tracker_step",
             (run_id,),
         ).fetchall()
+        if not state_rows:
+            state_rows = conn.execute(
+                "SELECT tracker_step, state FROM tracking_results "
+                "WHERE run_id=? AND person_id=0 AND is_smoothed=0 ORDER BY tracker_step",
+                (run_id,),
+            ).fetchall()
         for state_row in state_rows:
             step = state_row["tracker_step"]
             try:
@@ -3586,7 +3859,91 @@ class _TrackingRunLoader(QThread):
                     marker_xy[mi] = uv
                 marker_proj.setdefault(cam_id, {})[step] = marker_xy
 
-        self.loaded.emit(tracking_timestamps, marker_proj, joint_proj, bone_pairs, outlier_masks)
+        self.loaded.emit(
+            tracking_timestamps, marker_proj, joint_proj, bone_pairs, outlier_masks,
+            resolved_markers, cam_intrinsics,
+        )
+
+
+# A resolved (winning) observation's position (tracking_obs_results.obs_blob's actual_x/y)
+# is undistorted pixels (UnlabeledCandidate::position's own documented convention,
+# dot_assignment.cpp: obs.position = cand.position). The raw candidates in dot_xy
+# (pose_observations' own 'dots' blob) are the detector's original, *distorted* pixels --
+# same convention obs_kp/marker_xy/joint_xy all use, since they are drawn directly over the
+# raw (not undistorted) displayed video frame (see PersonCropGridWidget._do_load's own
+# _project_point_distorted). Comparing the two without first undistorting one of them is off
+# by however much lens distortion moves that point -- confirmed on real data: ~12px near the
+# image centre, growing further out, nowhere near noise-level. _classify_dot_candidates
+# undistorts a *copy* of dot_xy for the comparison only; the original (distorted) dot_xy is
+# still what gets drawn, so it stays aligned with the displayed frame.
+_DOT_ASSIGNMENT_MATCH_PX = 3.0
+
+
+def _undistort_for_matching(dot_xy, intrinsics: dict | None):
+    """Returns a copy of *dot_xy* (N, 2) mapped from distorted to undistorted pixel
+    space using *intrinsics* (one _TrackingRunLoader cam_intrinsics entry: fx, fy, cx,
+    cy, K_orig, dist), for _classify_dot_candidates to compare against obs_blob's own
+    undistorted positions. Returns *dot_xy* unchanged if intrinsics (or the distortion
+    half of it) aren't available -- matching then degrades to the old, wrong-but-not-
+    worse-than-before behaviour rather than raising.
+    """
+    if intrinsics is None:
+        return dot_xy
+    K_orig = intrinsics.get("K_orig")
+    dist = intrinsics.get("dist")
+    if K_orig is None or dist is None or dot_xy.shape[0] == 0:
+        return dot_xy
+
+    import cv2
+    import numpy as np
+
+    K = np.array([
+        [intrinsics["fx"], 0.0, intrinsics["cx"]],
+        [0.0, intrinsics["fy"], intrinsics["cy"]],
+        [0.0, 0.0, 1.0],
+    ])
+    pts = dot_xy.reshape(-1, 1, 2).astype(np.float64)
+    undistorted = cv2.undistortPoints(pts, K_orig, dist, P=K)
+    return undistorted.reshape(-1, 2)
+
+
+def _classify_dot_candidates(dot_xy, resolved: dict[str, tuple], intrinsics: dict | None = None) -> list:
+    """Match each raw candidate in *dot_xy* (N, 2) against *resolved*
+    ({marker_name: (u, v, is_outlier)}, one step's worth from
+    _TrackingRunLoader) by nearest position, for _ImageCanvas's
+    assigned/unassigned dot colouring.
+
+    *dot_xy* is in distorted pixel space (see this module's own comment
+    above); *resolved* is undistorted. *intrinsics*, when given, undistorts a
+    copy of *dot_xy* before matching -- see _undistort_for_matching().
+
+    Returns a list parallel to *dot_xy*: ``(status, label)`` where status is
+    "inlier" (assigned, accepted), "outlier" (assigned, rejected by the UKF),
+    or "unassigned" (no resolved marker sits close enough to this candidate
+    this step) with label ``None``. A resolved marker not claimed by any
+    candidate within the match distance (e.g. reconstructed rather than
+    observed) simply never marks one -- every candidate still gets a status.
+    """
+    import numpy as np
+    from math import isnan
+
+    match_xy = _undistort_for_matching(dot_xy, intrinsics)
+    names = list(resolved.keys())
+    positions = np.array([[resolved[n][0], resolved[n][1]] for n in names], dtype=np.float64)
+    result = []
+    for i in range(match_xy.shape[0]):
+        du, dv = float(match_xy[i, 0]), float(match_xy[i, 1])
+        if isnan(du) or isnan(dv) or len(names) == 0:
+            result.append(("unassigned", None))
+            continue
+        dist_px = np.hypot(positions[:, 0] - du, positions[:, 1] - dv)
+        j = int(np.argmin(dist_px))
+        if dist_px[j] <= _DOT_ASSIGNMENT_MATCH_PX:
+            _, _, is_outlier = resolved[names[j]]
+            result.append(("outlier" if is_outlier else "inlier", names[j]))
+        else:
+            result.append(("unassigned", None))
+    return result
 
 
 class _KeypointPickerPanel(QWidget):
@@ -3683,6 +4040,19 @@ class _KeypointPickerPanel(QWidget):
                     return
 
 
+def _seg_source_for_video(conn: sqlite3.Connection, shot_video_id: str) -> str | None:
+    """The segmentation run whose masks are shown for a video: the run with the
+    most masks for it, the newest one when several have the same number."""
+    row = conn.execute(
+        "SELECT m.seg_quality_run_id, COUNT(*) n FROM seg_masks_latest m "
+        "JOIN seg_quality_runs sq ON sq.id = m.seg_quality_run_id "
+        "WHERE m.shot_video_id=? GROUP BY m.seg_quality_run_id "
+        "ORDER BY n DESC, sq.created_at DESC LIMIT 1",
+        (shot_video_id,),
+    ).fetchone()
+    return row[0] if row else None
+
+
 class PersonCropGridWidget(QWidget):
     """Grid of per-camera person crop images with a time scrubber.
 
@@ -3708,6 +4078,13 @@ class PersonCropGridWidget(QWidget):
     # treated as "on" when None so a test fixture without it still exercises
     # the default, common-case behavior.
     _auto_redetect_chk: "QCheckBox | None" = None
+    # Persistent PyAV decoders (app/pose/frame_service.py) that serve frames of
+    # a sequence with no person tracks -- a prop. None for person sequences.
+    _frame_service: "FrameService | None" = None
+    # Playback timer and the wall-clock time of its previous tick.
+    _play_timer: "QTimer | None" = None
+    _play_last: float = 0.0
+    _play_btn: "QPushButton | None" = None
 
     # Number-key shortcuts for limb groups (see _handle_key): plain key
     # toggles show/hide of the limb's keypoints (same rule as the timeline's
@@ -3772,6 +4149,7 @@ class PersonCropGridWidget(QWidget):
         self._track_segs: dict[str, list[tuple[int, int, int]]] = {}
         # Pre-loaded per-camera data (indexed by shot_video_id or camera_instance_id)
         self._obs_kp: dict[str, dict[int, object]] = {}   # cam_instance_id→frame→kp
+        self._obs_dots: dict[str, dict[int, object]] = {}  # cam_instance_id→frame→dot_xy (N,2)
         self._det_bboxes: dict[str, dict[int, tuple]] = {}  # svid→frame→(cx,cy,w,h)
         # Tracking overlay data
         # _marker_proj: cam_instance_id → tracker_step → (n_markers, 2) predicted pixel positions
@@ -3782,6 +4160,13 @@ class PersonCropGridWidget(QWidget):
         self._tracking_timestamps: list[tuple[float, int]] = []  # sorted (ts, step)
         # cam_instance_id → tracker_step → bool array indexed by COCO keypoint ID
         self._outlier_masks: dict[str, dict[int, object]] = {}
+        # cam_instance_id → tracker_step → {marker_name: (u, v, is_outlier)} -- every
+        # marker (not just COCO-mapped ones), for the dot_xy assigned/unassigned colouring
+        self._resolved_markers: dict[str, dict[int, dict[str, tuple]]] = {}
+        # cam_instance_id → {fx, fy, cx, cy, K_orig, dist} -- undistorts a dot_xy candidate
+        # before matching it against _resolved_markers (which is already undistorted); see
+        # _undistort_for_matching's own comment.
+        self._cam_intrinsics: dict[str, dict] = {}
         self._backfill: CropBackfillWorker | None = None
         self._wide_crop_mgr: "FrameCropCacheManager | None" = None
         # Idea 3 (automated post-edit hand redetection): background worker +
@@ -3888,21 +4273,17 @@ class PersonCropGridWidget(QWidget):
             for r in cam_rows
         ]
 
-        # Find seg_quality_run_id with the most masks for each camera, and store
+        # Find seg_quality_run_id with the most masks for each camera (the newest
+        # run when several have the same number), and store
         # video dimensions for coordinate scaling (masks may be at a lower resolution
         # than the video, e.g. FHD masks on 4K cameras).
         self._video_dims: dict[str, tuple[int, int]] = {}  # svid → (w, h)
         for cam in self._cameras:
             svid = cam["shot_video_id"]
-            row_sq = self._conn.execute(
-                "SELECT seg_quality_run_id, COUNT(*) n FROM seg_masks "
-                "WHERE shot_video_id=? GROUP BY seg_quality_run_id ORDER BY n DESC LIMIT 1",
-                (svid,),
-            ).fetchone()
-            self._seg_sources[svid] = row_sq["seg_quality_run_id"] if row_sq else None
+            self._seg_sources[svid] = _seg_source_for_video(self._conn, svid)
             dim_row = self._conn.execute(
-                "SELECT COALESCE(cm.width_px, ic.image_width) AS vw, "
-                "       COALESCE(cm.height_px, ic.image_height) AS vh "
+                "SELECT COALESCE(ic.image_width, cm.width_px) AS vw, "
+                "       COALESCE(ic.image_height, cm.height_px) AS vh "
                 "FROM capture_videos cv "
                 "LEFT JOIN camera_modes cm ON cm.id = cv.camera_mode_id "
                 "LEFT JOIN intrinsics_calibrations ic ON ic.id = cv.intrinsics_calibration_id "
@@ -3913,11 +4294,24 @@ class PersonCropGridWidget(QWidget):
                 self._video_dims[svid] = (int(dim_row["vw"]), int(dim_row["vh"]))
 
         # Pre-load merged keypoints (pose_observations with pose_observation_edits applied)
-        from app.pose.db_cache import read_observations_with_edits
+        from app.pose.db_cache import decode_dot_candidates, read_observations_with_edits
         for cam in self._cameras:
-            self._obs_kp[cam["camera_instance_id"]] = read_observations_with_edits(
-                self._conn, self._sequence_id, cam["camera_instance_id"]
+            cid = cam["camera_instance_id"]
+            self._obs_kp[cid] = read_observations_with_edits(
+                self._conn, self._sequence_id, cid
             )
+            # Raw detected reflective-dot candidates, for visual evaluation of
+            # detection quality -- read_observations_with_edits excludes them
+            # (anonymous, not named/editable keypoints; different blob layout).
+            dot_rows = self._conn.execute(
+                "SELECT video_frame, kp_blob FROM pose_observations "
+                "WHERE sequence_id = ? AND camera_instance_id = ? AND source = 'dots'",
+                (self._sequence_id, cid),
+            ).fetchall()
+            self._obs_dots[cid] = {
+                r["video_frame"]: decode_dot_candidates(bytes(r["kp_blob"]))[:, :2]
+                for r in dot_rows
+            }
 
         # Timeline dope-sheet status, one camera at a time (Phase 12).
         for cam in self._cameras:
@@ -3951,6 +4345,7 @@ class PersonCropGridWidget(QWidget):
         for i, cam in enumerate(self._cameras):
             row, col = divmod(i, ncols)
             cell = _CropCell(cam["label"])
+            cell._canvas.on_view_changed = self._on_view_changed
             self._cells.append(cell)
             self._grid.addWidget(cell, row, col)
             self._grid.setColumnStretch(col, 1)
@@ -4068,6 +4463,26 @@ class PersonCropGridWidget(QWidget):
         overlay_row.addWidget(self._show_seg)
         overlay_row.addWidget(self._show_debug)
         overlay_row.addStretch()
+        for text, frames, tip in (
+            ("\u22ee\u25c0", -10, "Back 10 frames (Shift+Left)"),
+            ("\u25c0", -1, "Previous frame (Left arrow or A)"),
+            ("\u25b6", 1, "Next frame (Right arrow or D)"),
+            ("\u25b6\u22ee", 10, "Forward 10 frames (Shift+Right)"),
+        ):
+            step_btn = QPushButton(text)
+            step_btn.setToolTip(tip)
+            step_btn.setFixedWidth(34)
+            step_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            step_btn.clicked.connect(lambda _checked=False, n=frames: self._step_frames(n))
+            overlay_row.addWidget(step_btn)
+        self._play_btn = QPushButton("\u25b6 Play")
+        self._play_btn.setToolTip("Play at real-time speed (Space)")
+        self._play_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._play_btn.clicked.connect(self._toggle_play)
+        overlay_row.addWidget(self._play_btn)
+        self._proxy_label = QLabel("")
+        self._proxy_label.hide()
+        overlay_row.addWidget(self._proxy_label)
         overlay_row.addWidget(self._time_label)
         overlay_row.addWidget(self._edit_btn)
         overlay_row.addWidget(self._chain_btn)
@@ -4177,6 +4592,7 @@ class PersonCropGridWidget(QWidget):
         # placeholder. See "View-mode parity" in the design doc. The heavier
         # wide-crop cluster cache stays edit-mode-only (started/released in
         # _set_edit_mode), per its own cost/scope rationale.
+        self._start_frame_service()
         self._start_backfill()
 
         self._current_t = self._t_start
@@ -4326,9 +4742,244 @@ class PersonCropGridWidget(QWidget):
             self._timeline.set_edit_mode(enabled)
             self._sync_timeline(self._current_t)
 
+    def _is_object_sequence(self) -> bool:
+        """True if this sequence tracks a prop: its detection run belongs to a
+        capture object, so it has no person tracks or detection boxes."""
+        row = self._conn.execute(
+            "SELECT dr.capture_object_id FROM pose_observation_sequences pos "
+            "JOIN detection_runs dr ON dr.id = pos.detection_run_id WHERE pos.id = ?",
+            (self._sequence_id,),
+        ).fetchone()
+        return row is not None and row["capture_object_id"] is not None
+
+    _object_view: "bool | None" = None
+
+    def _is_object_view(self) -> bool:
+        if self._object_view is None:
+            self._object_view = self._is_object_sequence()
+        return self._object_view
+
+    def _start_frame_service(self) -> None:
+        """Serve every camera's frames from persistent decoders (see
+        frame_service.py) instead of the crop caches stored in the session
+        database. A person's view is framed on the person from the keypoints and
+        tracked skeleton (_show_service_frame), at the resolution the view needs."""
+        if self._frame_service is not None or not self._cameras:
+            return
+        from app.pose.frame_service import FrameService
+
+        service = FrameService(self._cameras)
+        service.frame_ready.connect(self._on_service_frame_ready)
+        service.frame_missing.connect(self._on_service_frame_ready)
+        service.unavailable.connect(lambda _svid: self._load_frame(self._current_t))
+        self._frame_service = service
+        self._start_proxy_cache()
+        # Bound to the service itself, not to this widget, so it still runs
+        # after the widget is gone.
+        self.destroyed.connect(lambda *_args, svc=service: svc.shutdown())
+
+    _proxy_cache = None
+
+    def _start_proxy_cache(self) -> None:
+        """Open the sidecar scrub proxy and, in the background, make sure it
+        covers this sequence for every camera. Scrubbing then shows the nearest
+        stored frame at once instead of waiting for a seek."""
+        from posetrak.detection.proxy_cache import (
+            ProxyBuilder, ProxyCache, session_db_path, sidecar_path,
+        )
+
+        db = session_db_path(self._conn)
+        if db is None:
+            return
+        try:
+            self._proxy_cache = ProxyCache(sidecar_path(db))
+        except Exception:  # noqa: BLE001  (read-only folder etc.: run without a proxy)
+            return
+        # A sequence can span a whole capture (tens of minutes to decode at 4K):
+        # each camera's builder works nearest the frame on screen first and
+        # follows the view when it moves (see _proxy_focus).
+        self._proxy_builders = {}
+        for cam in self._cameras:
+            svid = cam["shot_video_id"]
+            first = max(0, self._sync_table.lookup(self._t_start, svid))
+            last = max(first, self._sync_table.lookup(self._t_end, svid))
+            builder = ProxyBuilder(
+                self._proxy_cache.path, svid, cam["file_path"], first, last,
+                self._sync_table.lookup(self._current_t, svid),
+            )
+            self._proxy_builders[svid] = builder
+            builder.start()
+        self._proxy_timer = QTimer(self)
+        self._proxy_timer.timeout.connect(self._update_proxy_progress)
+        self._proxy_timer.start(1000)
+        self.destroyed.connect(
+            lambda *_a, bs=list(self._proxy_builders.values()): [b.cancel() for b in bs]
+        )
+
+    _proxy_builders: "dict | None" = None
+    _proxy_timer: "QTimer | None" = None
+    _proxy_label: "QLabel | None" = None
+
+    def _proxy_focus(self, svid: str, frame_idx: int) -> None:
+        if self._proxy_builders and svid in self._proxy_builders:
+            self._proxy_builders[svid].set_focus(frame_idx)
+
+    def _update_proxy_progress(self) -> None:
+        """Show how much of the scrub proxy is built; hide it when complete."""
+        builders = self._proxy_builders or {}
+        total = sum(b.total for b in builders.values())
+        done = sum(b.done for b in builders.values())
+        if self._proxy_label is not None:
+            if total and done < total:
+                self._proxy_label.setText(f"Scrub cache {100 * done // total}%")
+                self._proxy_label.setToolTip(
+                    "Low-resolution frames used while dragging the time slider are still "
+                    "being prepared in the background, nearest the current time first. "
+                    "Until then some cameras show a loading image while scrubbing."
+                )
+                self._proxy_label.show()
+            else:
+                self._proxy_label.hide()
+        if total and done >= total and self._proxy_timer is not None:
+            self._proxy_timer.stop()
+
+    _service_reload_scheduled = False
+    _view_timer: "QTimer | None" = None
+    _VIEW_SETTLE_MS = 150
+
+    def _on_view_changed(self) -> None:
+        """Zoom or pan changed. The image already shown keeps being used while
+        the view is moving; once it has settled, redraw so that a crop at the
+        resolution the new view needs is requested from the frame service."""
+        if self._frame_service is None:
+            return
+        if self._view_timer is None:
+            self._view_timer = QTimer(self)
+            self._view_timer.setSingleShot(True)
+            self._view_timer.timeout.connect(lambda: self._load_frame(self._current_t))
+        self._view_timer.start(self._VIEW_SETTLE_MS)
+
+    def _on_service_frame_ready(self, svid: str, frame_idx: int) -> None:
+        """A decoder finished a frame. Redraw once for all cameras that finish
+        together (their signals arrive within a few milliseconds of each
+        other), instead of redrawing every camera for every signal."""
+        if not self._sync_table or self._service_reload_scheduled:
+            return
+        if self._sync_table.lookup(self._current_t, svid) != frame_idx:
+            return   # a prefetched or superseded frame, not the one on screen
+        self._service_reload_scheduled = True
+        QTimer.singleShot(15, self._reload_after_service)
+
+    def _reload_after_service(self) -> None:
+        self._service_reload_scheduled = False
+        self._load_frame(self._current_t)
+
+    def _show_service_frame(
+        self, cell, cam: dict, frame_idx: int, tracking_step, show_detected: bool,
+        show_tracked: bool, show_seg: bool, show_debug: bool,
+    ) -> None:
+        """Show *frame_idx* of camera *cam* from the frame service, or a
+        loading/empty placeholder while it is being decoded or unavailable."""
+        svid, cam_id = cam["shot_video_id"], cam["camera_instance_id"]
+        service = self._frame_service
+        self._proxy_focus(svid, frame_idx)
+        result = service.get(svid, frame_idx)
+        if result is None and service.request(svid, frame_idx):
+            result = service.get(svid, frame_idx)   # decoded between the two calls
+        if result is None:
+            if service.is_unavailable(svid) or service.is_missing(svid, frame_idx):
+                cell.show_empty()   # no video, or the video ends before this time
+                self._apply_overlay(
+                    cell, cam_id, svid, frame_idx, tracking_step, show_detected, show_tracked,
+                )
+                return
+            proxy = self._nearest_proxy(svid, frame_idx)
+            if proxy is None:
+                cell.show_loading()
+                self._apply_overlay(
+                    cell, cam_id, svid, frame_idx, tracking_step, show_detected, show_tracked,
+                )
+                return
+            # The exact frame is being decoded; meanwhile show the closest
+            # stored one. It replaces itself when the decode finishes.
+            desired = self._compute_target_rect(
+                cell, cam_id, svid, frame_idx, tracking_step,
+                (0.0, 0.0, float(proxy[5]), float(proxy[6])),
+            )
+            self._display_crop_result(
+                cell, cam_id, svid, frame_idx, tracking_step, show_detected, show_tracked,
+                proxy, target_rect=desired, layer_label="proxy", show_debug=show_debug,
+                show_seg=show_seg,
+            )
+            return
+        service.request(svid, frame_idx)   # keeps read-ahead and direction current
+        frame_w, frame_h = float(result[5]), float(result[6])
+        own_rect = (0.0, 0.0, frame_w, frame_h)
+        # A prop is shown whole (its rect is the frame); a person is framed on
+        # their keypoints and tracked skeleton, and only if there are none on the
+        # whole frame.
+        desired = self._compute_target_rect(
+            cell, cam_id, svid, frame_idx, tracking_step,
+            own_rect if self._is_object_view() else None,
+        ) or own_rect
+        canvas = cell._canvas
+        zoom = canvas._zoom_rect
+        view = zoom if zoom is not None else desired
+        view_w = max(1.0, view[2] - view[0])
+        # Canvas pixels per frame pixel the view needs, against what the
+        # whole-frame image (limited in size) can give.
+        need = canvas.width() / view_w
+        chosen, target = result, (own_rect if zoom is not None else desired)
+        if need > 1.1 * result[1] / frame_w:
+            crop = service.get_region(svid, frame_idx)
+            wanted = min(1.0, need)
+            if crop is not None and self._region_serves(crop, view, frame_w, frame_h, wanted):
+                chosen = crop
+                target = (
+                    float(crop[3]), float(crop[4]),
+                    float(crop[3] + crop[5]), float(crop[4] + crop[6]),
+                )
+            elif self._view_timer is None or not self._view_timer.isActive():
+                # Zoomed in further than the whole-frame image resolves (or the
+                # current crop does not cover the view): ask for a crop of the
+                # view plus a margin, so small pans stay inside it. The
+                # whole-frame image is shown until it arrives.
+                grow_x, grow_y = 0.25 * view_w, 0.25 * (view[3] - view[1])
+                service.request_region(
+                    svid, frame_idx,
+                    (view[0] - grow_x, view[1] - grow_y, view[2] + grow_x, view[3] + grow_y),
+                    wanted,
+                )
+        self._display_crop_result(
+            cell, cam_id, svid, frame_idx, tracking_step, show_detected, show_tracked,
+            chosen, target_rect=target, layer_label="frame-service", show_debug=show_debug,
+            show_seg=show_seg,
+        )
+
+    def _nearest_proxy(self, svid: str, frame_idx: int):
+        if self._proxy_cache is None:
+            return None
+        from posetrak.detection.proxy_cache import PROXY_STEP
+
+        try:
+            return self._proxy_cache.nearest(svid, frame_idx, PROXY_STEP)
+        except Exception:  # noqa: BLE001  (sidecar locked or removed)
+            return None
+
+    @staticmethod
+    def _region_serves(crop: tuple, view: tuple, frame_w: float, frame_h: float, wanted: float) -> bool:
+        """True if the region *crop* covers the part of *view* that lies inside
+        the frame, at about the resolution *wanted* (pixels per frame pixel)."""
+        cx0, cy0, cw, ch = crop[3], crop[4], crop[5], crop[6]
+        covers = (
+            cx0 <= max(0.0, view[0]) + 0.5 and cy0 <= max(0.0, view[1]) + 0.5
+            and cx0 + cw >= min(frame_w, view[2]) - 0.5 and cy0 + ch >= min(frame_h, view[3]) - 0.5
+        )
+        return covers and crop[1] / cw >= 0.9 * wanted
+
     def _start_backfill(self) -> None:
         """Start the background crop-generation worker if there is a detection run."""
-        if not self._det_run_id:
+        if self._frame_service is not None or not self._det_run_id:
             _log.debug("backfill: no detection run — skipping")
             return
         row = self._conn.execute("PRAGMA database_list").fetchone()
@@ -4360,7 +5011,7 @@ class PersonCropGridWidget(QWidget):
         reuses the first panel's already-built cache instead of rebuilding it
         -- see "Cache scope and lifecycle" in the design doc.
         """
-        if not self._det_run_id:
+        if self._frame_service is not None or not self._det_run_id:
             return
         row = self._conn.execute("PRAGMA database_list").fetchone()
         if row is None or not row[2]:
@@ -4857,6 +5508,19 @@ class PersonCropGridWidget(QWidget):
                 self._slider.setValue(self._slider.value() + self._slider.singleStep())
             return True
 
+        # Stepping and playback work in view mode too. In edit mode the arrows
+        # nudge a selected keypoint and Space skips a chain step, so those keys
+        # only step or play when they have nothing else to do.
+        if self._slider is not None and (
+            not self._edit_mode or not self._sel_kp_indices or self._sel_cam_idx is None
+        ):
+            if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+                self._step_frames((10 if shift else 1) * (1 if key == Qt.Key.Key_Right else -1))
+                return True
+            if key == Qt.Key.Key_Space and self._chain_limb is None:
+                self._toggle_play()
+                return True
+
         if not self._edit_mode:
             return False
 
@@ -5336,6 +6000,68 @@ class PersonCropGridWidget(QWidget):
             f"Interpolated missing values for {n} keypoint{'s' if n != 1 else ''} over range"
         )
 
+    def _step_frames(self, n: int) -> None:
+        """Move *n* video frames (negative = back), exactly, in the first
+        camera's frame numbering; the other cameras follow by time. The slider
+        counts milliseconds, so stepping by a fixed number of them would repeat
+        a frame every few dozen steps at 120 fps."""
+        if self._slider is None:
+            return
+        self._range_start_v = None
+        self._range_end_v = None
+        value = self._slider.value()
+        if self._sync_table and self._cameras:
+            svid = self._cameras[0]["shot_video_id"]
+            current = self._sync_table.lookup(self._current_t, svid)
+            when = (
+                self._sync_table.frame_to_global_time(current + n, svid)
+                if current is not None else None
+            )
+            if when is not None:
+                value = int(round((when - self._t_start) * 1000))
+            else:
+                value += n * self._slider.singleStep()
+        else:
+            value += n * self._slider.singleStep()
+        self._slider.setValue(max(0, min(value, self._slider.maximum())))
+
+    def _toggle_play(self) -> None:
+        """Play at real-time speed, dropping frames as needed (each tick moves
+        by the wall-clock time since the last one)."""
+        import time
+
+        if self._play_timer is not None and self._play_timer.isActive():
+            self._play_timer.stop()
+            if self._play_btn is not None:
+                self._play_btn.setText("\u25b6 Play")
+            return
+        if self._slider is None:
+            return
+        if self._play_timer is None:
+            self._play_timer = QTimer(self)
+            self._play_timer.setInterval(33)
+            self._play_timer.timeout.connect(self._play_tick)
+        self._play_last = time.monotonic()
+        self._play_timer.start()
+        if self._play_btn is not None:
+            self._play_btn.setText("\u23f8 Pause")
+
+    def _play_tick(self) -> None:
+        import time
+
+        now = time.monotonic()
+        advance = int((now - self._play_last) * 1000)
+        if advance <= 0:
+            return
+        self._play_last = now
+        end = self._slider.maximum()
+        value = self._slider.value() + advance
+        if value >= end:
+            self._slider.setValue(end)
+            self._toggle_play()
+            return
+        self._slider.setValue(value)
+
     def _on_slider(self, value: int) -> None:
         self._current_t = self._t_start + value / 1000.0
         if self._time_label is not None:
@@ -5366,7 +6092,22 @@ class PersonCropGridWidget(QWidget):
 
     def set_tracking_run(self, run_id: str | None) -> None:
         """Load tracking run overlay data; called by PersonPanel when run selection changes."""
+        self._tracking_seg = self._recorded_seg(run_id)
         self._load_tracking_run(run_id)
+
+    def _recorded_seg(self, run_id: str | None) -> "tuple[str, int] | None":
+        """(segmentation run, revision) the tracking run's mask gate read, or None.
+
+        The mask overlay then shows exactly those masks instead of the current ones.
+        """
+        if not run_id:
+            return None
+        row = self._conn.execute(
+            "SELECT seg_quality_run_id, seg_revision FROM tracking_run_persons WHERE run_id = ? "
+            "AND seg_quality_run_id IS NOT NULL AND seg_revision IS NOT NULL LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        return (row[0], row[1]) if row else None
 
     def camera_labels(self) -> list[str]:
         return [c["label"] for c in self._cameras]
@@ -5656,6 +6397,8 @@ class PersonCropGridWidget(QWidget):
         self._bone_pairs.clear()
         self._tracking_timestamps.clear()
         self._outlier_masks.clear()
+        self._resolved_markers.clear()
+        self._cam_intrinsics.clear()
 
         if not run_id:
             self._load_frame(self._current_t)
@@ -5694,6 +6437,8 @@ class PersonCropGridWidget(QWidget):
         joint_proj: dict,
         bone_pairs: list,
         outlier_masks: dict,
+        resolved_markers: dict,
+        cam_intrinsics: dict,
     ) -> None:
         # Do NOT clear self._loader here — the thread's run() may still be executing
         # its finally block.  _on_loader_finished (connected to finished) does it safely.
@@ -5702,6 +6447,8 @@ class PersonCropGridWidget(QWidget):
         self._joint_proj = joint_proj
         self._bone_pairs = bone_pairs
         self._outlier_masks = outlier_masks
+        self._resolved_markers = resolved_markers
+        self._cam_intrinsics = cam_intrinsics
         self._load_frame(self._current_t)
 
     def _on_loader_finished(self) -> None:
@@ -5729,6 +6476,7 @@ class PersonCropGridWidget(QWidget):
         both view and edit mode. See "View-mode parity" in the design doc.
         """
         obs_kp = self._obs_kp.get(cam_id, {}).get(frame_idx)
+        dot_xy = self._obs_dots.get(cam_id, {}).get(frame_idx)
         joint_xy = (
             self._joint_proj.get(cam_id, {}).get(tracking_step)
             if tracking_step is not None else None
@@ -5741,6 +6489,18 @@ class PersonCropGridWidget(QWidget):
             self._outlier_masks.get(cam_id, {}).get(tracking_step)
             if tracking_step is not None else None
         )
+        dot_status = None
+        if dot_xy is not None and tracking_step is not None:
+            # None (no key at all) means no obs_blob row for this step -- genuinely no
+            # data, stays the magenta "unknown" default. {} (a real but empty dict) means
+            # a row existed and every marker was NaN for this camera -- a known answer,
+            # not a gap; _classify_dot_candidates already treats an empty *resolved* as
+            # "everything is unassigned" (len(names) == 0 branch), which is correct here.
+            resolved = self._resolved_markers.get(cam_id, {}).get(tracking_step)
+            if resolved is not None:
+                dot_status = _classify_dot_candidates(
+                    dot_xy, resolved, self._cam_intrinsics.get(cam_id)
+                )
         cell.set_overlay(
             obs_kp=obs_kp,
             joint_xy=joint_xy,
@@ -5749,6 +6509,8 @@ class PersonCropGridWidget(QWidget):
             outlier_mask=outlier_mask,
             show_detected=show_detected,
             show_tracked=show_tracked,
+            dot_xy=dot_xy,
+            dot_status=dot_status,
         )
         cell.set_hidden(frozenset(self._hidden_kp_indices))
         if self._edit_mode:
@@ -5820,7 +6582,31 @@ class PersonCropGridWidget(QWidget):
 
         jpeg, wpx, hpx, src_x, src_y, src_w, src_h = result
         buf = np.frombuffer(jpeg, dtype=np.uint8)
-        crop_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        # A whole video frame is far larger than the cell showing it. Let the
+        # JPEG decoder produce it at 1/2, 1/4 or 1/8 size (cheaper than
+        # decoding in full), as long as it stays at least as wide as the cell;
+        # the blend, black fill and colour conversion below then work on the
+        # smaller image too. The scale is taken from the decoded size, so the
+        # overlay mapping stays exact.
+        reduce_flag = cv2.IMREAD_COLOR
+        cell_w = max(1, int(cell.width()))
+        zoom = getattr(getattr(cell, "_canvas", None), "_zoom_rect", None)
+        if isinstance(zoom, tuple):
+            view_w = zoom[2] - zoom[0]
+        elif target_rect is not None:
+            view_w = target_rect[2] - target_rect[0]
+        else:
+            view_w = float(src_w)
+        needed_px = cell_w * float(src_w) / max(1.0, view_w)   # width this image must keep
+        for div, flag in (
+            (8, cv2.IMREAD_REDUCED_COLOR_8),
+            (4, cv2.IMREAD_REDUCED_COLOR_4),
+            (2, cv2.IMREAD_REDUCED_COLOR_2),
+        ):
+            if wpx / div >= needed_px:
+                reduce_flag = flag
+                break
+        crop_bgr = cv2.imdecode(buf, reduce_flag)
         if crop_bgr is None:
             cell.show_empty()
             self._apply_overlay(
@@ -5829,10 +6615,10 @@ class PersonCropGridWidget(QWidget):
             return
         x1 = float(src_x)
         y1 = float(src_y)
-        jpeg_h = float(hpx or crop_bgr.shape[0])
-        src_scale = jpeg_h / float(src_h) if src_h > 0 else 1.0
+        src_scale = crop_bgr.shape[0] / float(src_h) if src_h > 0 else 1.0
 
-        if show_seg and track_id is not None:
+        self._seg_legend = []
+        if show_seg:
             crop_bgr = self._blend_seg_mask(
                 crop_bgr, svid, frame_idx, track_id, x1, y1, float(src_w), float(src_h),
             )
@@ -5847,6 +6633,7 @@ class PersonCropGridWidget(QWidget):
         h_img, w_img = crop_rgb.shape[:2]
         qimg = QImage(crop_rgb.data, w_img, h_img, 3 * w_img, QImage.Format.Format_RGB888)
         cell.show_image(QPixmap.fromImage(qimg), x1, y1, src_scale)
+        cell.set_legend(self._seg_legend)
         cell.set_debug_label(
             (layer_label + (" +black-fill" if black_filled else "")) if show_debug else None
         )
@@ -5859,13 +6646,16 @@ class PersonCropGridWidget(QWidget):
         crop_bgr,
         svid: str,
         frame_idx: int,
-        track_id: int,
+        track_id: "int | None",
         x1: float,
         y1: float,
         src_w: float,
         src_h: float,
     ):
-        """Blend *track_id*'s segmentation mask into *crop_bgr*, returning the
+        """Blend *track_id*'s segmentation mask into *crop_bgr* (every label
+        present, one colour each, when *track_id* is None -- an object
+        sequence has no person track to pick a label by, and its labels are
+        not in persons_json), returning the
         blended array (or *crop_bgr* unchanged if there's no mask configured/
         stored for this frame). *x1*/*y1*/*src_w*/*src_h* are the crop's
         source region in full-frame pixel coordinates, before any black-fill
@@ -5883,22 +6673,12 @@ class PersonCropGridWidget(QWidget):
         import cv2
         import numpy as np
 
-        sqr_id = self._seg_sources.get(svid)
+        sqr_id = self._tracking_seg[0] if self._tracking_seg else self._seg_sources.get(svid)
         if not sqr_id:
             return crop_bgr
-        mask_row = self._conn.execute(
-            "SELECT mask_blob FROM seg_masks "
-            "WHERE seg_quality_run_id=? AND shot_video_id=? AND frame_idx=?",
-            (sqr_id, svid, frame_idx),
-        ).fetchone()
-        if not mask_row:
-            return crop_bgr
-        mask_buf = np.frombuffer(bytes(mask_row["mask_blob"]), dtype=np.uint8)
-        full_mask = cv2.imdecode(mask_buf, cv2.IMREAD_UNCHANGED)
+        full_mask = self._decoded_seg_mask(sqr_id, svid, frame_idx)
         if full_mask is None:
             return crop_bgr
-        if full_mask.ndim == 3:
-            full_mask = full_mask[:, :, 0]
         # Masks may be stored at a lower resolution than the video (e.g. FHD
         # masks on 4K cameras), so scale src coordinates.
         m_h, m_w = full_mask.shape[:2]
@@ -5918,21 +6698,98 @@ class PersonCropGridWidget(QWidget):
         mask_crop = cv2.resize(
             mask_crop, (crop_bgr.shape[1], crop_bgr.shape[0]), interpolation=cv2.INTER_NEAREST,
         )
-        # DAVIS palette — BGR
-        _DAVIS_COLORS_BGR = [
-            (80, 80, 240), (120, 200, 80), (240, 120, 80),
-            (60, 200, 240), (240, 80, 180), (220, 60, 60),
-            (80, 240, 140), (60, 140, 240), (240, 200, 60),
+        counts = np.bincount(mask_crop.ravel(), minlength=256)
+        labels = [track_id] if track_id is not None else [
+            int(v) + 1 for v in np.nonzero(counts[1:])[0]
         ]
-        color_idx = (track_id - 1) % len(_DAVIS_COLORS_BGR)
-        color_bgr = _DAVIS_COLORS_BGR[color_idx]
-        fg = mask_crop == track_id
-        if not fg.any():
+        # One blended copy per label, then copy just the label's pixels in --
+        # much cheaper than per-channel indexing, which matters now that a
+        # prop's frame is a full 1080p image rather than a 240 px crop.
+        out = None
+        painted: list[int] = []
+        for label in labels:
+            if label < 0 or label >= len(counts) or counts[label] == 0:
+                continue
+            tint = np.empty_like(crop_bgr)
+            tint[:] = _seg_label_color_bgr(label)
+            blended = cv2.addWeighted(crop_bgr, 0.55, tint, 0.45, 0)
+            if out is None:
+                out = crop_bgr.copy()
+            np.copyto(out, blended, where=(mask_crop == label)[:, :, None])
+            painted.append(label)
+        if out is None:
             return crop_bgr
-        overlay = crop_bgr.astype(np.float32)
-        for c, cv_ in enumerate(color_bgr):
-            overlay[:, :, c][fg] = overlay[:, :, c][fg] * 0.55 + cv_ * 0.45
-        return overlay.astype(np.uint8)
+        self._seg_legend = self._seg_legend_entries(sqr_id, painted)
+        return out
+
+    # (segmentation run, revision) the shown tracking run's mask gate read; None shows current masks.
+    _tracking_seg: "tuple[str, int] | None" = None
+
+    _SEG_MASK_CACHE_SIZE = 32
+    _seg_mask_cache: "collections.OrderedDict | None" = None
+
+    def _decoded_seg_mask(self, seg_run_id: str, svid: str, frame_idx: int):
+        """The decoded label mask of one (segmentation, camera, frame), or
+        None if there is none. Recently used masks are kept: a frame is
+        redrawn several times (each camera's decode finishing, overlay
+        toggles), and decoding a 1080p PNG each time is wasted work."""
+        import collections
+
+        import cv2
+        import numpy as np
+
+        if self._seg_mask_cache is None:
+            self._seg_mask_cache = collections.OrderedDict()
+        pin = self._tracking_seg
+        revision = pin[1] if pin and pin[0] == seg_run_id else None
+        key = (seg_run_id, svid, frame_idx, revision)
+        if key in self._seg_mask_cache:
+            self._seg_mask_cache.move_to_end(key)
+            return self._seg_mask_cache[key]
+        if revision is None:
+            row = self._conn.execute(
+                "SELECT mask_blob FROM seg_masks_latest "
+                "WHERE seg_quality_run_id=? AND shot_video_id=? AND frame_idx=?",
+                key[:3],
+            ).fetchone()
+            blob = bytes(row["mask_blob"]) if row else None
+        else:
+            blob = mask_at(self._conn, seg_run_id, svid, frame_idx, revision)
+        mask = None
+        if blob is not None:
+            mask = cv2.imdecode(np.frombuffer(blob, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+            if mask is not None and mask.ndim == 3:
+                mask = mask[:, :, 0]
+        self._seg_mask_cache[key] = mask
+        while len(self._seg_mask_cache) > self._SEG_MASK_CACHE_SIZE:
+            self._seg_mask_cache.popitem(last=False)
+        return mask
+
+    _seg_legend: "list[tuple[QColor, str]]" = []
+
+    _seg_label_names: "dict | None" = None
+
+    def _seg_legend_entries(self, seg_run_id: str, labels: list[int]) -> "list[tuple[QColor, str]]":
+        """(colour, subject name) for each painted label, for the canvas's
+        legend overlay. Names are looked up once per (run, label)."""
+        from posetrak.db.manage_subject import subject_for_label_in_run
+
+        if self._seg_label_names is None:
+            self._seg_label_names = {}
+        entries = []
+        for label in labels:
+            key = (seg_run_id, label)
+            if key not in self._seg_label_names:
+                try:
+                    subject = subject_for_label_in_run(self._conn, seg_run_id, label)
+                except ValueError:   # run no longer exists
+                    subject = None
+                self._seg_label_names[key] = (
+                    subject["name"] if subject is not None else f"label {label}"
+                )
+            b, g, r = _seg_label_color_bgr(label)
+            entries.append((QColor(int(r), int(g), int(b)), self._seg_label_names[key]))
+        return entries
 
     def _compute_target_rect(
         self,
@@ -5941,8 +6798,8 @@ class PersonCropGridWidget(QWidget):
         svid: str,
         frame_idx: int,
         tracking_step: "int | None",
-        own_rect: "tuple[float, float, float, float]",
-    ) -> "tuple[float, float, float, float]":
+        own_rect: "tuple[float, float, float, float] | None",
+    ) -> "tuple[float, float, float, float] | None":
         """Minimum display bbox for one camera/frame: *own_rect* (whichever
         crop-source layer's own decoded extent) unioned with the windowed
         keypoint bbox and the tracked-skeleton bbox, padded by a margin, and
@@ -5971,10 +6828,12 @@ class PersonCropGridWidget(QWidget):
                 # Widen to cover whatever's actually drawn -- an edit (or a
                 # tracking run's own projection) can place a point far from
                 # where the raw (possibly wrong) detection said the person was.
-                desired = (
+                desired = bbox if desired is None else (
                     min(desired[0], bbox[0]), min(desired[1], bbox[1]),
                     max(desired[2], bbox[2]), max(desired[3], bbox[3]),
                 )
+        if desired is None:
+            return None   # no own rect and nothing drawn to frame
         # Margin around the minimum display bbox so overlay points never sit
         # flush against the cell edge.
         mx = (desired[2] - desired[0]) * _DISPLAY_MARGIN_FRAC
@@ -6016,6 +6875,13 @@ class PersonCropGridWidget(QWidget):
             frame_idx = self._sync_table.lookup(global_time, svid)
             if frame_idx is None:
                 cell.show_empty()
+                continue
+
+            if self._frame_service is not None:
+                self._show_service_frame(
+                    cell, cam, frame_idx, tracking_step, show_detected, show_tracked,
+                    show_seg, show_debug,
+                )
                 continue
 
             # Preferred layer: wide-crop cluster cache -- generous, higher-quality
@@ -6079,6 +6945,7 @@ class PersonCropGridWidget(QWidget):
                         cell, cam_id, svid, frame_idx, tracking_step,
                         show_detected, show_tracked, mem, target_rect=desired,
                         layer_label="backfill/ghost", show_debug=show_debug,
+                        show_seg=show_seg,
                     )
                     continue
 
@@ -6162,6 +7029,7 @@ class PersonCropGridWidget(QWidget):
             # Segmentation mask overlay (blended directly into the JPEG before Qt
             # conversion) -- shared with _display_crop_result's wide-crop-cache/
             # backfill paths, see _blend_seg_mask.
+            self._seg_legend = []
             if show_seg and track_id is not None:
                 src_w_val = row["src_w"] if row["src_w"] is not None else (
                     crop_bgr.shape[1] / src_scale if src_scale > 0 else crop_bgr.shape[1]
@@ -6194,6 +7062,7 @@ class PersonCropGridWidget(QWidget):
                 crop_rgb.data, w_img, h_img, 3 * w_img, QImage.Format.Format_RGB888
             )
             cell.show_image(QPixmap.fromImage(qimg), x1, y1, src_scale)
+            cell.set_legend(self._seg_legend)
             cell.set_debug_label(
                 ("low-res" + (" +black-fill" if black_filled else "")) if show_debug else None
             )
@@ -6665,6 +7534,7 @@ class ObjectCropGridWidget(QWidget):
         self._readers: list = []
         self._cameras: list[dict] = []
         self._obs_kp: dict[str, dict[int, "object"]] = {}
+        self._obs_dots: dict[str, dict[int, "object"]] = {}
         self._current_frame_by_cam: dict[str, int | None] = {}
         self._sync_table: SyncTable | None = None
         self._time_start_s = 0.0
@@ -6760,12 +7630,25 @@ class ObjectCropGridWidget(QWidget):
         self._on_slider_changed(0)
 
     def _load_observations(self) -> None:
-        from app.pose.db_cache import read_observations_with_edits
+        from app.pose.db_cache import decode_dot_candidates, read_observations_with_edits
         for cam in self._cameras:
             cid = cam["camera_instance_id"]
             self._obs_kp[cid] = read_observations_with_edits(
                 self._conn, self._sequence_id, cid, primary_source="markers"
             )
+            # Raw detected reflective-dot candidates, for visual evaluation
+            # of detection quality -- not part of read_observations_with_edits
+            # (dots are anonymous, not named/editable keypoints, and use a
+            # different blob layout; see that function's own docstring).
+            dot_rows = self._conn.execute(
+                "SELECT video_frame, kp_blob FROM pose_observations "
+                "WHERE sequence_id = ? AND camera_instance_id = ? AND source = 'dots'",
+                (self._sequence_id, cid),
+            ).fetchall()
+            self._obs_dots[cid] = {
+                r["video_frame"]: decode_dot_candidates(bytes(r["kp_blob"]))[:, :2]
+                for r in dot_rows
+            }
 
     def _current_time(self) -> float:
         frac = self._slider.value() / max(self._slider.maximum(), 1)
@@ -6786,7 +7669,8 @@ class ObjectCropGridWidget(QWidget):
                 continue
             reader.request(frame_idx)
             kp = self._obs_kp.get(cid, {}).get(frame_idx)
-            cell.set_overlay(kp, None, [], None, True, False)
+            dot_xy = self._obs_dots.get(cid, {}).get(frame_idx)
+            cell.set_overlay(kp, None, [], None, True, False, dot_xy=dot_xy)
 
     def _on_frame_ready(self, cam_id: str, frame_idx: int, frame) -> None:
         import cv2
@@ -6816,7 +7700,8 @@ class ObjectCropGridWidget(QWidget):
             self._conn, self._sequence_id, cam_id, primary_source="markers"
         )
         self._cells[self._cell_index(cam_id)].set_overlay(
-            self._obs_kp[cam_id].get(frame_idx), None, [], None, True, False
+            self._obs_kp[cam_id].get(frame_idx), None, [], None, True, False,
+            dot_xy=self._obs_dots.get(cam_id, {}).get(frame_idx),
         )
 
     def shutdown(self) -> None:
@@ -7476,9 +8361,21 @@ class TrackingRunPanel(QWidget):
         title_row.addWidget(info_title, stretch=1)
         title_row.addWidget(hide_btn)
 
+        # An unfinished run is inspected for diagnosis only: nothing derived from it is offered.
+        shown_status = display_status(self._conn, "tracking_runs", self._run_id, run["status"])
+        complete = shown_status == "complete"
+
         form = QFormLayout()
         form.setHorizontalSpacing(8)
         form.setVerticalSpacing(2)
+        if not complete:
+            warning = QLabel(
+                f"<b>This run is {shown_status}</b> — its results are incomplete and shown "
+                "read-only." + (f"<br>{run['failure']}" if run["failure"] else "")
+            )
+            warning.setWordWrap(True)
+            warning.setStyleSheet("color: #b00020;")
+            form.addRow(warning)
         form.addRow("Ran at:", QLabel(_fmt_ts(run["ran_at"])))
         form.addRow("Frames:", QLabel(f"{n_frames}  |  ver. {run['posetrak_version'] or '—'}"))
         form.addRow("Person:", QLabel(run["person_names"] or "—"))
@@ -7507,7 +8404,7 @@ class TrackingRunPanel(QWidget):
         )
         form.addRow(save_cfg_btn)
         set_trial_default_btn = _action_btn(
-            "Set as trial default", enabled=bool(cfg_id and run["trial_id"])
+            "Set as trial default", enabled=bool(cfg_id and run["trial_id"]) and complete
         )
         set_trial_default_btn.setToolTip(
             "Make this run's tracker configuration the default for its\n"
@@ -7530,19 +8427,16 @@ class TrackingRunPanel(QWidget):
         ids_box, id_widgets = _build_run_ids_group()
         _populate_run_ids(id_widgets, run)
 
-        self._export_bvh_btn = _action_btn("Export BVH…", enabled=bool(self._session_path))
+        can_export = bool(self._session_path) and complete
+        self._export_bvh_btn = _action_btn("Export BVH…", enabled=can_export)
         self._export_bvh_btn.clicked.connect(self._export_bvh)
-        self._export_usd_btn = _action_btn(
-            "Export USD…", enabled=bool(self._session_path) and _USD_AVAILABLE
-        )
+        self._export_usd_btn = _action_btn("Export USD…", enabled=can_export and _USD_AVAILABLE)
         if not _USD_AVAILABLE:
             self._export_usd_btn.setToolTip(_USD_TOOLTIP)
         self._export_usd_btn.clicked.connect(self._export_usd)
-        self._export_gltf_btn = _action_btn(
-            "Export glTF…", enabled=bool(self._session_path)
-        )
+        self._export_gltf_btn = _action_btn("Export glTF…", enabled=can_export)
         self._export_gltf_btn.clicked.connect(self._export_gltf)
-        scale_btn = _action_btn("Scale skeleton…", enabled=bool(self._session_path))
+        scale_btn = _action_btn("Scale skeleton…", enabled=can_export)
         scale_btn.setToolTip("Measure bone lengths from inlier observations and scale the skeleton")
         scale_btn.clicked.connect(self._open_scaling)
 

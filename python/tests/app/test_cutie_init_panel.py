@@ -120,6 +120,26 @@ def test_persons_union_capture_objects(qapp, capture_db):
         panel.shutdown()
 
 
+def test_labels_are_permanent_registry_labels_not_sorted_position(qapp, capture_db):
+    """Subject-identity: a subject's mask label is its registry label. A
+    subject added later that sorts *before* an existing one must not shift
+    it, and a deleted subject leaves a gap ("" at its index) instead of
+    renumbering everyone after it."""
+    from app.pose.cutie_init_panel import CutieInitPanel
+    from posetrak.db.manage_person import create_person, delete_person
+
+    # Alice already has registry label 1. "Aaron" sorts before "Alice".
+    aaron = create_person(capture_db, "cap1", "Aaron")   # label 2
+    create_person(capture_db, "cap1", "Zed")              # label 3
+    delete_person(capture_db, aaron)                       # label 2 retired
+
+    panel = CutieInitPanel(capture_db, "cap1")
+    try:
+        assert panel._persons == ["Alice", "", "Zed"]
+    finally:
+        panel.shutdown()
+
+
 def test_ensure_seg_run_creates_capture_scoped_row(qapp, capture_db):
     """_ensure_seg_run() writes shot_id (not detection_run_id) -- the
     schema-migration half of this feature."""
@@ -330,6 +350,65 @@ def test_marks_default_to_trial_bounds(qapp, synced_capture_db):
         panel.shutdown()
 
 
+def test_scrubber_range_widens_to_trial_when_track_data_is_narrower(qapp, synced_capture_db):
+    """The scrubber's own min/max must always reach the trial's full range,
+    even when person_tracks (the heuristic default source) covers less --
+    e.g. because a detection run was made against a since-corrected,
+    narrower time range. Otherwise the far end of the trial (and of any
+    segmentation spanning it) is unreachable on the scrubber entirely."""
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    synced_capture_db.execute(
+        "INSERT INTO detection_runs (id, shot_id, sync_config_id, time_start_s, time_end_s, "
+        " detector_model, pose_model, status, created_at) VALUES "
+        "('run1', 'cap1', 'sync1', 2.0, 4.0, 'yolo', 'rtmpose', 'complete', '2026-01-01T00:00:00Z')"
+    )
+    synced_capture_db.execute(
+        "INSERT INTO person_tracks (id, detection_run_id, shot_video_id, track_id, first_frame, last_frame) "
+        "VALUES ('pt1', 'run1', 'sv1', 1, 60, 120)"  # global [2.0, 4.0)s @ 30fps, no offset on sv1
+    )
+    synced_capture_db.commit()
+
+    panel = CutieInitPanel(synced_capture_db, "cap1", trial_id="trial1")
+    try:
+        assert panel._sync_table is not None
+        assert panel._to_seconds(panel._scrubber.minimum()) <= 2.0
+        assert panel._to_seconds(panel._scrubber.maximum()) >= 8.0
+        assert panel._to_seconds(panel._mark_end) == pytest.approx(8.0)
+    finally:
+        panel.shutdown()
+
+
+def test_scrubber_range_widens_to_existing_segmentation_range(qapp, synced_capture_db):
+    """Same widening, for reopening an existing segmentation whose own
+    persisted range exceeds the capture's person_tracks data -- this was
+    the actually-reported symptom: opening a segmentation for review/edit
+    left its later portion unreachable and impossible to check or edit."""
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    synced_capture_db.execute(
+        "INSERT INTO detection_runs (id, shot_id, sync_config_id, time_start_s, time_end_s, "
+        " detector_model, pose_model, status, created_at) VALUES "
+        "('run1', 'cap1', 'sync1', 2.0, 4.0, 'yolo', 'rtmpose', 'complete', '2026-01-01T00:00:00Z')"
+    )
+    synced_capture_db.execute(
+        "INSERT INTO person_tracks (id, detection_run_id, shot_video_id, track_id, first_frame, last_frame) "
+        "VALUES ('pt1', 'run1', 'sv1', 1, 60, 120)"
+    )
+    synced_capture_db.execute(
+        "INSERT INTO seg_quality_runs (id, shot_id, time_start_s, time_end_s, created_at, "
+        " quality_source, erosion_px) VALUES ('seg1', 'cap1', 2.0, 8.0, '2026-01-01T00:00:00Z', 'cutie', 5)"
+    )
+    synced_capture_db.commit()
+
+    panel = CutieInitPanel(synced_capture_db, "cap1")
+    try:
+        assert panel._seg_run_id == "seg1"
+        assert panel._to_seconds(panel._scrubber.maximum()) >= 8.0
+    finally:
+        panel.shutdown()
+
+
 def test_marks_default_to_full_range_without_trial_id(qapp, synced_capture_db):
     """No trial_id (opened from the Capture page, not a trial) -- marks
     default to the full available range, not zero-width."""
@@ -414,6 +493,19 @@ def test_global_units_for_local_round_trips(qapp, synced_capture_db):
         local = panel._local_frame_for(cam_sv2, g)
         assert local == 150  # (6.0 - 1.0) * 30
         assert panel._global_units_for_local(cam_sv2, local) == g
+    finally:
+        panel.shutdown()
+
+
+def test_frame_label_shows_global_capture_time(qapp, synced_capture_db):
+    from app.pose.cutie_init_panel import CutieInitPanel
+
+    panel = CutieInitPanel(synced_capture_db, "cap1")
+    try:
+        cam_sv2 = next(c for c in panel._cameras if c["id"] == "sv2")
+        panel._cam_combo.setCurrentIndex(panel._cam_combo.findData(cam_sv2))
+        panel._show_frame(150)  # global 6.0 s, not time from the camera's first tracked frame
+        assert "(00:06.00)" in panel._frame_label.text()
     finally:
         panel.shutdown()
 

@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Skeleton commands: import, list, show, export, scale."""
+"""Skeleton commands: import, list, show, export, scale, compose."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ from posetrak.db.manage_skeleton import (
 from posetrak.db.scale_skeleton import scale_skeleton_yaml, scaling_summary
 
 from posetrak.cli._output import print_table, print_record
+from posetrak.skeleton import compose as compose_layers
 
 
 # ---------------------------------------------------------------------------
@@ -392,3 +393,80 @@ def skeleton_scale(
 
     finally:
         conn.close()
+
+
+def _marker_set(spec: str) -> dict:
+    """A marker set by pose model name (``soma77``) or by path of a marker set file."""
+    import yaml
+
+    path = Path(spec)
+    if path.suffix in (".yaml", ".yml") and path.is_file():
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
+    return compose_layers.bundled_marker_set(spec)
+
+
+def _layer_file(path: str | None, default):
+    import yaml
+
+    return yaml.safe_load(Path(path).read_text(encoding="utf-8")) if path else default()
+
+
+@skeleton_group.command("compose")
+@click.option("--sex", type=click.Choice(compose_layers.SEXES), default="male", show_default=True,
+              help="Bundled dimensions layer when --dimensions is not given")
+@click.option("--hierarchy", "hierarchy_file", metavar="YAML_PATH", help="Joint hierarchy layer (default: bundled)")
+@click.option("--limits", "limits_file", metavar="YAML_PATH", help="Joint limit layer (default: bundled table)")
+@click.option("--dimensions", "dimensions_file", metavar="YAML_PATH", help="Dimensions layer (default: bundled)")
+@click.option("--marker-set", "marker_sets", multiple=True, metavar="NAME_OR_YAML_PATH",
+              help="Pose model name (coco133, hand21, soma77) or marker set file; repeat for several. "
+                   "Default: coco133, hand21 and soma77")
+@click.option("--base", metavar="SKELETON", help="Add the marker sets to this skeleton (a YAML path or a skeleton id "
+              "in the session DB or registry) instead of composing from layers: adds a pose model to a skeleton "
+              "of your own")
+@click.option("--no-landmarks", is_flag=True, help="Leave out the model-qualified landmarks of the markers")
+@click.option("--output", metavar="PATH", help="Write the skeleton YAML here (default: standard output)")
+@click.pass_obj
+def skeleton_compose(obj: dict, sex: str, hierarchy_file: str | None, limits_file: str | None,
+                     dimensions_file: str | None, marker_sets: tuple[str, ...], base: str | None,
+                     no_landmarks: bool, output: str | None) -> None:
+    """Compose a skeleton from layers, or add a pose model's markers to a skeleton.
+
+    The result is a skeleton YAML; store it with 'skeleton import' (use --parent-id for lineage).
+    """
+    try:
+        if base:
+            if not marker_sets:
+                raise click.UsageError("--base needs at least one --marker-set to add")
+            if Path(base).is_file():
+                text = Path(base).read_text(encoding="utf-8")
+            else:
+                conn, _ = _open_conn(obj)
+                try:
+                    skeleton_id = _resolve_prefix(conn, "skeletons", base)
+                    text = conn.execute("SELECT yaml_content FROM skeletons WHERE id = ?", (skeleton_id,)).fetchone()[0]
+                finally:
+                    conn.close()
+            for spec in marker_sets:
+                mset = _marker_set(spec)
+                text, skipped = compose_layers.add_pose_model(text, mset["pose_model"], mset)
+                if skipped:
+                    click.echo(f"{mset['pose_model']}: no joint for {', '.join(skipped)}; left out", err=True)
+        else:
+            specs = marker_sets or ("coco133", "hand21", "soma77")
+            layers = {"hierarchy": hierarchy_file or "body-hands", "limits": limits_file or "joint_limits",
+                      "marker_sets": list(specs), "dimensions": dimensions_file or sex}
+            doc = compose_layers.compose_skeleton(
+                _layer_file(hierarchy_file, compose_layers.bundled_hierarchy),
+                _layer_file(limits_file, None)["joints"] if limits_file else compose_layers.bundled_joint_limits(),
+                [_marker_set(spec) for spec in specs],
+                _layer_file(dimensions_file, lambda: compose_layers.bundled_dimensions(sex)),
+                landmarks=not no_landmarks, layers=layers)
+            text = compose_layers.dump_skeleton_yaml(doc)
+    except (compose_layers.SkeletonLayerError, OSError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if output:
+        with open(output, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        click.echo(f"wrote {output}")
+    else:
+        click.echo(text, nl=False)

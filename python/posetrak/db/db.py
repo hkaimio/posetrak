@@ -15,17 +15,24 @@ from __future__ import annotations
 
 import importlib.resources
 import json
+import logging
 import sqlite3
 import uuid
 from pathlib import Path
 from typing import Final
 
+_log = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 15
-SESSION_SCHEMA_VERSION: Final[int] = 56
+REGISTRY_SCHEMA_VERSION: Final[int] = 21
+
+#: Seconds a connection waits for another writer's lock before failing. The C++
+#: tracker's connections use the same value.
+BUSY_TIMEOUT_S: Final[float] = 60.0
+SESSION_SCHEMA_VERSION: Final[int] = 72
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -130,7 +137,7 @@ def _apply_schema(conn: sqlite3.Connection, sql_path: Path, version: int) -> Non
 # ---------------------------------------------------------------------------
 
 
-def _connect(path: Path) -> sqlite3.Connection:
+def _connect(path: Path, *, check_same_thread: bool = True) -> sqlite3.Connection:
     """Open a SQLite connection with project-standard settings.
 
     Sets ``row_factory = sqlite3.Row``, enables foreign-key enforcement,
@@ -140,13 +147,18 @@ def _connect(path: Path) -> sqlite3.Connection:
     ----------
     path:
         Filesystem path of the SQLite database file.
+    check_same_thread:
+        Passed to :func:`sqlite3.connect`; False for a connection handed
+        between threads.
 
     Returns
     -------
     sqlite3.Connection
         A configured open connection.
     """
-    conn = sqlite3.connect(path)
+    # Several processes write one session database (GUI, CLI, tracker); a writer
+    # that meets another waits for it instead of failing with "database is locked".
+    conn = sqlite3.connect(path, timeout=BUSY_TIMEOUT_S, check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
@@ -328,6 +340,24 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 14
     if actual == 14:
         _migrate_registry_v14_to_v15(conn)
+        actual = 15
+    if actual == 15:
+        _migrate_registry_v15_to_v16(conn)
+        actual = 16
+    if actual == 16:
+        _migrate_registry_v16_to_v17(conn)
+        actual = 17
+    if actual == 17:
+        _migrate_registry_v17_to_v18(conn)
+        actual = 18
+    if actual == 18:
+        _migrate_registry_v18_to_v19(conn)
+        actual = 19
+    if actual == 19:
+        _migrate_registry_v19_to_v20(conn)
+        actual = 20
+    if actual == 20:
+        _migrate_registry_v20_to_v21(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -757,12 +787,150 @@ def _migrate_registry_v13_to_v14(conn: sqlite3.Connection) -> None:
 def _migrate_registry_v14_to_v15(conn: sqlite3.Connection) -> None:
     """Migrate a registry database from schema version 14 to 15.
 
-    v15 adds control_endpoints, which records how each physical camera is
+    v15 adds segmentation-mask-based dot-assignment trust to tracker_configs,
+    mirroring the session schema v56->v57 change -- see
+    _migrate_session_v56_to_v57's docstring.
+    """
+    existing = _tracker_config_columns(conn)
+    if "dot_seg_mask_enabled" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_enabled INTEGER")
+    if "dot_seg_mask_dilate_px" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_dilate_px REAL")
+    if "dot_seg_mask_tracklet_window" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_tracklet_window INTEGER")
+    if "dot_seg_mask_min_tracklet_fraction" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_min_tracklet_fraction REAL"
+        )
+    if "dot_seg_mask_cost_scale_at_zero_fraction" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_cost_scale_at_zero_fraction REAL"
+        )
+    _set_schema_version(conn, 15)
+    conn.commit()
+
+
+def _migrate_registry_v15_to_v16(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 15 to 16.
+
+    v16 adds tracker_configs.dot_seg_mask_hard_distance_px, mirroring the
+    session schema v60->v61 change -- see _migrate_session_v60_to_v61.
+    """
+    if "dot_seg_mask_hard_distance_px" not in _tracker_config_columns(conn):
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_hard_distance_px REAL")
+    _set_schema_version(conn, 16)
+    conn.commit()
+
+
+def _migrate_registry_v16_to_v17(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 16 to 17.
+
+    v17 adds tracker_configs.active_joint_groups, mirroring the session schema
+    v66->v67 change -- see _migrate_session_v66_to_v67.
+    """
+    if "active_joint_groups" not in _tracker_config_columns(conn):
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN active_joint_groups TEXT")
+    _set_schema_version(conn, 17)
+    conn.commit()
+
+
+def _add_kp_candidate_config_columns(conn: sqlite3.Connection) -> None:
+    """Add the keypoint-candidate settings to tracker_configs where they are missing."""
+    existing = _tracker_config_columns(conn)
+    for column, sql_type in (
+        ("kp_candidates_enabled", "INTEGER"),
+        ("kp_candidate_peak_weight", "REAL"),
+        ("kp_candidate_tracklet_multiplier", "REAL"),
+    ):
+        if column not in existing:
+            conn.execute(f"ALTER TABLE tracker_configs ADD COLUMN {column} {sql_type}")
+
+
+def _migrate_registry_v17_to_v18(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 17 to 18.
+
+    v18 adds tracker_configs.kp_candidates_enabled, kp_candidate_peak_weight and
+    kp_candidate_tracklet_multiplier, mirroring the session schema v68->v69 change -- see
+    _migrate_session_v68_to_v69.
+    """
+    _add_kp_candidate_config_columns(conn)
+    _set_schema_version(conn, 18)
+    conn.commit()
+
+
+_KP_CHOICE_CONFIG_COLUMNS = (
+    ("kp_candidate_choice", "TEXT"),
+    ("kp_choice_support_window_s", "REAL"),
+    ("kp_choice_delta", "REAL"),
+    ("kp_choice_beta", "REAL"),
+    ("kp_choice_gamma", "REAL"),
+    ("kp_choice_rounds", "INTEGER"),
+    ("kp_choice_skip_camera_ids", "TEXT"),
+    ("kp_strict_filter", "INTEGER"),
+    ("kp_strict_filter_window_frames", "INTEGER"),
+    ("kp_strict_filter_min_fraction", "REAL"),
+    ("kp_mask_term_weight", "REAL"),
+    ("kp_mask_term_window_s", "REAL"),
+    ("kp_mask_term_classes", "TEXT"),
+    ("kp_strict_filter_classes", "TEXT"),
+)
+
+
+def _add_kp_choice_config_columns(conn: sqlite3.Connection) -> None:
+    """Add the settings of the windowed choice of keypoint candidates to tracker_configs where they are missing."""
+    existing = _tracker_config_columns(conn)
+    for column, sql_type in _KP_CHOICE_CONFIG_COLUMNS:
+        if column not in existing:
+            conn.execute(f"ALTER TABLE tracker_configs ADD COLUMN {column} {sql_type}")
+
+
+def _migrate_registry_v18_to_v19(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 18 to 19.
+
+    v19 adds the tracker_configs columns of the windowed choice of keypoint candidates (kp_candidate_choice and
+    the kp_choice_*, kp_strict_filter* and kp_mask_term_* settings), mirroring the session schema v69->v70
+    change -- see _migrate_session_v69_to_v70.
+    """
+    _add_kp_choice_config_columns(conn)
+    _set_schema_version(conn, 19)
+    conn.commit()
+
+
+_KP_STICKY_CONFIG_COLUMNS = (
+    ("kp_choice_switch_penalty", "REAL"),
+    ("kp_choice_jump_box", "REAL"),
+)
+
+
+def _add_kp_sticky_config_columns(conn: sqlite3.Connection) -> None:
+    """Add the switch penalty and jump threshold of the windowed choice to tracker_configs where they are missing."""
+    existing = _tracker_config_columns(conn)
+    for column, sql_type in _KP_STICKY_CONFIG_COLUMNS:
+        if column not in existing:
+            conn.execute(f"ALTER TABLE tracker_configs ADD COLUMN {column} {sql_type}")
+
+
+def _migrate_registry_v20_to_v21(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 20 to 21.
+
+    v21 adds control_endpoints, which records how each physical camera is
     controlled remotely during capture (docs/roadmap/features/camera-control).
     """
-    sql = (_DB_DIR / "migrations" / "027_control_endpoints.sql").read_text(encoding="utf-8")
+    sql = (_DB_DIR / "migrations" / "032_control_endpoints.sql").read_text(encoding="utf-8")
     conn.executescript(sql)
-    _set_schema_version(conn, 15)
+    _set_schema_version(conn, 21)
+    conn.commit()
+
+
+def _migrate_registry_v19_to_v20(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 19 to 20.
+
+    v20 adds the tracker_configs columns kp_choice_switch_penalty and kp_choice_jump_box (the sticky chain of the
+    windowed choice), mirroring the session schema v70->v71 change. A configuration from before keeps NULL, which
+    means no penalty.
+    """
+    _add_kp_sticky_config_columns(conn)
+    _set_schema_version(conn, 20)
     conn.commit()
 
 
@@ -1896,13 +2064,445 @@ def _migrate_session_v54_to_v55(conn: sqlite3.Connection) -> None:
 def _migrate_session_v55_to_v56(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 55 to 56.
 
-    v56 adds capture_events, the per-camera capture-control event log, and
-    control_endpoints (the registry table of the same name, which session
-    databases also carry -- see the registry v14->v15 migration).
+    v56 adds tracking_assignment_trace: every (candidate, marker slot) pair
+    the shared dot-assignment phase costed for a frame, not just the winner
+    tracking_obs_results records -- the "why was detection N (not) assigned
+    to slot X in frame F" instrumentation. See dot_assignment.hpp's
+    AssignmentTrace and 027_tracking_assignment_trace.sql.
     """
-    for name in ("027_control_endpoints.sql", "028_capture_events.sql"):
+    sql = (_DB_DIR / "migrations" / "027_tracking_assignment_trace.sql").read_text(
+        encoding="utf-8"
+    )
+    conn.executescript(sql)
+
+
+def _migrate_session_v56_to_v57(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 56 to 57.
+
+    v57 adds segmentation-mask-based dot-assignment trust to tracker_configs.
+    Every session database embeds its own full copy of the registry tables,
+    including tracker_configs, so it needs this same column addition kept in
+    sync -- see create_session()'s own docstring. Mirrors the registry schema
+    v14->v15 change -- see SegMaskSubjectConfig and TrackerConfig's own
+    dot_seg_mask_* field doc comments (dot_assignment.hpp / config.hpp).
+    """
+    existing = _tracker_config_columns(conn)
+    if "dot_seg_mask_enabled" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_enabled INTEGER")
+    if "dot_seg_mask_dilate_px" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_dilate_px REAL")
+    if "dot_seg_mask_tracklet_window" not in existing:
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_tracklet_window INTEGER")
+    if "dot_seg_mask_min_tracklet_fraction" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_min_tracklet_fraction REAL"
+        )
+    if "dot_seg_mask_cost_scale_at_zero_fraction" not in existing:
+        conn.execute(
+            "ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_cost_scale_at_zero_fraction REAL"
+        )
+    _set_schema_version(conn, 57)
+    conn.commit()
+
+
+def _migrate_session_v60_to_v61(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 60 to 61.
+
+    v61 adds tracker_configs.dot_seg_mask_hard_distance_px: a candidate farther
+    than this from its subject's mask label in the current frame cannot be
+    assigned to the subject's slots, whatever its tracklet's history. Mirrors
+    the registry schema v15->v16 change, since every session embeds a copy of
+    tracker_configs.
+    """
+    if "dot_seg_mask_hard_distance_px" not in _tracker_config_columns(conn):
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN dot_seg_mask_hard_distance_px REAL")
+    _set_schema_version(conn, 61)
+    conn.commit()
+
+
+def _migrate_session_v61_to_v62(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 61 to 62.
+
+    v62 adds dot_assignment_proposals (automatic dot tracklet to marker slot
+    proposals) and dot_assignment_edits (human assign/forbid/reject decisions
+    on them, per trial). See 029_dot_assignment.sql.
+    """
+    sql = (_DB_DIR / "migrations" / "029_dot_assignment.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+
+
+def _migrate_session_v62_to_v63(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 62 to 63.
+
+    v63 adds tracking_runs.name, a display name the user gives a run to find it again
+    (NULL until named).
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(tracking_runs)")}
+    if "name" not in columns:
+        conn.execute("ALTER TABLE tracking_runs ADD COLUMN name TEXT")
+    _set_schema_version(conn, 63)
+    conn.commit()
+
+
+def _migrate_session_v63_to_v64(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 63 to 64.
+
+    v64 adds tracking_runs.status / completed_at / failure (existing runs are
+    'complete'), the segmentation columns of tracking_run_persons (left NULL) and
+    the run_progress table that dates the newest activity of a running job.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(tracking_runs)")}
+    if "status" not in columns:
+        conn.execute(
+            "ALTER TABLE tracking_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'complete'"
+            " CHECK (status IN ('running', 'complete', 'failed'))"
+        )
+    if "completed_at" not in columns:
+        conn.execute("ALTER TABLE tracking_runs ADD COLUMN completed_at TEXT")
+    if "failure" not in columns:
+        conn.execute("ALTER TABLE tracking_runs ADD COLUMN failure TEXT")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(tracking_run_persons)")}
+    for name, decl in (
+        ("seg_quality_run_id", "TEXT REFERENCES seg_quality_runs(id)"),
+        ("seg_mask_label", "INTEGER"),
+        ("seg_revision", "INTEGER"),
+    ):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE tracking_run_persons ADD COLUMN {name} {decl}")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS run_progress ("
+        " run_id TEXT PRIMARY KEY, updated_at TEXT NOT NULL)"
+    )
+    _set_schema_version(conn, 64)
+    conn.commit()
+
+
+def _migrate_session_v64_to_v65(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 64 to 65.
+
+    v65 adds pose_sequence_keypoints.obs_source and makes it part of the primary key, so a
+    sequence can name the slots of each of its observation sources (a SOMA body blob and the
+    hand21 blobs of refined hands). Existing rows get 'body'. See
+    030_pose_sequence_keypoints_obs_source.sql.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(pose_sequence_keypoints)")}
+    if "obs_source" not in columns:
+        sql = (_DB_DIR / "migrations" / "030_pose_sequence_keypoints_obs_source.sql").read_text(encoding="utf-8")
+        conn.executescript(sql)
+    _set_schema_version(conn, 65)
+    conn.commit()
+
+
+def _migrate_session_v65_to_v66(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 65 to 66.
+
+    v66 adds the run inputs of detection_runs: seg_quality_run_id, seg_revision and
+    source_detection_run_id. They stay NULL for existing runs, except that a run whose
+    config_json names ``source_detection_run`` (the pose-model spike's prototype runs) gets
+    that run in source_detection_run_id when it exists.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(detection_runs)")}
+    for name, decl in (
+        ("seg_quality_run_id", "TEXT REFERENCES seg_quality_runs(id)"),
+        ("seg_revision", "INTEGER"),
+        ("source_detection_run_id", "TEXT REFERENCES detection_runs(id)"),
+    ):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE detection_runs ADD COLUMN {name} {decl}")
+    conn.execute(
+        "UPDATE detection_runs SET source_detection_run_id = json_extract(config_json, '$.source_detection_run')"
+        " WHERE source_detection_run_id IS NULL AND config_json IS NOT NULL AND json_valid(config_json)"
+        " AND json_extract(config_json, '$.source_detection_run') IN (SELECT id FROM detection_runs)"
+    )
+    _set_schema_version(conn, 66)
+    conn.commit()
+
+
+def _migrate_session_v66_to_v67(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 66 to 67.
+
+    v67 adds tracker_configs.active_joint_groups: the joint groups the tracker's
+    main (parent) stage tracks, so that a hierarchical configuration states the
+    form it was made for (parent stage restricted to its group) instead of
+    depending on a command-line option. NULL keeps the previous behaviour, the
+    whole skeleton. Mirrors the registry schema v16->v17 change, since every
+    session embeds a copy of tracker_configs.
+    """
+    if "active_joint_groups" not in _tracker_config_columns(conn):
+        conn.execute("ALTER TABLE tracker_configs ADD COLUMN active_joint_groups TEXT")
+    _set_schema_version(conn, 67)
+    conn.commit()
+
+
+def _migrate_session_v67_to_v68(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 67 to 68.
+
+    v68 makes segmentation masks append-only by revision: seg_mask_revisions, seg_masks.revision
+    in the primary key (mask_blob nullable), the seg_masks_latest view, and a trigger giving every
+    new segmentation run a closed revision 0. SQLite cannot change a primary key in place, so
+    seg_masks is rebuilt: every row is copied once with revision 0, run by run, reporting progress
+    through the ``posetrak.db.db`` logger. The whole rebuild is one transaction. See
+    031_seg_mask_revisions.sql and the segmentation versioning design.
+    """
+    if "revision" not in {row[1] for row in conn.execute("PRAGMA table_info(seg_masks)")}:
+        sql = (_DB_DIR / "migrations" / "031_seg_mask_revisions.sql").read_text(encoding="utf-8")
+        before, after = sql.split("-- @@ after copy")
+        # The rebuild drops seg_masks while seg_quality_runs rows point at it; foreign-key
+        # enforcement cannot change inside a transaction, so it brackets the whole rebuild.
+        conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            conn.execute("BEGIN")
+            for stmt in _split_statements(before):
+                conn.execute(stmt)
+            runs = conn.execute("SELECT id, created_at FROM seg_quality_runs ORDER BY created_at").fetchall()
+            for i, (run_id, created_at) in enumerate(runs, 1):
+                conn.execute(
+                    "INSERT INTO seg_mask_revisions (seg_quality_run_id, revision, created_at, closed_at)"
+                    " VALUES (?, 0, ?, ?)",
+                    (run_id, created_at, created_at),
+                )
+                n = conn.execute(
+                    "INSERT INTO seg_masks_new (seg_quality_run_id, shot_video_id, frame_idx, revision, mask_blob)"
+                    " SELECT seg_quality_run_id, shot_video_id, frame_idx, 0, mask_blob FROM seg_masks"
+                    " WHERE seg_quality_run_id = ?",
+                    (run_id,),
+                ).rowcount
+                _log.info("seg_masks migration: run %d/%d %s, %d masks copied", i, len(runs), run_id, n)
+            conn.execute("DROP TABLE seg_masks")
+            conn.execute("ALTER TABLE seg_masks_new RENAME TO seg_masks")
+            for stmt in _split_statements(after):
+                conn.execute(stmt)
+            _set_schema_version(conn, 68)
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
+    else:
+        _set_schema_version(conn, 68)
+        conn.commit()
+
+
+def _migrate_session_v68_to_v69(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 68 to 69.
+
+    v69 adds tracker_configs.kp_candidates_enabled: whether a tracking run takes the keypoint candidates of its
+    sequence (pose_observations rows with source 'kp_candidates') instead of the fixed body observations for the
+    markers bound to that pose model. NULL keeps the previous behaviour, the fixed observations. Mirrors the
+    registry schema v17->v18 change, since every session embeds a copy of tracker_configs. It also adds
+    kp_candidate_peak_weight and kp_candidate_tracklet_multiplier, the settings of the assignment cost of those
+    candidates (NULL: 0.0 and 1.0, the cost without a peak term and without tracklet continuity).
+    """
+    _add_kp_candidate_config_columns(conn)
+    _set_schema_version(conn, 69)
+    conn.commit()
+
+
+def _migrate_session_v71_to_v72(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 71 to 72.
+
+    v72 adds capture_events, the per-camera capture-control event log, and
+    control_endpoints (the registry table of the same name, which session
+    databases also carry -- see the registry v20->v21 migration).
+    """
+    for name in ("032_control_endpoints.sql", "033_capture_events.sql"):
         conn.executescript((_DB_DIR / "migrations" / name).read_text(encoding="utf-8"))
-    _set_schema_version(conn, 56)
+    _set_schema_version(conn, 72)
+    conn.commit()
+
+
+def _migrate_session_v70_to_v71(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 70 to 71.
+
+    v71 adds the tracker_configs columns kp_choice_switch_penalty and kp_choice_jump_box (mirroring registry
+    v19->v20). A configuration from before keeps NULL, which means no penalty.
+    """
+    _add_kp_sticky_config_columns(conn)
+    _set_schema_version(conn, 71)
+    conn.commit()
+
+
+def _migrate_session_v69_to_v70(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 69 to 70.
+
+    v70 adds the tracker_configs settings of the windowed choice of keypoint candidates (mirroring registry
+    v18->v19) and the tracking_kp_picks table, in which a run that chose candidates over a time window records
+    the candidate it picked for each keypoint of each frame. A configuration from before keeps NULL in the new
+    columns, which means the per-step assignment ('step').
+    """
+    _add_kp_choice_config_columns(conn)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tracking_kp_picks (
+            run_id                      TEXT    NOT NULL REFERENCES tracking_runs(id),
+            person_id                   INTEGER NOT NULL,
+            camera_instance_id          TEXT    NOT NULL,
+            n_frames                    INTEGER NOT NULL,
+            n_keypoints                 INTEGER NOT NULL,
+            video_frames                BLOB    NOT NULL,
+            tracklet_ids                BLOB    NOT NULL,
+            ranks                       BLOB    NOT NULL,
+            n_candidate_keypoint_frames INTEGER NOT NULL,
+            n_filter_emptied            INTEGER NOT NULL,
+            n_picked                    INTEGER NOT NULL,
+            PRIMARY KEY (run_id, person_id, camera_instance_id)
+        )
+        """
+    )
+    _set_schema_version(conn, 70)
+    conn.commit()
+
+
+def _split_statements(sql: str) -> list[str]:
+    """Split a migration script into complete statements (triggers keep their ``;`` inside BEGIN..END)."""
+    out, buf = [], ""
+    for line in sql.splitlines(keepends=True):
+        if line.lstrip().startswith("--"):
+            continue
+        buf += line
+        if sqlite3.complete_statement(buf):
+            out.append(buf.strip())
+            buf = ""
+    return out
+
+
+def _migrate_session_v57_to_v58(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 57 to 58.
+
+    v58 adds capture_subjects (a capture-scoped registry giving every person
+    and object a permanent integer label, used as its segmentation-mask
+    label), the triggers that keep it in step with capture_persons/
+    capture_objects, and seg_quality_run_subjects (exception rows for
+    segmentations whose labels differ from the registry labels). Existing
+    subjects are backfilled. See 028_capture_subjects.sql and
+    docs/roadmap/features/subject-identity/subject-identity-design.md.
+    """
+    sql = (_DB_DIR / "migrations" / "028_capture_subjects.sql").read_text(encoding="utf-8")
+    conn.executescript(sql)
+
+
+def _migrate_session_v58_to_v59(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 58 to 59.
+
+    v59 adds a nullable ``subject_id`` (a capture_subjects.id) to
+    sequence_persons, tracking_run_persons and detection_track_assignments,
+    so a sequence, a tracked run and a stitched track each point at the
+    capture's subject registry instead of matching names. Existing rows are
+    backfilled: from capture_person_id where set (a person's registry id is
+    its capture_persons id), else by name within the capture; a run's
+    subject is its tracked object or, for a person, its sequence's person.
+    Tracking runs made before the tracker recorded tracking_run_persons get
+    that row too. See docs/roadmap/features/subject-identity/
+    subject-identity-design.md.
+    """
+    for table in ("sequence_persons", "tracking_run_persons", "detection_track_assignments"):
+        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if "subject_id" not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN subject_id TEXT")
+    conn.executescript(
+        """
+        UPDATE sequence_persons SET subject_id = (
+            SELECT cs.id FROM capture_subjects cs WHERE cs.id = sequence_persons.capture_person_id)
+        WHERE subject_id IS NULL AND capture_person_id IS NOT NULL;
+        UPDATE sequence_persons SET subject_id = (
+            SELECT cs.id FROM capture_subjects cs
+            JOIN pose_observation_sequences pos ON pos.shot_id = cs.capture_id
+            WHERE pos.id = sequence_persons.sequence_id
+              AND cs.name = sequence_persons.person_name AND cs.deleted = 0)
+        WHERE subject_id IS NULL;
+
+        UPDATE detection_track_assignments SET subject_id = (
+            SELECT cs.id FROM capture_subjects cs
+            WHERE cs.id = detection_track_assignments.capture_person_id)
+        WHERE subject_id IS NULL AND capture_person_id IS NOT NULL;
+        UPDATE detection_track_assignments SET subject_id = (
+            SELECT cs.id FROM capture_subjects cs
+            JOIN detection_runs dr ON dr.shot_id = cs.capture_id
+            WHERE dr.id = detection_track_assignments.detection_run_id
+              AND cs.name = detection_track_assignments.person_name AND cs.deleted = 0)
+        WHERE subject_id IS NULL;
+
+        INSERT OR IGNORE INTO tracking_run_persons
+            (run_id, person_id, skeleton_id, capture_object_id, subject_id)
+        SELECT tr.id, res.person_id, tr.skeleton_id, dr.capture_object_id,
+               COALESCE(dr.capture_object_id,
+                        (SELECT sp.subject_id FROM sequence_persons sp
+                         WHERE sp.sequence_id = tr.observation_sequence_id
+                           AND sp.person_id = res.person_id))
+        FROM tracking_runs tr
+        JOIN (SELECT DISTINCT run_id, person_id FROM tracking_results) res
+             ON res.run_id = tr.id
+        LEFT JOIN pose_observation_sequences pos ON pos.id = tr.observation_sequence_id
+        LEFT JOIN detection_runs dr ON dr.id = pos.detection_run_id;
+
+        UPDATE tracking_run_persons SET subject_id = capture_object_id
+        WHERE subject_id IS NULL AND capture_object_id IS NOT NULL;
+        UPDATE tracking_run_persons SET subject_id = (
+            SELECT sp.subject_id FROM sequence_persons sp
+            WHERE sp.sequence_id = (SELECT observation_sequence_id FROM tracking_runs
+                                    WHERE id = tracking_run_persons.run_id)
+              AND sp.person_id = tracking_run_persons.person_id)
+        WHERE subject_id IS NULL;
+        """
+    )
+    _set_schema_version(conn, 59)
+    conn.commit()
+
+
+def _migrate_session_v59_to_v60(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 59 to 60.
+
+    v60 retires ``seg_quality_runs.persons_json``: label meanings now come
+    only from the subject registry and ``seg_quality_run_subjects``. So every
+    name still recorded in a persons_json list must be reachable from there.
+    For each entry (index i = mask label i+1) the subject is the capture's
+    live subject of that name, else its most recently deleted one, else a
+    person created now for the name (which gets the next registry label, so
+    its old mask label needs an exception row). An exception row is written
+    unless the subject is live and already has that label. Existing exception
+    rows are kept. The column itself stays, unused. See
+    docs/roadmap/features/subject-identity/subject-identity-design.md.
+    """
+    import datetime
+    import json
+
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    runs = conn.execute(
+        "SELECT id, shot_id, persons_json FROM seg_quality_runs WHERE persons_json IS NOT NULL"
+    ).fetchall()
+    for run_id, capture_id, persons_json in runs:
+        try:
+            names = json.loads(persons_json)
+        except ValueError:
+            continue
+        for index, name in enumerate(names):
+            if not name:
+                continue
+            label = index + 1
+            row = conn.execute(
+                "SELECT id, label, deleted FROM capture_subjects WHERE capture_id = ? AND name = ? "
+                "ORDER BY deleted, label DESC LIMIT 1",
+                (capture_id, name),
+            ).fetchone()
+            if row is None:
+                subject_id = generate_id()
+                conn.execute(
+                    "INSERT INTO capture_persons (id, capture_id, name, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (subject_id, capture_id, name, now),
+                )
+                row = conn.execute(
+                    "SELECT id, label, deleted FROM capture_subjects WHERE id = ?", (subject_id,)
+                ).fetchone()
+            subject_id, subject_label, deleted = row
+            if deleted or subject_label != label:
+                conn.execute(
+                    "INSERT OR IGNORE INTO seg_quality_run_subjects "
+                    "(seg_quality_run_id, label, subject_id) VALUES (?, ?, ?)",
+                    (run_id, label, subject_id),
+                )
+    _set_schema_version(conn, 60)
     conn.commit()
 
 
@@ -2094,6 +2694,54 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 55
     if actual == 55:
         _migrate_session_v55_to_v56(conn)
+        actual = 56
+    if actual == 56:
+        _migrate_session_v56_to_v57(conn)
+        actual = 57
+    if actual == 57:
+        _migrate_session_v57_to_v58(conn)
+        actual = 58
+    if actual == 58:
+        _migrate_session_v58_to_v59(conn)
+        actual = 59
+    if actual == 59:
+        _migrate_session_v59_to_v60(conn)
+        actual = 60
+    if actual == 60:
+        _migrate_session_v60_to_v61(conn)
+        actual = 61
+    if actual == 61:
+        _migrate_session_v61_to_v62(conn)
+        actual = 62
+    if actual == 62:
+        _migrate_session_v62_to_v63(conn)
+        actual = 63
+    if actual == 63:
+        _migrate_session_v63_to_v64(conn)
+        actual = 64
+    if actual == 64:
+        _migrate_session_v64_to_v65(conn)
+        actual = 65
+    if actual == 65:
+        _migrate_session_v65_to_v66(conn)
+        actual = 66
+    if actual == 66:
+        _migrate_session_v66_to_v67(conn)
+        actual = 67
+    if actual == 67:
+        _migrate_session_v67_to_v68(conn)
+        actual = 68
+    if actual == 68:
+        _migrate_session_v68_to_v69(conn)
+        actual = 69
+    if actual == 69:
+        _migrate_session_v69_to_v70(conn)
+        actual = 70
+    if actual == 70:
+        _migrate_session_v70_to_v71(conn)
+        actual = 71
+    if actual == 71:
+        _migrate_session_v71_to_v72(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 

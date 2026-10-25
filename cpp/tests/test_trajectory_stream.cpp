@@ -28,7 +28,7 @@ Skeleton make_simple_arm_skeleton() {
 SmoothedFrame make_frame(double timestamp, Eigen::Vector3d const& root_pos, int n_dof) {
     State state(root_pos, Eigen::Quaterniond::Identity(), Eigen::VectorXd::Zero(n_dof),
                 Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), Eigen::VectorXd::Zero(n_dof));
-    return SmoothedFrame{timestamp, state, Eigen::MatrixXd()};
+    return SmoothedFrame{timestamp, state, Eigen::VectorXd()};
 }
 
 }  // namespace

@@ -22,10 +22,11 @@ from collections import defaultdict
 
 import numpy as np
 
-from app.pose.db_cache import DOT_REGION_TYPE
+from app.pose.db_cache import DOT_REGION_TYPE, KP_CANDIDATES_REGION
 from posetrak.db.observation_merge import (
     infer_body_width,
     merge_observation_sources,
+    pad_to_common_width,
     refined_indices,
 )
 
@@ -65,9 +66,9 @@ def read_timeline_status(
     # other source uses, and aren't part of this per-keypoint timeline.
     obs_rows = session.execute(
         "SELECT video_frame, source, kp_blob FROM pose_observations"
-        " WHERE sequence_id = ? AND camera_instance_id = ? AND source != ?"
+        " WHERE sequence_id = ? AND camera_instance_id = ? AND source NOT IN (?, ?)"
         " ORDER BY video_frame",
-        (sequence_id, camera_instance_id, DOT_REGION_TYPE),
+        (sequence_id, camera_instance_id, DOT_REGION_TYPE, KP_CANDIDATES_REGION),
     ).fetchall()
 
     edit_rows = session.execute(
@@ -99,6 +100,7 @@ def read_timeline_status(
         merged = merge_observation_sources(rows, default_width=default_width)
         obs_by_frame[frame] = merged if merged is not None else rows[0][1]
         refined_by_frame[frame] = refined_indices(rows)
+    pad_to_common_width(obs_by_frame)
 
     frames = sorted(set(obs_by_frame) | set(edits))
     if not frames:

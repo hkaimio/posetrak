@@ -5,12 +5,16 @@
 #pragma once
 #include <posetrak/core/camera.hpp>
 #include <posetrak/core/skeleton.hpp>
+#include <posetrak/db/busy_timeout.hpp>
 #include <posetrak/filters/update_result.hpp>
+#include <posetrak/tracking/dot_assignment.hpp>
 
 #include <Eigen/Core>
 
 #include <sqlite3.h>
 
+#include <chrono>
+#include <cstdint>
 #include <map>
 #include <string>
 #include <tuple>
@@ -20,8 +24,23 @@ namespace posetrak {
 
 /// @brief Writes tracking results to a session SQLite database.
 ///
-/// Creates a tracking_runs row on construction and batches tracking_results
+/// Creates a tracking_runs row (status 'running') on construction and batches tracking_results
 /// inserts for efficiency. Call flush() (or let the destructor do it) when done.
+/// @brief The picks of the windowed choice of keypoint candidates for one camera: the arrays
+/// are those of the tracking_kp_picks columns of the same names.
+struct KeypointPicks {
+    std::string camera_instance_id;
+    int n_frames = 0;
+    int n_keypoints = 0;
+    std::vector<std::int32_t> video_frames;  ///< [n_frames]
+    std::vector<std::int32_t>
+        tracklet_ids;                ///< [n_frames * n_keypoints]; -1 no pick, -2 unlinked pick
+    std::vector<std::int8_t> ranks;  ///< [n_frames * n_keypoints]; -1 no pick
+    long n_candidate_keypoint_frames = 0;
+    long n_filter_emptied = 0;
+    long n_picked = 0;
+};
+
 class ResultWriter {
    public:
     /// @brief Open db_path read-write and create a tracking_runs row.
@@ -74,6 +93,11 @@ class ResultWriter {
     /// Pass an empty MatrixXd when covariance is unavailable — encodes as zero-length blob.
     void write_smoothed_frame(int step, double timestamp, Eigen::VectorXd const& state,
                               Eigen::MatrixXd const& covariance);
+
+    /// @brief As above, from the covariance diagonal alone (an empty vector writes a
+    /// zero-length blob).
+    void write_smoothed_frame(int step, double timestamp, Eigen::VectorXd const& state,
+                              Eigen::VectorXd const& cov_diag);
 
     /// @brief Write per-observation results for one forward-pass frame.
     ///
@@ -140,6 +164,21 @@ class ResultWriter {
                            std::vector<uint8_t> const& pair_diff_reconstructed,
                            std::vector<std::string> const& parent_owned_markers = {});
 
+    /// @brief Write a batch of assignment-decision trace entries (see
+    /// AssignmentTrace, dot_assignment.hpp) -- the "why was detection N (not)
+    /// assigned to slot X in frame F" instrumentation. Called only when
+    /// tracing was requested for the run (an empty *entries* is a no-op, so a
+    /// caller can pass an AssignmentTrace's own vector unconditionally
+    /// without checking whether the current step was in its traced range).
+    ///
+    /// @param step Tracker step index the entries were captured on
+    /// @param entries One row per (candidate, slot) pair costed this step
+    void write_assignment_trace(int step, std::vector<AssignmentTraceEntry> const& entries);
+
+    /// @brief Store the keypoint candidates a windowed choice picked for one camera
+    /// (tracking_kp_picks, one row per run, person and camera; replaces an earlier row).
+    void write_kp_picks(KeypointPicks const& picks);
+
     /// @brief Insert or update a tracking_run_stages row's status (upsert).
     ///
     /// One row per (run_id(), person_id(), group_name) -- see
@@ -156,10 +195,22 @@ class ResultWriter {
     void set_stage_status(std::string const& group_name, std::string const& status,
                           bool set_started = false, bool set_completed = false);
 
+    /// @brief Record the segmentation masks this run's subject was gated with
+    /// (tracking_run_persons.seg_quality_run_id / seg_mask_label / seg_revision),
+    /// so the run can be reproduced after the masks were edited.
+    /// @param seg_run_id seg_quality_runs.id
+    /// @param mask_label The subject's label within that segmentation
+    /// @param revision The mask revision every mask of the run was read at
+    void record_segmentation(std::string const& seg_run_id, int mask_label, int revision);
+
     /// @brief Flush any pending batched rows to the database.
     void flush();
 
    private:
+    void touch_progress();
+    void touch_progress_if_due();
+    std::chrono::steady_clock::time_point last_progress_{};
+
     sqlite3* db_{};
     std::string run_id_;
     int person_id_;
@@ -184,5 +235,13 @@ class ResultWriter {
     std::vector<std::string>
         marker_names_;  ///< Marker names in skeleton order (obs_blob marker axis)
 };
+
+/// @brief End a tracking run: set tracking_runs.status ('complete' or 'failed'), completed_at
+/// and, for a failed run, the error text. Opens its own connection, so it works after the
+/// run's ResultWriter is gone.
+/// @param status 'complete' or 'failed'
+/// @param failure Error text recorded for a failed run; empty leaves tracking_runs.failure NULL
+void finish_tracking_run(std::string const& db_path, std::string const& run_id,
+                         std::string const& status, std::string const& failure = "");
 
 }  // namespace posetrak

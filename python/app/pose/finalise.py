@@ -6,15 +6,19 @@
 from __future__ import annotations
 
 import sqlite3
+import struct
 from collections import defaultdict
 from dataclasses import dataclass
+from typing import Callable
 
 import json
 
+import cv2
 import numpy as np
 
 from posetrak.db.db import generate_id
 from posetrak.db.manage_person import find_or_create_person
+from posetrak.detection.pose_models import body_manifest, hand_manifest
 from app.setup.db_context import SyncPoint, SyncTable
 
 
@@ -34,6 +38,20 @@ def _scale_kp_confidence(kp_blob: bytes, scale: float) -> bytes:
     return arr.tobytes()
 
 
+def _scale_candidate_peaks(blob: bytes, scale: float) -> bytes:
+    """Multiply the peak column of a ``kp_candidates`` blob by *scale* (the confidence scale of the body row)."""
+    from posetrak.detection.kp_candidates import decode_kp_candidates_blob
+
+    n, n_fields = np.frombuffer(blob, "<i4", 2)
+    table = decode_kp_candidates_blob(blob).copy()
+    table[:, 3] *= scale
+    return np.array([n, n_fields], "<i4").tobytes() + table.astype("<f4").tobytes()
+
+
+#: SOMA-77 outputs heatmap peaks (0-1), like ViTPose, and takes ViTPose's scale into the tracker's noise range.
+SOMA77_CONF_SCALE = 5.0
+
+
 def conf_scale_for_model(pose_model: str) -> float:
     """Return the confidence normalisation factor for *pose_model*.
 
@@ -42,6 +60,8 @@ def conf_scale_for_model(pose_model: str) -> float:
     ``measurement_noise_std = base_noise / confidence``, so a scale factor
     is needed to bring ViTPose values into the same effective noise range.
     """
+    if pose_model.startswith("soma77"):
+        return SOMA77_CONF_SCALE
     try:
         from app.pose.backends_rtmpose import _KNOWN_MODELS
         entry = _KNOWN_MODELS.get(pose_model)
@@ -50,6 +70,26 @@ def conf_scale_for_model(pose_model: str) -> float:
     except Exception:
         pass
     return 1.0
+
+
+def _write_manifest(
+    session: sqlite3.Connection, sequence_id: str, pose_model: str, obs_sources: set[str],
+) -> None:
+    """Name the keypoint slots of each observation source of a new person sequence.
+
+    The body blob gets the names of *pose_model* (nothing for a model the registry does not know, whose
+    layout stays the implied one) and each refined-hand source the hand21 names of its side.
+    """
+    rows = [(sequence_id, "body", idx, name, source) for idx, name, source in body_manifest(pose_model)]
+    if "kp_candidates" in obs_sources:      # the candidates index the same keypoints as the body row
+        rows += [(sequence_id, "kp_candidates", idx, name, source) for idx, name, source in body_manifest(pose_model)]
+    for obs_source in sorted(obs_sources & {"hand_l", "hand_r"}):
+        rows += [(sequence_id, obs_source, idx, name, source) for idx, name, source in hand_manifest(obs_source)]
+    session.executemany(
+        "INSERT INTO pose_sequence_keypoints (sequence_id, obs_source, keypoint_idx, name, source) "
+        "VALUES (?, ?, ?, ?, ?)",
+        rows,
+    )
 
 
 def finalise_to_db(
@@ -147,6 +187,7 @@ def finalise_to_db(
             "DELETE FROM tracking_runs WHERE observation_sequence_id = ?", (sid,)
         )
         session.execute("DELETE FROM sequence_persons WHERE sequence_id = ?", (sid,))
+        session.execute("DELETE FROM pose_sequence_keypoints WHERE sequence_id = ?", (sid,))
         session.execute("DELETE FROM pose_observations WHERE sequence_id = ?", (sid,))
     session.execute(
         "DELETE FROM pose_observation_sequences WHERE detection_run_id = ?",
@@ -184,9 +225,10 @@ def finalise_to_db(
         # One person per sequence — person_id is always 0 within the sequence
         session.execute(
             "INSERT OR IGNORE INTO sequence_persons "
-            "(sequence_id, person_id, person_name, capture_person_id) "
-            "VALUES (?, 0, ?, ?)",
-            (seq_id, person_name, capture_person_id),
+            "(sequence_id, person_id, person_name, capture_person_id, subject_id) "
+            "VALUES (?, 0, ?, ?, ?)",
+            # A person's registry (subject) id is its capture_persons id.
+            (seq_id, person_name, capture_person_id, capture_person_id),
         )
 
         # Keyed by (camera_instance_id, video_frame, source) so that adjacent
@@ -204,7 +246,7 @@ def finalise_to_db(
                 "FROM detection_keypoints "
                 "WHERE detection_run_id=? AND shot_video_id=? AND track_id=? "
                 "AND video_frame BETWEEN ? AND ? "
-                "AND region_type IN ('full_body','hand_l','hand_r') "
+                "AND region_type IN ('full_body','hand_l','hand_r','kp_candidates') "
                 "ORDER BY video_frame",
                 (detection_run_id, asgn.shot_video_id, asgn.track_id,
                  asgn.first_frame, asgn.last_frame),
@@ -216,7 +258,7 @@ def finalise_to_db(
                 if timestamp_s is None:
                     continue
                 # detection_keypoints.region_type='full_body' becomes
-                # pose_observations.source='body'; hand_l/hand_r pass through
+                # pose_observations.source='body'; hand_l/hand_r and kp_candidates pass through
                 # unchanged (same spelling, both enums already agree).
                 source = "body" if kp_row["region_type"] == "full_body" else kp_row["region_type"]
                 kp_blob = bytes(kp_row["keypoints"])
@@ -225,6 +267,10 @@ def finalise_to_db(
                 # carry a hand-model-appropriate scale from hand_refinement.py.
                 if source == "body" and confidence_scale != 1.0:
                     kp_blob = _scale_kp_confidence(kp_blob, confidence_scale)
+                elif source == "kp_candidates" and confidence_scale != 1.0:
+                    # The peak of a candidate is its confidence: same scale as the body row's, so a
+                    # candidate has the measurement noise the fixed observation of that keypoint has.
+                    kp_blob = _scale_candidate_peaks(kp_blob, confidence_scale)
                 obs_by_key[(camera_instance_id, frame_idx, source)] = (
                     seq_id, camera_instance_id, frame_idx,
                     timestamp_s, 0,  # person_id=0, single person per sequence
@@ -240,6 +286,7 @@ def finalise_to_db(
                 "VALUES (?,?,?,?,?,?,?,?,?)",
                 obs_by_key.values(),
             )
+            _write_manifest(session, seq_id, pose_model, {key[2] for key in obs_by_key})
 
     # Persist the track→person mapping for future restore
     session.execute(
@@ -249,11 +296,12 @@ def finalise_to_db(
     session.executemany(
         "INSERT INTO detection_track_assignments "
         "(detection_run_id, shot_video_id, track_id, person_name, capture_person_id, "
-        " first_frame, last_frame) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        " subject_id, first_frame, last_frame) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (detection_run_id, a.shot_video_id, a.track_id,
-             a.person_name, capture_person_ids[a.person_name], a.first_frame, a.last_frame)
+             a.person_name, capture_person_ids[a.person_name],
+             capture_person_ids[a.person_name], a.first_frame, a.last_frame)
             for a in assignments
         ],
     )
@@ -278,7 +326,7 @@ def auto_assign_and_finalise(
 
     Works because a segmentation mask's per-person label is already a
     stable identity -- mask label i+1 maps to persons_ordered[i], the same
-    convention app.pose.pose_worker._bboxes_from_mask uses when writing
+    convention MaskBoxSource uses when writing
     detections, so track_id (== mask label) -> person name is a pure
     lookup, not something that needs stitching across ambiguous YOLO
     tracks. See docs/roadmap/features/segmentation-reuse/
@@ -302,7 +350,7 @@ def auto_assign_and_finalise(
             last_frame=row["last_frame"],
         )
         for row in track_rows
-        if 1 <= row["track_id"] <= len(persons_ordered)
+        if 1 <= row["track_id"] <= len(persons_ordered) and persons_ordered[row["track_id"] - 1]
     ]
     return finalise_to_db(
         session=session,
@@ -316,10 +364,121 @@ def auto_assign_and_finalise(
     )
 
 
+def finalise_from_source_run(
+    session: sqlite3.Connection,
+    detection_run_id: str,
+    source_run_id: str,
+    pose_model: str,
+    notes: str = "",
+    confidence_scale: float = 1.0,
+) -> list[str]:
+    """Finalise a run whose boxes came from *source_run_id* with that run's track-to-person assignments.
+
+    The tracks of the new run are the source run's tracks, so its assignments apply unchanged. Returns the new
+    sequence ids; [] (nothing finalised) when the source run has no assignments yet.
+    """
+    assignments = [
+        TrackAssignment(r["shot_video_id"], r["track_id"], r["person_name"], r["first_frame"], r["last_frame"])
+        for r in session.execute(
+            "SELECT shot_video_id, track_id, person_name, first_frame, last_frame FROM detection_track_assignments"
+            " WHERE detection_run_id = ?", (source_run_id,))
+    ]
+    if not assignments:
+        return []
+    run = session.execute("SELECT shot_id, sync_config_id FROM detection_runs WHERE id = ?", (detection_run_id,)).fetchone()
+    return finalise_to_db(
+        session=session, detection_run_id=detection_run_id, shot_id=run["shot_id"], sync_config_id=run["sync_config_id"],
+        assignments=assignments, pose_model=pose_model, notes=notes, confidence_scale=confidence_scale,
+    )
+
+
+def _make_dot_mask_filter(
+    session: sqlite3.Connection, seg_run_id: str, dilate_px: float,
+) -> Callable[[str, int, bytes], bytes]:
+    """Build a `_copy_region` blob filter that drops dot candidates falling
+    outside a dilated version of *seg_run_id*'s person silhouette mask for
+    that (camera, frame) -- see `finalise_object_to_db`'s own docstring for
+    the rationale and caveats.
+
+    Coordinates are mapped into the mask's own (possibly downscaled, see
+    `posetrak.detection.box_sources.load_mask`) resolution rather than resizing the
+    mask up to native resolution per frame -- cheaper, and exact up to the
+    same nearest-neighbor rounding `cv2.resize(..., INTER_NEAREST)` would
+    give, since a dilated label mask is binary either way.
+    """
+    from posetrak.db.seg_revisions import newest_closed_revision
+    from posetrak.detection.box_sources import load_mask as _load_mask
+
+    # One revision for the whole finalise, so a save made meanwhile cannot mix two states of the masks.
+    revision = newest_closed_revision(session, seg_run_id)
+    native_size_cache: dict[str, tuple[int, int] | None] = {}
+
+    def native_size(svid: str) -> tuple[int, int] | None:
+        if svid not in native_size_cache:
+            row = session.execute(
+                "SELECT file_path FROM capture_videos WHERE id = ?", (svid,)
+            ).fetchone()
+            size = None
+            if row is not None:
+                cap = cv2.VideoCapture(row["file_path"])
+                try:
+                    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                finally:
+                    cap.release()
+                if w > 0 and h > 0:
+                    size = (w, h)
+            native_size_cache[svid] = size
+        return native_size_cache[svid]
+
+    def dilated_mask(svid: str, frame_idx: int) -> np.ndarray | None:
+        """Boolean mask, in its own (mask-resolution) shape, or None if no
+        mask or native size is available for this (camera, frame).
+
+        Not cached: _copy_region calls this at most once per (svid,
+        frame_idx) already (one detection_keypoints row per key), so a
+        cache would only ever store, never reuse -- pure memory growth,
+        one full mask array retained per frame for the whole finalise call.
+        A long multi-camera run (the sword's ~56s trial, ~27,500 dot rows)
+        is exactly the case where that turned into real gigabytes and got
+        the whole process killed for memory pressure.
+        """
+        mask = _load_mask(session, seg_run_id, svid, frame_idx, revision)
+        size = native_size(svid)
+        if mask is None or size is None:
+            return None
+        fw, _fh = size
+        mh, mw = mask.shape
+        radius = max(1, round(dilate_px * mw / fw))
+        kernel = np.ones((2 * radius + 1, 2 * radius + 1), dtype=np.uint8)
+        return cv2.dilate((mask > 0).astype(np.uint8), kernel) > 0
+
+    def blob_filter(svid: str, frame_idx: int, blob: bytes) -> bytes:
+        from app.pose.db_cache import decode_dot_candidates
+
+        arr = decode_dot_candidates(blob)
+        if len(arr) == 0:
+            return blob
+        mask = dilated_mask(svid, frame_idx)
+        size = native_size(svid)
+        if mask is None or size is None:
+            return blob  # no mask for this instant -- a "don't know", keep everything
+        fw, fh = size
+        mh, mw = mask.shape
+        mx = np.clip((arr[:, 0] * (mw / fw)).astype(np.int64), 0, mw - 1)
+        my = np.clip((arr[:, 1] * (mh / fh)).astype(np.int64), 0, mh - 1)
+        kept = arr[mask[my, mx]]
+        return struct.pack("<i", len(kept)) + kept.tobytes()
+
+    return blob_filter
+
+
 def finalise_object_to_db(
     session: sqlite3.Connection,
     detection_run_id: str,
     notes: str = "",
+    dot_mask_seg_run_id: str | None = None,
+    dot_mask_dilate_px: float = 150.0,
 ) -> str:
     """Finalise a marker detection run into one `pose_observation_sequence`
     for its tracked object (marker-based-mocap design doc §4.3, §7.1).
@@ -337,6 +496,23 @@ def finalise_object_to_db(
     (`marker_ids`, and the marker body definition's own marker names when
     known) — so the sequence is self-describing without needing to
     re-resolve the marker body definition later.
+
+    Parameters
+    ----------
+    dot_mask_seg_run_id:
+        When given, a `seg_quality_runs` id whose person silhouette masks
+        are used to drop dot candidates that fall well outside a dilated
+        version of it before they are copied into `pose_observations`
+        (see `_make_dot_mask_filter`) — a heuristic aid for a prop held in
+        hand, not a hard geometric constraint. `resolve_dot_assignment()`'s
+        own Mahalanobis gating downstream is still what decides real
+        correctness; this only reduces the background-noise candidate
+        count it has to gate against. A frame with no stored mask for that
+        instant keeps its candidates unfiltered.
+    dot_mask_dilate_px:
+        Dilation radius, in the *native* frame's own pixels, applied to
+        the person silhouette before testing candidates against it — a
+        handheld prop (e.g. a sword) extends well beyond the hand itself.
 
     Raises
     ------
@@ -485,12 +661,17 @@ def finalise_object_to_db(
     ).fetchall()
     camera_by_svid = {r["id"]: r["camera_instance_id"] for r in sv_rows}
 
-    def _copy_region(track_id: int, region_type: str, source: str) -> None:
+    def _copy_region(
+        track_id: int, region_type: str, source: str,
+        blob_filter: Callable[[str, int, bytes], bytes] | None = None,
+    ) -> None:
         """Copy every detection_keypoints row for one (track_id, region_type)
         into pose_observations under the given source -- same call shape
         for 'markers' and 'dots' (dot-assignment-architecture-design.md §3:
         the finalisation copy loop needs no dots-specific code path, just
-        another region_type/source value)."""
+        another region_type/source value). *blob_filter*, when given, gets
+        a chance to replace each row's raw blob before it is copied (used
+        by the dots region's optional mask-based candidate filter)."""
         kp_rows = session.execute(
             "SELECT shot_video_id, video_frame, keypoints, noise_scale FROM detection_keypoints "
             "WHERE detection_run_id = ? AND track_id = ? AND region_type = ? "
@@ -507,12 +688,15 @@ def finalise_object_to_db(
             timestamp_s = sync_table.frame_to_global_time(frame_idx, kp_row["shot_video_id"])
             if timestamp_s is None:
                 continue
+            blob = bytes(kp_row["keypoints"])
+            if blob_filter is not None:
+                blob = blob_filter(kp_row["shot_video_id"], frame_idx, blob)
             obs_rows.append((
                 seq_id, camera_instance_id, frame_idx, timestamp_s,
                 0,  # person_id column, repurposed as "the object" -- always 0, one
                     # subject per sequence (or, for dots, the scene-wide placeholder
                     # SessionReader::load_unlabeled_candidates() ignores anyway)
-                source, detection_run_id, bytes(kp_row["keypoints"]), kp_row["noise_scale"],
+                source, detection_run_id, blob, kp_row["noise_scale"],
             ))
         if obs_rows:
             session.executemany(
@@ -528,7 +712,11 @@ def finalise_object_to_db(
     # present only for a run that had detect_dots_for_cameras enabled for at
     # least one camera (MarkerDetectionPipeline) -- a no-op copy otherwise, since
     # _copy_region's own query simply finds no rows.
-    _copy_region(DOT_TRACK_ID, DOT_REGION_TYPE, "dots")
+    dot_filter = (
+        _make_dot_mask_filter(session, dot_mask_seg_run_id, dot_mask_dilate_px)
+        if dot_mask_seg_run_id is not None else None
+    )
+    _copy_region(DOT_TRACK_ID, DOT_REGION_TYPE, "dots", blob_filter=dot_filter)
 
     session.commit()
     return seq_id

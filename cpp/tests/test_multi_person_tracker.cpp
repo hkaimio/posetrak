@@ -186,7 +186,8 @@ void create_fixture_db(fs::path const& path, int num_frames, double dt) {
             calibrated_at TEXT NOT NULL, calibration_tool TEXT,
             distortion_model TEXT NOT NULL DEFAULT 'radtan',
             fx REAL NOT NULL, fy REAL NOT NULL, cx REAL NOT NULL, cy REAL NOT NULL,
-            dist_coeffs BLOB, rms_error REAL, notes TEXT, matrix_original BLOB
+            dist_coeffs BLOB, rms_error REAL, notes TEXT, matrix_original BLOB,
+            image_width INTEGER, image_height INTEGER
         );
     )");
     exec_sql(db, R"(
@@ -232,7 +233,21 @@ void create_fixture_db(fs::path const& path, int num_frames, double dt) {
             confidence_threshold_marker_names TEXT, confidence_threshold_override REAL,
             dot_reacquire_gap_frames INTEGER, dot_reacquire_max_px REAL,
             dot_cross_view_corroboration_px REAL, dot_corroboration_gate_multiplier REAL,
-            dot_camera_noise_scale TEXT
+            dot_camera_noise_scale TEXT,
+            dot_seg_mask_enabled INTEGER, dot_seg_mask_dilate_px REAL,
+            dot_seg_mask_tracklet_window INTEGER, dot_seg_mask_min_tracklet_fraction REAL,
+            dot_seg_mask_cost_scale_at_zero_fraction REAL,
+            dot_seg_mask_hard_distance_px REAL,
+            active_joint_groups TEXT,
+            kp_candidates_enabled INTEGER,
+            kp_candidate_peak_weight REAL,
+            kp_candidate_tracklet_multiplier REAL,
+            kp_candidate_choice TEXT, kp_choice_support_window_s REAL, kp_choice_delta REAL,
+            kp_choice_beta REAL, kp_choice_gamma REAL, kp_choice_rounds INTEGER,
+            kp_choice_skip_camera_ids TEXT, kp_strict_filter INTEGER,
+            kp_strict_filter_window_frames INTEGER, kp_strict_filter_min_fraction REAL,
+            kp_mask_term_weight REAL, kp_mask_term_window_s REAL, kp_mask_term_classes TEXT,
+            kp_strict_filter_classes TEXT, kp_choice_switch_penalty REAL, kp_choice_jump_box REAL
         );
     )");
     exec_sql(db, R"(
@@ -323,8 +338,12 @@ void create_fixture_db(fs::path const& path, int num_frames, double dt) {
             tracker_config_id TEXT NOT NULL, skeleton_id TEXT NOT NULL,
             extrinsic_calibration_id TEXT, sync_config_id TEXT,
             ran_at TEXT NOT NULL, posetrak_version TEXT,
-            active_camera_ids TEXT, marker_names TEXT
+            active_camera_ids TEXT, marker_names TEXT,
+            status TEXT NOT NULL DEFAULT 'complete', completed_at TEXT, failure TEXT
         );
+    )");
+    exec_sql(db, R"(
+        CREATE TABLE run_progress (run_id TEXT PRIMARY KEY, updated_at TEXT NOT NULL);
     )");
     exec_sql(db, R"(
         CREATE TABLE tracking_results (
@@ -915,4 +934,19 @@ TEST_CASE("A seed position does not make a multi-dot body without a coded marker
     std::string const error = dots_only_build_error(3, Eigen::Vector3d(0.0, 0.0, 1.0));
     CAPTURE(error);
     REQUIRE(error.find("anonymous-dot markers") != std::string::npos);
+}
+
+// A smoothed row's tracker step comes from its timestamp, not from its position in
+// the smoothed list: steps without a frame (no observations, or no update) leave no
+// entry, and counting entries instead moved every later smoothed row onto an earlier
+// step, so the smoothed pose led the video by the number of steps skipped so far.
+TEST_CASE("smoothed_step maps a timestamp to its tracker step", "[rts_smoother]") {
+    double const start = 100.0;
+    double const dt = 1.0 / 120.0;
+    CHECK(smoothed_step(start + dt * 0.5, start, dt) == -1);  // warm-up frame (rounds to 0 or 1)
+    CHECK(smoothed_step(start + 1 * dt, start, dt) == 1);
+    CHECK(smoothed_step(start + 4300 * dt, start, dt) == 4300);
+    // An entry after a skipped step keeps its own step number.
+    CHECK(smoothed_step(start + 12 * dt, start, dt) == 12);
+    CHECK(smoothed_step(start + 12 * dt + 1e-9, start, dt) == 12);
 }

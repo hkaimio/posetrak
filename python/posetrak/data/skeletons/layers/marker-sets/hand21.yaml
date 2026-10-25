@@ -1,0 +1,336 @@
+# SPDX-FileCopyrightText: 2026 Harri Kaimio
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Markers bound to the 21 keypoints of each hand: slot of the hand blob (0 is the hand root), which
+# is also COCO-133 keypoint 91 + slot (left) or 112 + slot (right).
+pose_model: hand21
+markers:
+- name: MRK-index4.L
+  side: left
+  slot: 8
+  parent: f_index.03.L
+  offset: [-0.00101020932, 0.0282687284, -0.00054776296]
+  openpose_name: LIndex4
+  confidence_threshold: 0.3
+- name: MRK-index3.L
+  side: left
+  slot: 7
+  parent: f_index.02.L
+  offset: [-0.000704167411, 0.0282903276, 0.00125396904]
+  openpose_name: LIndex3
+  confidence_threshold: 0.3
+- name: MRK-index2.L
+  side: left
+  slot: 6
+  parent: f_index.02.L
+  offset: [1.11758709e-08, -1.34990842e-07, 2.2072345e-07]
+  openpose_name: LIndex2
+  confidence_threshold: 0.3
+- name: MRK-index.L
+  side: left
+  slot: 5
+  parent: f_index.01.L
+  offset: [7.4505806e-09, 8.54488462e-08, 3.09664756e-08]
+  openpose_name: LIndex
+  confidence_threshold: 0.3
+- name: MRK-thumb4.L
+  side: left
+  slot: 4
+  parent: thumb.03.L
+  offset: [-0.00153571926, 0.0280690379, 0.000466682017]
+  openpose_name: LThumb4
+  confidence_threshold: 0.3
+- name: MRK-thumb3.L
+  side: left
+  slot: 3
+  parent: thumb.02.L
+  offset: [-0.000842327252, 0.0277034044, -0.000579740852]
+  openpose_name: LThumb3
+  confidence_threshold: 0.3
+- name: MRK-thumb.L
+  side: left
+  slot: 2
+  parent: thumb.01.L
+  offset: [0.000734118512, 0.05793548, 0.000670012087]
+  openpose_name: LThumb
+  confidence_threshold: 0.3
+- name: MRK-thumb1.L
+  side: left
+  slot: 1
+  parent: thumb.01.L
+  offset: [-9.87201929e-08, -1.08033419e-07, -2.79396772e-08]
+  openpose_name: LThumb1
+  confidence_threshold: 0.3
+- name: MRK-middle4.L
+  side: left
+  slot: 12
+  parent: f_middle.03.L
+  offset: [0.000208709389, 0.0303753316, 0.00285207783]
+  openpose_name: LMiddle4
+  confidence_threshold: 0.3
+- name: MRK-middle3.L
+  side: left
+  slot: 11
+  parent: f_middle.03.L
+  offset: [0.0, -6.26314431e-08, 5.65778464e-08]
+  openpose_name: LMiddle3
+  confidence_threshold: 0.3
+- name: MRK-middle2.L
+  side: left
+  slot: 10
+  parent: f_middle.02.L
+  offset: [0.0, -2.279412e-07, 2.46800482e-08]
+  openpose_name: LMiddle2
+  confidence_threshold: 0.3
+- name: MRK-middle1.L
+  side: left
+  slot: 9
+  parent: f_middle.01.L
+  offset: [2.70083547e-08, 4.59840521e-09, 9.12696123e-08]
+  openpose_name: LMiddle1
+  confidence_threshold: 0.3
+- name: MRK-ring4.L
+  side: left
+  slot: 16
+  parent: f_ring.03.L
+  offset: [0.00104570179, 0.0280715637, -0.000280059874]
+  openpose_name: LRing4
+  confidence_threshold: 0.3
+- name: MRK-ring3.L
+  side: left
+  slot: 15
+  parent: f_ring.02.L
+  offset: [-0.0012226291, 0.0280739665, 0.00100518018]
+  openpose_name: LRing3
+  confidence_threshold: 0.3
+- name: MRK-ring2.L
+  side: left
+  slot: 14
+  parent: f_ring.01.L
+  offset: [-0.000285290182, 0.0468716361, 0.000670166686]
+  openpose_name: LRing2
+  confidence_threshold: 0.3
+- name: MRK-ring1.L
+  side: left
+  slot: 13
+  parent: f_ring.01.L
+  offset: [-5.58793545e-09, -5.424954e-08, -6.42612576e-08]
+  openpose_name: LRing1
+  confidence_threshold: 0.3
+- name: MRK-pinky4.L
+  side: left
+  slot: 20
+  parent: f_pinky.03.L
+  offset: [0.00108332932, 0.0191649497, 0.00174076203]
+  openpose_name: LPinky4
+  confidence_threshold: 0.3
+- name: MRK-pinky3.L
+  side: left
+  slot: 19
+  parent: f_pinky.03.L
+  offset: [-7.4505806e-09, -1.00815669e-07, 1.22003257e-07]
+  openpose_name: LPinky3
+  confidence_threshold: 0.3
+- name: MRK-pinky2.L
+  side: left
+  slot: 18
+  parent: f_pinky.02.L
+  offset: [-1.49011612e-08, 7.91624188e-08, -1.11758709e-07]
+  openpose_name: LPinky2
+  confidence_threshold: 0.3
+- name: MRK-pinky.L
+  side: left
+  slot: 17
+  parent: f_pinky.01.L
+  offset: [-1.86264515e-08, -1.77707989e-07, -8.38190317e-08]
+  openpose_name: LPinky
+  confidence_threshold: 0.3
+- name: MRK-index4.R
+  side: right
+  slot: 8
+  parent: f_index.03.R
+  offset: [0.000830110162, 0.0282772537, -0.000398012809]
+  openpose_name: RIndex4
+  confidence_threshold: 0.3
+- name: MRK-index3.R
+  side: right
+  slot: 7
+  parent: f_index.03.R
+  offset: [1.3038516e-08, -5.34928404e-08, -1.53668225e-07]
+  openpose_name: RIndex3
+  confidence_threshold: 0.3
+- name: MRK-index2.R
+  side: right
+  slot: 6
+  parent: f_index.02.R
+  offset: [5.58793545e-09, -1.40273187e-07, 9.35979187e-08]
+  openpose_name: RIndex2
+  confidence_threshold: 0.3
+- name: MRK-index.R
+  side: right
+  slot: 5
+  parent: f_index.01.R
+  offset: [-5.58793545e-09, 1.21362973e-07, -2.47964635e-08]
+  openpose_name: RIndex
+  confidence_threshold: 0.3
+- name: MRK-thumb4.R
+  side: right
+  slot: 4
+  parent: thumb.03.R
+  offset: [0.00154499244, 0.0280685872, 0.000449959189]
+  openpose_name: RThumb4
+  confidence_threshold: 0.3
+- name: MRK-thumb3.R
+  side: right
+  slot: 3
+  parent: thumb.03.R
+  offset: [4.28408384e-08, -1.17346644e-07, 8.19563866e-08]
+  openpose_name: RThumb3
+  confidence_threshold: 0.3
+- name: MRK-thumb.R
+  side: right
+  slot: 2
+  parent: thumb.02.R
+  offset: [-1.68103725e-07, -2.00932845e-07, -4.93600965e-08]
+  openpose_name: RThumb
+  confidence_threshold: 0.3
+- name: MRK-thumb1.R
+  side: right
+  slot: 1
+  parent: thumb.01.R
+  offset: [-1.02445483e-07, 3.91155481e-08, -1.76951289e-07]
+  openpose_name: RThumb1
+  confidence_threshold: 0.3
+- name: MRK-middle4.R
+  side: right
+  slot: 12
+  parent: f_middle.03.R
+  offset: [-0.000204272568, 0.0303761419, 0.00284145772]
+  openpose_name: RMiddle4
+  confidence_threshold: 0.3
+- name: MRK-middle3.R
+  side: right
+  slot: 11
+  parent: f_middle.03.R
+  offset: [0.0, -1.77300535e-07, 5.05242497e-08]
+  openpose_name: RMiddle3
+  confidence_threshold: 0.3
+- name: MRK-middle2.R
+  side: right
+  slot: 10
+  parent: f_middle.02.R
+  offset: [3.7252903e-09, 4.5762863e-07, -3.70200723e-08]
+  openpose_name: RMiddle2
+  confidence_threshold: 0.3
+- name: MRK-middle1.R
+  side: right
+  slot: 9
+  parent: f_middle.01.R
+  offset: [5.77419996e-08, 1.39916665e-07, -8.00937414e-08]
+  openpose_name: RMiddle1
+  confidence_threshold: 0.3
+- name: MRK-ring4.R
+  side: right
+  slot: 16
+  parent: f_ring.03.R
+  offset: [-0.00103667798, 0.0280720145, -0.00024048239]
+  openpose_name: RRing4
+  confidence_threshold: 0.3
+- name: MRK-ring3.R
+  side: right
+  slot: 15
+  parent: f_ring.03.R
+  offset: [-4.23751771e-08, -1.8987339e-07, -2.14204192e-07]
+  openpose_name: RRing3
+  confidence_threshold: 0.3
+- name: MRK-ring2.R
+  side: right
+  slot: 14
+  parent: f_ring.02.R
+  offset: [0.0, 3.6455458e-07, -1.2665987e-07]
+  openpose_name: RRing2
+  confidence_threshold: 0.3
+- name: MRK-ring1.R
+  side: right
+  slot: 13
+  parent: f_ring.01.R
+  offset: [-7.4505806e-09, 1.95810571e-07, 6.14672899e-08]
+  openpose_name: RRing1
+  confidence_threshold: 0.3
+- name: MRK-pinky4.R
+  side: right
+  slot: 20
+  parent: f_pinky.03.R
+  offset: [-0.00107096881, 0.0191666987, 0.00172566529]
+  openpose_name: RPinky4
+  confidence_threshold: 0.3
+- name: MRK-pinky3.R
+  side: right
+  slot: 19
+  parent: f_pinky.02.R
+  offset: [0.00152251869, 0.0192671753, 0.000896215439]
+  openpose_name: RPinky3
+  confidence_threshold: 0.3
+- name: MRK-pinky2.R
+  side: right
+  slot: 18
+  parent: f_pinky.02.R
+  offset: [-3.7252903e-08, -2.70840246e-07, -1.2293458e-07]
+  openpose_name: RPinky2
+  confidence_threshold: 0.3
+- name: MRK-pinky.R
+  side: right
+  slot: 17
+  parent: f_pinky.01.R
+  offset: [1.49011612e-08, 2.71829776e-08, -1.86264515e-09]
+  openpose_name: RPinky
+  confidence_threshold: 0.3
+groups:
+  main:
+  - MRK-index.L
+  - MRK-pinky.L
+  - MRK-index.R
+  - MRK-pinky.R
+  HandL:
+  - MRK-thumb.L
+  - MRK-thumb1.L
+  - MRK-thumb3.L
+  - MRK-thumb4.L
+  - MRK-index.L
+  - MRK-index2.L
+  - MRK-index3.L
+  - MRK-index4.L
+  - MRK-middle1.L
+  - MRK-middle2.L
+  - MRK-middle3.L
+  - MRK-middle4.L
+  - MRK-ring1.L
+  - MRK-ring2.L
+  - MRK-ring3.L
+  - MRK-ring4.L
+  - MRK-pinky.L
+  - MRK-pinky2.L
+  - MRK-pinky3.L
+  - MRK-pinky4.L
+  HandR:
+  - MRK-thumb.R
+  - MRK-thumb1.R
+  - MRK-thumb3.R
+  - MRK-thumb4.R
+  - MRK-index.R
+  - MRK-index2.R
+  - MRK-index3.R
+  - MRK-index4.R
+  - MRK-middle1.R
+  - MRK-middle2.R
+  - MRK-middle3.R
+  - MRK-middle4.R
+  - MRK-ring1.R
+  - MRK-ring2.R
+  - MRK-ring3.R
+  - MRK-ring4.R
+  - MRK-pinky.R
+  - MRK-pinky2.R
+  - MRK-pinky3.R
+  - MRK-pinky4.R

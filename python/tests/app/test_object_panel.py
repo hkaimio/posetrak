@@ -194,6 +194,69 @@ def test_object_crop_grid_loads_overlay_for_current_frame(qapp, session_with_obj
     grid.shutdown()
 
 
+def test_object_crop_grid_loads_and_draws_dot_candidates(qapp, tmp_path):
+    """Raw detected reflective-dot candidates load into _obs_dots and reach
+    the cell's canvas as dot_xy -- separate from the named marker corners
+    (_obs_kp), and distinct from marker_xy (a tracked/predicted projection,
+    which this is not)."""
+    from app.pose.db_cache import DotCandidateWriter
+    from app.ui.content_panels import ObjectCropGridWidget
+    from posetrak.detection.dot_blob_detector import BlobCandidate
+
+    db_path = tmp_path / "test_dots.db"
+    conn = create_session(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = OFF")
+    session_id = generate_id()
+    conn.executescript(f"""
+        INSERT INTO mocap_sessions (id, recorded_at) VALUES ('{session_id}', '2026-01-01');
+        INSERT INTO captures (id, session_id, capture_number, label)
+            VALUES ('{_SHOT_ID}', '{session_id}', 1, 'test');
+        INSERT INTO camera_instances (id, camera_model_id, label)
+            VALUES ('{_CAM_ID}', 'cm1', 'cam_A');
+        INSERT INTO sync_configs (id, shot_id, created_by)
+            VALUES ('{_SYNC_ID}', '{_SHOT_ID}', 'test');
+        INSERT INTO capture_videos (id, shot_id, camera_instance_id, file_path,
+                                 first_video_frame, last_video_frame, actual_fps)
+            VALUES ('{_SVID}', '{_SHOT_ID}', '{_CAM_ID}', '/dev/null', 0, 1000, 30.0);
+        INSERT INTO sync_points (sync_config_id, camera_instance_id, shot_video_id,
+                                 video_frame, timestamp_s)
+            VALUES ('{_SYNC_ID}', '{_CAM_ID}', '{_SVID}', 0, 0.0);
+    """)
+    conn.commit()
+
+    body_id = import_marker_body_str(conn, _MARKER_BODY_YAML, name="Test Bokken")
+    object_id = create_capture_object(conn, _SHOT_ID, "bokken-A", body_id)
+    run_id = create_marker_detection_run(
+        conn, shot_id=_SHOT_ID, sync_config_id=_SYNC_ID, time_start_s=0.0, time_end_s=1.0,
+        dictionary="DICT_4X4_50", marker_ids=["3"],
+        marker_body_definition_id=body_id, capture_object_id=object_id,
+    )
+    writer = MarkerKeypointWriter(conn, run_id, _SVID, marker_ids=["3"])
+    writer.add_frame(0, [])
+    writer.finalise()
+    conn.commit()
+
+    dot_writer = DotCandidateWriter(conn, run_id, _SVID)
+    dot_writer.add_frame(0, [
+        BlobCandidate(cx=42.0, cy=24.0, area=10.0, compactness=0.9, bbox=(0, 0, 1, 1),
+                      major_axis_px=3.0, minor_axis_px=3.0),
+    ])
+    dot_writer.finalise()
+    conn.commit()
+
+    seq_id = finalise_object_to_db(conn, run_id)
+
+    grid = ObjectCropGridWidget(conn, seq_id)
+    dots = grid._obs_dots[_CAM_ID][0]
+    assert dots.shape == (1, 2)
+    assert np.allclose(dots[0], [42.0, 24.0])
+    assert grid._cells[0]._canvas._dot_xy is dots
+    assert grid._cells[0]._canvas._marker_xy is None  # not conflated with the predicted-projection overlay
+    grid.shutdown()
+    conn.close()
+
+
 def test_object_crop_grid_edit_toggle_propagates_to_cells(qapp, session_with_object_sequence, tmp_path):
     from app.ui.content_panels import ObjectCropGridWidget
 

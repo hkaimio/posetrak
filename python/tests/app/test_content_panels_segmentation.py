@@ -172,3 +172,65 @@ def test_trial_panel_double_click_emits_navigate_segmentation(qapp, trial_db):
     )
     seg_list.itemDoubleClicked.emit(seg_list.item(0))
     assert received == ["seg1"]
+
+
+# ---------------------------------------------------------------------------
+# Mask label table (subject-identity-design.md)
+# ---------------------------------------------------------------------------
+
+
+def _png(labels_by_pos: dict) -> bytes:
+    import cv2
+    import numpy as np
+
+    m = np.zeros((4, 4), dtype=np.uint8)
+    for (y, x), v in labels_by_pos.items():
+        m[y, x] = v
+    ok, buf = cv2.imencode(".png", m)
+    assert ok
+    return buf.tobytes()
+
+
+def test_labels_present_in_run_lists_every_non_zero_label(qapp, session_db):
+    from app.ui.content_panels import _labels_present_in_run
+
+    session_db.execute("PRAGMA foreign_keys = OFF")
+    session_db.execute(
+        "INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
+        "VALUES ('seg1', 'sv1', 0, ?)", (_png({(0, 0): 1, (1, 1): 3}),))
+    session_db.commit()
+    assert _labels_present_in_run(session_db, "seg1") == [1, 3]
+    assert _labels_present_in_run(session_db, "none") == []
+
+
+def test_label_table_maps_a_label_to_a_subject_and_saves_it(qapp, session_db):
+    from PySide6.QtWidgets import QComboBox
+
+    from app.ui.content_panels import SegmentationRunPanel
+    from posetrak.db.manage_capture_object import create_capture_object
+    from posetrak.db.manage_person import create_person
+    from posetrak.db.manage_subject import label_for_subject_in_run
+
+    session_db.execute("PRAGMA foreign_keys = OFF")
+    create_person(session_db, "cap1", "Harri")                       # registry label 1
+    session_db.execute(
+        "INSERT INTO marker_body_definitions (id, name, yaml_content, created_at) "
+        "VALUES ('mb', 'mb', 'x', '2026-01-01')")
+    sword = create_capture_object(session_db, "cap1", "sword", "mb")  # registry label 2
+    session_db.execute(
+        "INSERT INTO seg_masks (seg_quality_run_id, shot_video_id, frame_idx, mask_blob) "
+        "VALUES ('seg1', 'sv1', 0, ?)", (_png({(0, 0): 1, (1, 1): 3}),))
+    session_db.commit()
+
+    panel = SegmentationRunPanel(session_db, "seg1")
+    combos = panel.findChildren(QComboBox)
+    assert len(combos) == 2                       # labels 1 and 3
+    label1, label3 = combos
+    assert label1.currentText() == "Harri (person)"   # identity
+    assert label3.currentText() == "(unassigned)"     # nobody has registry label 3
+
+    changed = []
+    panel.data_changed.connect(lambda: changed.append(1))
+    label3.setCurrentIndex(label3.findData(sword))
+    assert label_for_subject_in_run(session_db, "seg1", sword) == 3
+    assert changed

@@ -6,6 +6,7 @@
 
 #include <Eigen/Core>
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
@@ -160,6 +161,63 @@ inline std::vector<DotCandidate> decode_dot_candidates(void const* data, int byt
         result[static_cast<size_t>(i)].dir_x = src[i * floats_per_candidate + 6];
         result[static_cast<size_t>(i)].dir_y = src[i * floats_per_candidate + 7];
         result[static_cast<size_t>(i)].tracklet_id = src[i * floats_per_candidate + 8];
+    }
+    return result;
+}
+
+/// @brief One keypoint candidate (a heatmap maximum) as stored in a `kp_candidates` blob.
+struct KpCandidate {
+    int keypoint_idx{};  ///< Slot in the pose model's keypoint list (the sequence's manifest names
+                         ///< it).
+    float x{};           ///< Distorted pixels, like every keypoint row.
+    float y{};
+    float peak{};         ///< Heatmap value at the maximum.
+    int rank{};           ///< 0 = the strongest maximum of its keypoint.
+    int tracklet_id{-1};  ///< Unique per (detection run, camera); -1 = not linked.
+};
+
+/// @brief Decode a `kp_candidates` blob (detection_keypoints.region_type / pose_observations.source
+/// 'kp_candidates'; the Python writer and decoder are posetrak.detection.kp_candidates).
+///
+/// Layout, little endian: `int32 n`, `int32 n_fields`, then `float32[n, n_fields]`. The first six
+/// fields are keypoint_idx, x, y, peak, rank, tracklet_id; a blob with more fields still decodes
+/// (the extra ones are ignored), one with fewer is refused. Integer-valued fields are stored as
+/// floats, exact for any realistic keypoint index, rank and tracklet count.
+inline std::vector<KpCandidate> decode_kp_candidates(void const* data, int byte_count) {
+    constexpr int kKnownFields = 6;
+    if (byte_count < 2 * static_cast<int>(sizeof(int32_t))) {
+        throw std::runtime_error("decode_kp_candidates: byte_count " + std::to_string(byte_count) +
+                                 " too short for the header");
+    }
+    int32_t header[2];
+    std::memcpy(header, data, sizeof(header));
+    int32_t const n = header[0];
+    int32_t const n_fields = header[1];
+    if (n < 0 || n_fields < kKnownFields) {
+        throw std::runtime_error("decode_kp_candidates: header says " + std::to_string(n) +
+                                 " candidates with " + std::to_string(n_fields) +
+                                 " fields, at least " + std::to_string(kKnownFields) +
+                                 " are required");
+    }
+    int64_t const expected_bytes = int64_t{sizeof(header)} + int64_t{n} * n_fields * sizeof(float);
+    if (expected_bytes != byte_count) {
+        throw std::runtime_error("decode_kp_candidates: header says " + std::to_string(n) + " x " +
+                                 std::to_string(n_fields) + " values (" +
+                                 std::to_string(expected_bytes) + " bytes), got " +
+                                 std::to_string(byte_count));
+    }
+    std::vector<KpCandidate> result(static_cast<size_t>(n));
+    auto const* src =
+        reinterpret_cast<float const*>(static_cast<uint8_t const*>(data) + sizeof(header));
+    for (int i = 0; i < n; ++i) {
+        float const* row = src + static_cast<size_t>(i) * static_cast<size_t>(n_fields);
+        auto& c = result[static_cast<size_t>(i)];
+        c.keypoint_idx = static_cast<int>(std::lround(row[0]));
+        c.x = row[1];
+        c.y = row[2];
+        c.peak = row[3];
+        c.rank = static_cast<int>(std::lround(row[4]));
+        c.tracklet_id = static_cast<int>(std::lround(row[5]));
     }
     return result;
 }

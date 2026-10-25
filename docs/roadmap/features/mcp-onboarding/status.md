@@ -1,6 +1,6 @@
 ```toml
 name = "MCP Server AI-Assistant Onboarding"
-status = "proposed"
+status = "proposal"
 progress_pct = 0
 description = """
 Makes connecting an AI assistant to a Posetrak session (for tracking-run diagnosis) a small \

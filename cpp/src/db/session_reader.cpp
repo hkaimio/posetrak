@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <posetrak/db/blob_codec.hpp>
+#include <posetrak/db/busy_timeout.hpp>
 #include <posetrak/db/session_reader.hpp>
 
 #include <Eigen/Geometry>
@@ -12,9 +13,11 @@
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <queue>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -86,6 +89,8 @@ SessionReader::SessionReader(std::string const& db_path) {
         db_ = nullptr;
         throw std::runtime_error("Failed to open session DB '" + db_path + "': " + err);
     }
+
+    sqlite3_busy_timeout(db_, kSessionDbBusyTimeoutMs);
 
     // Enable foreign key enforcement (best-effort; read-only so mostly informational)
     sqlite3_exec(db_, "PRAGMA foreign_keys=ON;", nullptr, nullptr, nullptr);
@@ -209,7 +214,25 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
         "       COALESCE(dot_cross_view_corroboration_px, 0.0) AS dot_cross_view_corroboration_px,"
         "       COALESCE(dot_corroboration_gate_multiplier, 1.0) AS "
         "dot_corroboration_gate_multiplier,"
-        "       dot_camera_noise_scale"
+        "       dot_camera_noise_scale,"
+        "       COALESCE(dot_seg_mask_enabled, 0) AS dot_seg_mask_enabled,"
+        "       COALESCE(dot_seg_mask_dilate_px, 20.0) AS dot_seg_mask_dilate_px,"
+        "       COALESCE(dot_seg_mask_tracklet_window, 60) AS dot_seg_mask_tracklet_window,"
+        "       COALESCE(dot_seg_mask_min_tracklet_fraction, 0.3) AS "
+        "dot_seg_mask_min_tracklet_fraction,"
+        "       COALESCE(dot_seg_mask_cost_scale_at_zero_fraction, 4.0) AS "
+        "dot_seg_mask_cost_scale_at_zero_fraction,"
+        "       COALESCE(dot_seg_mask_hard_distance_px, 0.0) AS dot_seg_mask_hard_distance_px,"
+        "       active_joint_groups,"
+        "       COALESCE(kp_candidates_enabled, 0) AS kp_candidates_enabled,"
+        "       COALESCE(kp_candidate_peak_weight, 0.0) AS kp_candidate_peak_weight,"
+        "       COALESCE(kp_candidate_tracklet_multiplier, 1.0) AS "
+        "kp_candidate_tracklet_multiplier,"
+        "       kp_candidate_choice, kp_choice_support_window_s, kp_choice_delta, kp_choice_beta,"
+        "       kp_choice_gamma, kp_choice_rounds, kp_choice_skip_camera_ids, kp_strict_filter,"
+        "       kp_strict_filter_window_frames, kp_strict_filter_min_fraction, kp_mask_term_weight,"
+        "       kp_mask_term_window_s, kp_mask_term_classes, kp_strict_filter_classes,"
+        "       kp_choice_switch_penalty, kp_choice_jump_box"
         " FROM tracker_configs WHERE id = ?");
     sqlite3_bind_text(stmt.ptr, 1, config_id.c_str(), -1, SQLITE_STATIC);
 
@@ -245,7 +268,19 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     //         55=dot_tracklet_gate_multiplier, 56=confidence_threshold_marker_names,
     //         57=confidence_threshold_override, 58=dot_reacquire_gap_frames,
     //         59=dot_reacquire_max_px, 60=dot_cross_view_corroboration_px,
-    //         61=dot_corroboration_gate_multiplier, 62=dot_camera_noise_scale
+    //         61=dot_corroboration_gate_multiplier, 62=dot_camera_noise_scale,
+    //         63=dot_seg_mask_enabled, 64=dot_seg_mask_dilate_px,
+    //         65=dot_seg_mask_tracklet_window, 66=dot_seg_mask_min_tracklet_fraction,
+    //         67=dot_seg_mask_cost_scale_at_zero_fraction,
+    //         68=dot_seg_mask_hard_distance_px, 69=active_joint_groups,
+    //         70=kp_candidates_enabled, 71=kp_candidate_peak_weight,
+    //         72=kp_candidate_tracklet_multiplier,
+    //         73=kp_candidate_choice, 74=kp_choice_support_window_s, 75=kp_choice_delta,
+    //         76=kp_choice_beta, 77=kp_choice_gamma, 78=kp_choice_rounds,
+    //         79=kp_choice_skip_camera_ids, 80=kp_strict_filter,
+    //         81=kp_strict_filter_window_frames, 82=kp_strict_filter_min_fraction,
+    //         83=kp_mask_term_weight, 84=kp_mask_term_window_s, 85=kp_mask_term_classes,
+    //         86=kp_strict_filter_classes, 87=kp_choice_switch_penalty, 88=kp_choice_jump_box
 
     auto apply_real = [&](int col, double& field) {
         if (sqlite3_column_type(stmt.ptr, col) != SQLITE_NULL)
@@ -458,6 +493,71 @@ DbTrackerConfig SessionReader::load_tracker_config(std::string const& config_id)
     apply_real(59, out.tracker.dot_reacquire_max_px);
     apply_real(60, out.tracker.dot_cross_view_corroboration_px);
     apply_real(61, out.tracker.dot_corroboration_gate_multiplier);
+    if (sqlite3_column_type(stmt.ptr, 63) != SQLITE_NULL)
+        out.tracker.dot_seg_mask_enabled = (sqlite3_column_int(stmt.ptr, 63) != 0);
+    apply_real(64, out.tracker.dot_seg_mask_dilate_px);
+    apply_int(65, out.tracker.dot_seg_mask_tracklet_window);
+    apply_real(66, out.tracker.dot_seg_mask_min_tracklet_fraction);
+    apply_real(67, out.tracker.dot_seg_mask_cost_scale_at_zero_fraction);
+    apply_real(68, out.tracker.dot_seg_mask_hard_distance_px);
+
+    out.tracker.kp_candidates_enabled = sqlite3_column_int(stmt.ptr, 70) != 0;
+    apply_real(71, out.tracker.kp_candidate_peak_weight);
+    apply_real(72, out.tracker.kp_candidate_tracklet_multiplier);
+
+    {
+        auto& choice = out.tracker.kp_choice;
+        auto text = [&](int col) {
+            auto const* t = sqlite3_column_text(stmt.ptr, col);
+            return t != nullptr ? std::string(reinterpret_cast<char const*>(t)) : std::string();
+        };
+        if (sqlite3_column_type(stmt.ptr, 73) != SQLITE_NULL) {
+            std::string const mode = text(73);
+            if (mode != "window" && mode != "step")
+                throw std::runtime_error("tracker_configs.kp_candidate_choice is '" + mode +
+                                         "'; expected 'window' or 'step'");
+            choice.window = mode == "window";
+        }
+        apply_real(74, choice.support_window_s);
+        apply_real(75, choice.delta);
+        apply_real(76, choice.beta);
+        apply_real(77, choice.gamma);
+        apply_int(78, choice.rounds);
+        if (sqlite3_column_type(stmt.ptr, 79) != SQLITE_NULL) {
+            auto arr = nlohmann::json::parse(text(79), nullptr, /*allow_exceptions=*/false);
+            if (arr.is_array())
+                for (auto const& elem : arr)
+                    if (elem.is_number_integer())
+                        choice.skip_camera_ids.push_back(elem.get<int>());
+        }
+        if (sqlite3_column_type(stmt.ptr, 80) != SQLITE_NULL)
+            choice.strict_filter = sqlite3_column_int(stmt.ptr, 80) != 0;
+        apply_int(81, choice.strict_filter_window_frames);
+        apply_real(82, choice.strict_filter_min_fraction);
+        apply_real(83, choice.mask_term_weight);
+        apply_real(84, choice.mask_term_window_s);
+        if (sqlite3_column_type(stmt.ptr, 85) != SQLITE_NULL)
+            choice.mask_term_classes = text(85);
+        if (sqlite3_column_type(stmt.ptr, 86) != SQLITE_NULL)
+            choice.strict_filter_classes = text(86);
+        apply_real(87, choice.switch_penalty);
+        apply_real(88, choice.jump_box);
+    }
+
+    // active_joint_groups: stored as a JSON string array, e.g. ["main"]; NULL or [] tracks the
+    // whole skeleton.
+    if (sqlite3_column_type(stmt.ptr, 69) != SQLITE_NULL) {
+        char const* json_str = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 69));
+        if (json_str) {
+            auto arr = nlohmann::json::parse(json_str, nullptr, /*allow_exceptions=*/false);
+            if (arr.is_array()) {
+                for (auto const& elem : arr) {
+                    if (elem.is_string())
+                        out.tracker.active_joint_groups.push_back(elem.get<std::string>());
+                }
+            }
+        }
+    }
 
     // dot_camera_noise_scale: stored as a JSON object of camera_id (as a string
     // key, e.g. "2") -> scale, e.g. {"2": 1.3, "3": 0.7}.
@@ -619,7 +719,11 @@ SessionReader::load_cameras(std::string const& session_id,
     Stmt cam_stmt(db_,
                   "SELECT ci.id, ci.label,"
                   "       ic.fx, ic.fy, ic.cx, ic.cy, ic.dist_coeffs, ic.distortion_model,"
-                  "       COALESCE(cm.width_px, 0), COALESCE(cm.height_px, 0), ic.matrix_original"
+                  // The calibration's own image size, which fx/cx apply to, wins over the
+                  // camera mode's declared size (a mode entered with a wrong width would
+                  // otherwise mis-scale everything that maps native pixels, such as masks).
+                  "       COALESCE(ic.image_width, cm.width_px, 0),"
+                  "       COALESCE(ic.image_height, cm.height_px, 0), ic.matrix_original"
                   " FROM capture_videos sv"
                   " JOIN captures sh ON sh.id = sv.shot_id"
                   " JOIN sync_configs scfg ON scfg.shot_id = sh.id"
@@ -770,12 +874,71 @@ SessionReader::load_cameras(std::string const& session_id,
 
 // ---------------------------------------------------------------------------
 
+std::unordered_map<int, std::string>
+SessionReader::load_camera_shot_video_ids(std::string const& sync_config_id) {
+    // Same camera set and ORDER BY ci.label ASC / sequential-assignment
+    // convention as load_cameras() -- see that function's own query -- so a
+    // camera_id here matches the same physical camera as the identical
+    // camera_id in a Camera map built from this sync_config_id.
+    Stmt stmt(db_,
+              "SELECT sv.id"
+              " FROM capture_videos sv"
+              " JOIN captures sh ON sh.id = sv.shot_id"
+              " JOIN sync_configs scfg ON scfg.shot_id = sh.id"
+              " JOIN camera_instances ci ON ci.id = sv.camera_instance_id"
+              " WHERE scfg.id = ?"
+              " ORDER BY ci.label ASC");
+    sqlite3_bind_text(stmt.ptr, 1, sync_config_id.c_str(), -1, SQLITE_STATIC);
+
+    std::unordered_map<int, std::string> result;
+    int camera_id = 0;
+    while (stmt.step()) {
+        auto const* p = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 0));
+        result[camera_id++] = p ? std::string(p) : std::string();
+    }
+    return result;
+}
+
+std::optional<int> SessionReader::newest_closed_seg_revision(std::string const& seg_run_id) {
+    Stmt stmt(db_,
+              "SELECT MAX(revision) FROM seg_mask_revisions"
+              " WHERE seg_quality_run_id = ? AND closed_at IS NOT NULL");
+    sqlite3_bind_text(stmt.ptr, 1, seg_run_id.c_str(), -1, SQLITE_STATIC);
+    if (!stmt.step() || sqlite3_column_type(stmt.ptr, 0) == SQLITE_NULL)
+        return std::nullopt;
+    return sqlite3_column_int(stmt.ptr, 0);
+}
+
+std::optional<std::string> SessionReader::load_seg_mask_blob(std::string const& seg_run_id,
+                                                             std::string const& shot_video_id,
+                                                             int frame_idx, int revision) {
+    Stmt stmt(db_,
+              "SELECT mask_blob FROM seg_masks"
+              " WHERE seg_quality_run_id = ? AND shot_video_id = ? AND frame_idx = ?"
+              "   AND revision <= ? ORDER BY revision DESC LIMIT 1");
+    sqlite3_bind_text(stmt.ptr, 1, seg_run_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt.ptr, 2, shot_video_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt.ptr, 3, frame_idx);
+    sqlite3_bind_int(stmt.ptr, 4, revision);
+    if (!stmt.step())
+        return std::nullopt;
+    void const* blob = sqlite3_column_blob(stmt.ptr, 0);
+    int const nbytes = sqlite3_column_bytes(stmt.ptr, 0);
+    if (blob == nullptr || nbytes <= 0)
+        return std::nullopt;
+    return std::string(reinterpret_cast<char const*>(blob), static_cast<size_t>(nbytes));
+}
+
+// ---------------------------------------------------------------------------
+
 ObservationSet SessionReader::load_observations(
     std::string const& sequence_id, std::map<std::string, Camera> const& cameras,
     Skeleton const& skeleton, double min_confidence, int person_id, bool use_relative_obs,
     double relative_min_conf, double pose_noise_std, double cross_pair_max_px, int cross_pair_max_n,
     double edited_kp_noise_std, std::vector<std::string> const& confidence_threshold_marker_names,
-    double confidence_threshold_override) {
+    double confidence_threshold_override, double window_start_s, double window_end_s,
+    KeypointRowOverrides const* row_overrides) {
+    bool const windowed = std::isfinite(window_start_s) || std::isfinite(window_end_s);
     std::unordered_set<std::string> confidence_override_set(
         confidence_threshold_marker_names.begin(), confidence_threshold_marker_names.end());
     // Step 0: Read pixels_are_undistorted flag for this sequence
@@ -785,7 +948,7 @@ ObservationSet SessionReader::load_observations(
     std::unordered_map<std::string, Camera const*> inst_to_cam =
         load_instance_camera_map(sequence_id, cameras);
 
-    // Step 2: Build COCO keypoint ID → skeleton marker index map
+    // Step 2: Build COCO keypoint ID → skeleton marker index map (the implied COCO-133 layout).
     std::unordered_map<int, int> coco_to_marker_idx;
     auto const& markers = skeleton.markers();
     for (size_t i = 0; i < markers.size(); ++i) {
@@ -794,22 +957,43 @@ ObservationSet SessionReader::load_observations(
         }
     }
 
-    // Step 2.1: Build manifest keypoint-slot → skeleton marker index map
-    // (marker-mocap design §4.3/§5.1). A sequence with no
-    // pose_sequence_keypoints rows (every existing person sequence) leaves
-    // this empty -- "behaves exactly as today" (design §5.1). landmark_to_marker_idx
-    // keys off Marker::landmark (the name a manifest row is matched against),
-    // not Marker::name, since a marker bound to a track may in principle have
-    // a display name distinct from its landmark -- though today's generator
-    // (posetrak.skeleton.marker_body_to_skeleton) always sets them equal.
-    std::unordered_map<int, int> manifest_idx_to_marker_idx;
-    // Per-frame kp_blob width for a manifest-bound (object) sequence -- the
-    // count of pose_sequence_keypoints rows, i.e. max(keypoint_idx)+1, not
-    // manifest_idx_to_marker_idx.size() (which only counts slots that
-    // happened to match a skeleton marker's landmark; a partial-subset
-    // skeleton would otherwise understate the real blob width). 0 for a
-    // sequence with no manifest at all (every existing person sequence).
-    int manifest_width = 0;
+    // Step 2.1: Bind the slots of each keypoint blob to skeleton markers.
+    //
+    // A sequence's blobs come from up to three observation sources, the "layers" of the merged
+    // array: the primary row ('body' for a person, 'markers' for an object) and the refined hand
+    // rows ('hand_l', 'hand_r'). Each layer that has pose_sequence_keypoints rows binds a slot to
+    // the marker whose Marker::landmark equals the row's name. A layer without rows has the implied
+    // COCO-133 layout (every sequence finalised before manifests were written for all sequences):
+    // slot k of the primary row is COCO index k, slot k of a hand row is 91 + k / 112 + k. The two
+    // never mix within a layer, so a slot that no marker claims stays unbound instead of falling
+    // through to whatever COCO marker has the same index.
+    enum Layer : int {
+        kPrimaryLayer = 0,
+        kHandLeftLayer = 1,
+        kHandRightLayer = 2,
+        kLayerCount = 3
+    };
+    struct LayerBinding {
+        bool has_manifest = false;
+        int width = 0;  // max(keypoint_idx) + 1 of the manifest rows
+        std::unordered_map<int, int> slot_to_marker;
+        std::set<std::string> models;  // the manifest rows' source column
+    };
+    std::array<LayerBinding, kLayerCount> bindings;
+    // hand21 -> COCO-133 index offsets. Canonical source of truth is posetrak.detection.pose_models
+    // (COCO133_HAND_BASE, HAND21_NAMES); Python and C++ don't share a header, so this is duplicated
+    // (see also posetrak/db/observation_merge.py).
+    constexpr int kHandBaseIdxLeft = 91;
+    constexpr int kHandBaseIdxRight = 112;
+    constexpr int kHandNKp = 21;
+    // Full COCO-133 layout width: the size of a primary row that is absent from a (camera, frame)
+    // group of a sequence without a primary manifest.
+    constexpr int kFullBodyNKp = 133;
+    auto coco_base = [&](int layer) {
+        return layer == kHandLeftLayer    ? kHandBaseIdxLeft
+               : layer == kHandRightLayer ? kHandBaseIdxRight
+                                          : 0;
+    };
     {
         std::unordered_map<std::string, int> landmark_to_marker_idx;
         for (size_t i = 0; i < markers.size(); ++i) {
@@ -817,34 +1001,97 @@ ObservationSet SessionReader::load_observations(
                 landmark_to_marker_idx[markers[i].landmark] = static_cast<int>(i);
             }
         }
-        if (!landmark_to_marker_idx.empty()) {
-            Stmt manifest_stmt(db_,
-                               "SELECT keypoint_idx, name FROM pose_sequence_keypoints"
-                               " WHERE sequence_id = ?");
-            sqlite3_bind_text(manifest_stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
-            while (manifest_stmt.step()) {
-                int keypoint_idx = sqlite3_column_int(manifest_stmt.ptr, 0);
-                manifest_width = std::max(manifest_width, keypoint_idx + 1);
-                std::string landmark_name =
-                    reinterpret_cast<char const*>(sqlite3_column_text(manifest_stmt.ptr, 1));
-                auto it = landmark_to_marker_idx.find(landmark_name);
-                if (it != landmark_to_marker_idx.end()) {
-                    manifest_idx_to_marker_idx[keypoint_idx] = it->second;
-                }
+        // A database from before obs_source existed has the manifest of the primary row only.
+        sqlite3_stmt* manifest_raw = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                               "SELECT obs_source, keypoint_idx, name, source FROM"
+                               " pose_sequence_keypoints WHERE sequence_id = ?",
+                               -1, &manifest_raw, nullptr) != SQLITE_OK) {
+            manifest_raw = nullptr;
+            if (sqlite3_prepare_v2(db_,
+                                   "SELECT 'body', keypoint_idx, name, source FROM"
+                                   " pose_sequence_keypoints WHERE sequence_id = ?",
+                                   -1, &manifest_raw, nullptr) != SQLITE_OK) {
+                manifest_raw = nullptr;  // no manifest table at all
             }
         }
+        if (manifest_raw != nullptr) {
+            sqlite3_bind_text(manifest_raw, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
+            auto text = [&](int col) {
+                auto const* t = sqlite3_column_text(manifest_raw, col);
+                return t != nullptr ? std::string(reinterpret_cast<char const*>(t)) : std::string();
+            };
+            while (sqlite3_step(manifest_raw) == SQLITE_ROW) {
+                std::string const obs_source = text(0);
+                if (obs_source == "kp_candidates")
+                    continue;  // names the candidate blobs, which load_keypoint_candidates() reads
+                int const layer = obs_source == "hand_l"   ? kHandLeftLayer
+                                  : obs_source == "hand_r" ? kHandRightLayer
+                                                           : kPrimaryLayer;
+                int const keypoint_idx = sqlite3_column_int(manifest_raw, 1);
+                std::string const name = text(2);
+                std::string const model = text(3);
+                auto& binding = bindings[layer];
+                binding.has_manifest = true;
+                binding.width = std::max(binding.width, keypoint_idx + 1);
+                binding.models.insert(model);
+                // The landmark is "<model>:<keypoint>"; a name without a model prefix (sequences
+                // extracted before landmarks were model-qualified) also matches the qualified one.
+                auto it = landmark_to_marker_idx.find(name);
+                if (it == landmark_to_marker_idx.end() && name.find(':') == std::string::npos &&
+                    !model.empty()) {
+                    it = landmark_to_marker_idx.find(model + ":" + name);
+                }
+                if (it != landmark_to_marker_idx.end()) {
+                    binding.slot_to_marker[keypoint_idx] = it->second;
+                    continue;
+                }
+                // A COCO-133 or hand21 slot is also the COCO marker of that index, which keeps a
+                // skeleton that only carries openpose_keypoint markers bound.
+                bool const coco_model = (layer == kPrimaryLayer && model == "coco133") ||
+                                        (layer != kPrimaryLayer && model == "hand21");
+                if (coco_model) {
+                    auto coco_it = coco_to_marker_idx.find(coco_base(layer) + keypoint_idx);
+                    if (coco_it != coco_to_marker_idx.end())
+                        binding.slot_to_marker[keypoint_idx] = coco_it->second;
+                }
+            }
+            sqlite3_finalize(manifest_raw);
+        }
+    }
+    // Per-frame kp_blob width of a manifest-bound primary row -- the count of manifest rows, i.e.
+    // max(keypoint_idx)+1, not slot_to_marker.size() (which only counts slots a marker claims; a
+    // partial-subset skeleton would otherwise understate the real blob width). 0 for a sequence
+    // whose primary row has no manifest.
+    int const manifest_width = bindings[kPrimaryLayer].width;
+    int bound_manifest_slots = 0;
+    bool any_manifest = false;
+    std::set<std::string> manifest_models;
+    for (auto const& b : bindings) {
+        any_manifest = any_manifest || b.has_manifest;
+        bound_manifest_slots += static_cast<int>(b.slot_to_marker.size());
+        manifest_models.insert(b.models.begin(), b.models.end());
+    }
+    if (any_manifest && bound_manifest_slots == 0) {
+        std::string models;
+        for (auto const& m : manifest_models)
+            models += (models.empty() ? "" : ", ") + m;
+        throw std::runtime_error(
+            "The skeleton has no marker bound to the keypoints of sequence '" + sequence_id +
+            "' (pose model: " + models +
+            "). Add that pose model's markers to the skeleton ('posetrak skeleton compose --base "
+            "SKELETON --marker-set MODEL') or track the sequence with a skeleton that has them.");
     }
 
-    // Resolves a keypoint blob slot to a skeleton marker index, trying the
-    // manifest (track/landmark-bound markers) before the legacy COCO map --
-    // the two never overlap in practice (a sequence is either a person's
-    // coco133-implied layout or an object's manifest-declared one, never
-    // both), so lookup order is not load-bearing, only completeness is.
-    auto resolve_marker_idx = [&](int blob_idx) -> std::optional<int> {
-        if (auto it = manifest_idx_to_marker_idx.find(blob_idx);
-            it != manifest_idx_to_marker_idx.end())
-            return it->second;
-        if (auto it = coco_to_marker_idx.find(blob_idx); it != coco_to_marker_idx.end())
+    // Resolves slot k of a layer's blob to a skeleton marker index.
+    auto resolve_marker_idx = [&](int layer, int k) -> std::optional<int> {
+        auto const& binding = bindings[layer];
+        if (binding.has_manifest) {
+            if (auto it = binding.slot_to_marker.find(k); it != binding.slot_to_marker.end())
+                return it->second;
+            return std::nullopt;
+        }
+        if (auto it = coco_to_marker_idx.find(coco_base(layer) + k); it != coco_to_marker_idx.end())
             return it->second;
         return std::nullopt;
     };
@@ -964,37 +1211,30 @@ ObservationSet SessionReader::load_observations(
     // them), not a labeled marker/keypoint layout decode_keypoints() can
     // parse -- a dots row sharing this query's person_id would otherwise get
     // pulled into a group here and fail to decode as float32[N,3].
+    // A bounded window keeps only the rows inside it; an unbounded side is not compared.
     Stmt obs_stmt(db_,
                   "SELECT po.camera_instance_id, po.video_frame, po.source, po.timestamp_s,"
                   " po.kp_blob, COALESCE(po.noise_scale, 1.0) AS crop_scale"
                   " FROM pose_observations po"
-                  " WHERE po.sequence_id = ? AND po.person_id = ? AND po.source != 'dots'"
+                  " WHERE po.sequence_id = ? AND po.person_id = ? AND po.source NOT IN ('dots', "
+                  "'kp_candidates')"
+                  " AND (? OR po.timestamp_s >= ?) AND (? OR po.timestamp_s < ?)"
                   " ORDER BY po.camera_instance_id, po.video_frame");
     sqlite3_bind_text(obs_stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_int(obs_stmt.ptr, 2, person_id);
+    sqlite3_bind_int(obs_stmt.ptr, 3, std::isfinite(window_start_s) ? 0 : 1);
+    sqlite3_bind_double(obs_stmt.ptr, 4, std::isfinite(window_start_s) ? window_start_s : 0.0);
+    sqlite3_bind_int(obs_stmt.ptr, 5, std::isfinite(window_end_s) ? 0 : 1);
+    sqlite3_bind_double(obs_stmt.ptr, 6, std::isfinite(window_end_s) ? window_end_s : 0.0);
 
-    // hand21 -> COCO-133 index offsets. Canonical source of truth is
-    // posetrak.detection.hand_refinement's _HAND_BASE_IDX / _HAND_N_KP
-    // (Python and C++ don't share a header here, so this is duplicated —
-    // see posetrak/db/observation_merge.py for the Python-side mirror).
-    constexpr int kHandBaseIdxLeft = 91;
-    constexpr int kHandBaseIdxRight = 112;
-    constexpr int kHandNKp = 21;
-    // Full COCO-133 layout width -- needed as a fallback array size when a
-    // (camera, frame) group has no 'body' row at all (body detection can
-    // drop frames a refined pass still covers, e.g. a hand track surviving
-    // past where body tracking lost the person -- see the body_row-null
-    // branch below). Same layout assumption already baked into the hand
-    // base indices above, just made explicit here.
-    constexpr int kFullBodyNKp = 133;
     // Takes a *base* source name (any ".refined" suffix already stripped by
     // split_source below) -- 'hand_l' and 'hand_l.refined' both resolve here
     // via the same base name.
-    auto hand_base_idx = [&](std::string const& base_source) -> int {
+    auto hand_layer = [&](std::string const& base_source) -> int {
         if (base_source == "hand_l")
-            return kHandBaseIdxLeft;
+            return kHandLeftLayer;
         if (base_source == "hand_r")
-            return kHandBaseIdxRight;
+            return kHandRightLayer;
         return -1;
     };
 
@@ -1064,7 +1304,7 @@ ObservationSet SessionReader::load_observations(
         for (auto const& r : group_rows) {
             auto [row_base_source, row_is_refined] = split_source(r.source);
             (void)row_is_refined;
-            if (hand_base_idx(row_base_source) < 0) {
+            if (hand_layer(row_base_source) < 0) {
                 body_row = &r;
                 break;
             }
@@ -1098,7 +1338,28 @@ ObservationSet SessionReader::load_observations(
             base_crop_scale = group_rows.front().crop_scale;
             base_timestamp_s = group_rows.front().timestamp_s;
         }
+        // The windowed choice of keypoint candidates replaces the stored keypoints by its picks.
+        if (row_overrides != nullptr) {
+            if (auto cam_rows = row_overrides->rows.find(group_inst_id);
+                cam_rows != row_overrides->rows.end()) {
+                if (auto frame_row = cam_rows->second.find(group_frame);
+                    frame_row != cam_rows->second.end()) {
+                    for (size_t k = 0; k < merged.size() && k < frame_row->second.size(); ++k)
+                        merged[k] = frame_row->second[k];
+                }
+            }
+        }
         std::vector<double> merged_crop_scale(merged.size(), base_crop_scale);
+        // Marker bound to each slot of the merged array; the primary row's slots first, the slots
+        // a hand row overwrites rebound through that row's own layer.
+        std::vector<std::optional<int>> slot_marker(merged.size());
+        for (size_t k = 0; k < merged.size(); ++k)
+            slot_marker[k] = resolve_marker_idx(kPrimaryLayer, static_cast<int>(k));
+        // A COCO-133-wide primary row contains the hand slots, which the hand rows overwrite
+        // (91 and 112). A narrower one (SOMA-77) has none: the hand rows are appended after it,
+        // the left hand and then the right hand, and the array grows only when a hand row is
+        // present.
+        int const primary_width = static_cast<int>(merged.size());
         // Two explicit passes -- plain sources, then '.refined' sources on
         // top -- rather than a single loop over group_rows in fetch order:
         // the SQL query has no ORDER BY on source, so nothing guarantees a
@@ -1108,14 +1369,25 @@ ObservationSet SessionReader::load_observations(
                 auto [base_source, is_refined] = split_source(r.source);
                 if (is_refined != want_refined)
                     continue;
-                int base = hand_base_idx(base_source);
-                if (base < 0)
+                int const layer = hand_layer(base_source);
+                if (layer < 0)
                     continue;
-                int n = std::min({kHandNKp, static_cast<int>(r.kps.size()),
-                                  static_cast<int>(merged.size()) - base});
+                // A narrow primary row takes hand rows only through their own manifest.
+                if (primary_width < kFullBodyNKp && !bindings[layer].has_manifest)
+                    continue;
+                int const base = primary_width >= kFullBodyNKp
+                                     ? coco_base(layer)
+                                     : primary_width + (layer == kHandRightLayer ? kHandNKp : 0);
+                int const n = std::min(kHandNKp, static_cast<int>(r.kps.size()));
+                if (base + n > static_cast<int>(merged.size())) {
+                    merged.resize(static_cast<size_t>(base + n));
+                    merged_crop_scale.resize(merged.size(), base_crop_scale);
+                    slot_marker.resize(merged.size());
+                }
                 for (int k = 0; k < n; ++k) {
                     merged[static_cast<size_t>(base + k)] = r.kps[static_cast<size_t>(k)];
                     merged_crop_scale[static_cast<size_t>(base + k)] = r.crop_scale;
+                    slot_marker[static_cast<size_t>(base + k)] = resolve_marker_idx(layer, k);
                 }
             }
         }
@@ -1146,7 +1418,7 @@ ObservationSet SessionReader::load_observations(
             // reorders which of rows_skipped_confidence/rows_skipped_coco a keypoint
             // that fails both checks is counted under (cosmetic, diagnostics only; a
             // keypoint that matches no marker was never going to be used either way).
-            auto marker_idx_opt = resolve_marker_idx(i);
+            auto marker_idx_opt = slot_marker[static_cast<size_t>(i)];
             if (!marker_idx_opt.has_value()) {
                 ++rows_skipped_coco;
                 continue;
@@ -1314,7 +1586,7 @@ ObservationSet SessionReader::load_observations(
     // a wrong-person_id mistake to fail loudly over.
     bool const has_any_labeled_marker = [&] {
         for (auto const& m : markers) {
-            if (m.coco_id.has_value())
+            if (m.coco_id.has_value() || (m.track.empty() && !m.landmark.empty()))
                 return true;
             if (!m.track.empty()) {
                 InputTrack const* t = skeleton.get_input_track(m.track);
@@ -1324,6 +1596,12 @@ ObservationSet SessionReader::load_observations(
         }
         return false;
     }();
+    if (rows_total == 0 && has_any_labeled_marker && windowed) {
+        throw std::runtime_error("No pose_observations rows found for sequence '" + sequence_id +
+                                 "' with person_id=" + std::to_string(person_id) +
+                                 " in the time window [" + std::to_string(window_start_s) + ", " +
+                                 std::to_string(window_end_s) + ") s");
+    }
     if (rows_total == 0 && has_any_labeled_marker) {
         // Query returned no rows — most likely wrong person_id. Show available IDs.
         Stmt pid_stmt(db_,
@@ -1352,8 +1630,8 @@ ObservationSet SessionReader::load_observations(
             " rows with unknown camera)\n"
             "  COCO markers in skeleton: " +
             std::to_string(coco_to_marker_idx.size()) +
-            ", manifest-bound markers: " + std::to_string(manifest_idx_to_marker_idx.size()) +
-            " (skipped " + std::to_string(rows_skipped_coco) +
+            ", manifest-bound markers: " + std::to_string(bound_manifest_slots) + " (skipped " +
+            std::to_string(rows_skipped_coco) +
             " keypoints matching neither)\n"
             "  skipped " +
             std::to_string(rows_skipped_confidence) + " keypoints below confidence threshold " +
@@ -1361,13 +1639,13 @@ ObservationSet SessionReader::load_observations(
     }
 
     ObservationSet obs_set(person_id);
-    for (auto const& [inst_id, obs_list] : seq_observations) {
+    for (auto& [inst_id, obs_list] : seq_observations) {
         auto* cam = inst_to_cam.at(inst_id);
         ObservationSequence seq;
         seq.camera_id = cam->id();
         seq.camera_name = cam->name();
-        seq.observations = obs_list;
-        obs_set.add_sequence(seq);
+        seq.observations = std::move(obs_list);
+        obs_set.add_sequence(std::move(seq));
     }
     return obs_set;
 }
@@ -1460,6 +1738,223 @@ SessionReader::load_unlabeled_candidates(std::string const& sequence_id,
             cand.dir_y = c.dir_y;
             cand.tracklet_id = static_cast<int>(std::lround(c.tracklet_id));
             result.push_back(cand);
+        }
+    }
+    return result;
+}
+
+KeypointCandidates
+SessionReader::load_keypoint_candidates(std::string const& sequence_id,
+                                        std::map<std::string, Camera> const& cameras,
+                                        Skeleton const& skeleton, double min_confidence,
+                                        int person_id, double window_start_s, double window_end_s) {
+    KeypointCandidates result;
+
+    // keypoint_idx -> marker, through the manifest names against Marker::landmark. A name without
+    // a model prefix also matches the qualified landmark, as for the body row.
+    std::unordered_map<std::string, int> landmark_to_marker;
+    auto const& markers = skeleton.markers();
+    for (size_t i = 0; i < markers.size(); ++i) {
+        if (!markers[i].landmark.empty())
+            landmark_to_marker[markers[i].landmark] = static_cast<int>(i);
+    }
+    std::unordered_map<int, int> keypoint_to_marker;
+    {
+        sqlite3_stmt* manifest_raw = nullptr;
+        // A database from before obs_source existed has no candidates either.
+        if (sqlite3_prepare_v2(db_,
+                               "SELECT keypoint_idx, name, source FROM pose_sequence_keypoints"
+                               " WHERE sequence_id = ? AND obs_source = 'kp_candidates'",
+                               -1, &manifest_raw, nullptr) != SQLITE_OK)
+            return result;
+        sqlite3_bind_text(manifest_raw, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
+        auto text = [&](int col) {
+            auto const* t = sqlite3_column_text(manifest_raw, col);
+            return t != nullptr ? std::string(reinterpret_cast<char const*>(t)) : std::string();
+        };
+        while (sqlite3_step(manifest_raw) == SQLITE_ROW) {
+            int const keypoint_idx = sqlite3_column_int(manifest_raw, 0);
+            std::string const name = text(1);
+            std::string const model = text(2);
+            auto it = landmark_to_marker.find(name);
+            if (it == landmark_to_marker.end() && name.find(':') == std::string::npos &&
+                !model.empty())
+                it = landmark_to_marker.find(model + ":" + name);
+            if (it != landmark_to_marker.end()) {
+                keypoint_to_marker[keypoint_idx] = it->second;
+                result.marker_keypoint[it->second] = keypoint_idx;
+            }
+        }
+        sqlite3_finalize(manifest_raw);
+    }
+    if (keypoint_to_marker.empty())
+        return result;
+
+    bool const pixels_are_undistorted = load_pixels_are_undistorted(sequence_id);
+    std::unordered_map<std::string, Camera const*> inst_to_cam =
+        load_instance_camera_map(sequence_id, cameras);
+
+    Stmt stmt(db_,
+              "SELECT po.camera_instance_id, po.video_frame, po.timestamp_s, po.kp_blob,"
+              " COALESCE(po.noise_scale, 1.0)"
+              " FROM pose_observations po"
+              " WHERE po.sequence_id = ? AND po.person_id = ? AND po.source = 'kp_candidates'"
+              " AND (? OR po.timestamp_s >= ?) AND (? OR po.timestamp_s < ?)"
+              " ORDER BY po.camera_instance_id, po.video_frame");
+    sqlite3_bind_text(stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt.ptr, 2, person_id);
+    sqlite3_bind_int(stmt.ptr, 3, std::isfinite(window_start_s) ? 0 : 1);
+    sqlite3_bind_double(stmt.ptr, 4, std::isfinite(window_start_s) ? window_start_s : 0.0);
+    sqlite3_bind_int(stmt.ptr, 5, std::isfinite(window_end_s) ? 0 : 1);
+    sqlite3_bind_double(stmt.ptr, 6, std::isfinite(window_end_s) ? window_end_s : 0.0);
+
+    // Radius of "the same image point" for candidates of overlapping crops: 3 px, or 0.5% of the
+    // person's box height when that is more. The box height follows from the crop scale (model
+    // input pixels to frame pixels): the 192 px wide model input covers 0.75 of the crop side,
+    // which is 1.6 times the box, so a unit of crop scale is 192 / (0.75 * 1.6) = 160 px of box.
+    constexpr double kMergeMinPx = 3.0;
+    constexpr double kMergeBoxFraction = 0.005;
+    constexpr double kBoxHeightPerCropScale = 160.0;
+
+    while (stmt.step()) {
+        std::string inst_id = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 0));
+        auto cam_it = inst_to_cam.find(inst_id);
+        if (cam_it == inst_to_cam.end())
+            continue;
+        Camera const* camera = cam_it->second;
+        int const video_frame = sqlite3_column_int(stmt.ptr, 1);
+        double const timestamp_s = sqlite3_column_double(stmt.ptr, 2);
+        double const crop_scale = sqlite3_column_double(stmt.ptr, 4);
+        for (auto const& c : db::decode_kp_candidates(sqlite3_column_blob(stmt.ptr, 3),
+                                                      sqlite3_column_bytes(stmt.ptr, 3))) {
+            if (keypoint_to_marker.find(c.keypoint_idx) == keypoint_to_marker.end() ||
+                c.peak < min_confidence)
+                continue;
+            UnlabeledCandidate cand;
+            cand.camera_id = camera->id();
+            cand.frame_idx = video_frame;
+            cand.timestamp = timestamp_s;
+            cand.position_distorted = Eigen::Vector2d(c.x, c.y);
+            cand.position = pixels_are_undistorted ? cand.position_distorted
+                                                   : camera->undistort(cand.position_distorted);
+            cand.confidence = c.peak;
+            cand.area = 0.0;
+            cand.compactness = 0.0;
+            cand.tracklet_id = c.tracklet_id;
+            cand.keypoint_idx = c.keypoint_idx;
+            cand.crop_scale = crop_scale;
+            cand.merge_radius_px =
+                std::max(kMergeMinPx, kMergeBoxFraction * kBoxHeightPerCropScale * crop_scale);
+            result.candidates.push_back(cand);
+        }
+    }
+    return result;
+}
+
+KeypointChoiceData SessionReader::load_keypoint_choice_data(
+    std::string const& sequence_id, std::map<std::string, Camera> const& cameras,
+    Skeleton const& skeleton, int person_id, double window_start_s, double window_end_s) {
+    KeypointChoiceData result;
+
+    std::unordered_map<std::string, int> landmark_to_marker;
+    auto const& markers = skeleton.markers();
+    for (size_t i = 0; i < markers.size(); ++i) {
+        if (!markers[i].landmark.empty())
+            landmark_to_marker[markers[i].landmark] = static_cast<int>(i);
+    }
+    {
+        sqlite3_stmt* manifest_raw = nullptr;
+        if (sqlite3_prepare_v2(db_,
+                               "SELECT keypoint_idx, name, source FROM pose_sequence_keypoints"
+                               " WHERE sequence_id = ? AND obs_source = 'kp_candidates'",
+                               -1, &manifest_raw, nullptr) != SQLITE_OK)
+            return result;
+        sqlite3_bind_text(manifest_raw, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
+        auto text = [&](int col) {
+            auto const* t = sqlite3_column_text(manifest_raw, col);
+            return t != nullptr ? std::string(reinterpret_cast<char const*>(t)) : std::string();
+        };
+        while (sqlite3_step(manifest_raw) == SQLITE_ROW) {
+            int const keypoint_idx = sqlite3_column_int(manifest_raw, 0);
+            std::string name = text(1);
+            std::string const model = text(2);
+            if (name.find(':') == std::string::npos && !model.empty())
+                name = model + ":" + name;
+            if (keypoint_idx < 0)
+                continue;
+            if (static_cast<size_t>(keypoint_idx) >= result.keypoint_landmark.size())
+                result.keypoint_landmark.resize(static_cast<size_t>(keypoint_idx) + 1);
+            result.keypoint_landmark[static_cast<size_t>(keypoint_idx)] = name;
+            auto it = landmark_to_marker.find(name);
+            if (it != landmark_to_marker.end())
+                result.marker_keypoint[it->second] = keypoint_idx;
+        }
+        sqlite3_finalize(manifest_raw);
+    }
+    if (result.keypoint_landmark.empty())
+        return result;
+
+    bool const pixels_are_undistorted = load_pixels_are_undistorted(sequence_id);
+    std::unordered_map<std::string, Camera const*> inst_to_cam =
+        load_instance_camera_map(sequence_id, cameras);
+
+    Stmt stmt(db_,
+              "SELECT po.camera_instance_id, po.video_frame, po.timestamp_s, po.kp_blob,"
+              " COALESCE(po.noise_scale, 1.0)"
+              " FROM pose_observations po"
+              " WHERE po.sequence_id = ? AND po.person_id = ? AND po.source = 'kp_candidates'"
+              " AND (? OR po.timestamp_s >= ?) AND (? OR po.timestamp_s < ?)"
+              " ORDER BY po.camera_instance_id, po.video_frame");
+    sqlite3_bind_text(stmt.ptr, 1, sequence_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt.ptr, 2, person_id);
+    sqlite3_bind_int(stmt.ptr, 3, std::isfinite(window_start_s) ? 0 : 1);
+    sqlite3_bind_double(stmt.ptr, 4, std::isfinite(window_start_s) ? window_start_s : 0.0);
+    sqlite3_bind_int(stmt.ptr, 5, std::isfinite(window_end_s) ? 0 : 1);
+    sqlite3_bind_double(stmt.ptr, 6, std::isfinite(window_end_s) ? window_end_s : 0.0);
+
+    std::unordered_map<std::string, int> camera_index;
+    while (stmt.step()) {
+        std::string inst_id = reinterpret_cast<char const*>(sqlite3_column_text(stmt.ptr, 0));
+        auto cam_it = inst_to_cam.find(inst_id);
+        if (cam_it == inst_to_cam.end())
+            continue;
+        Camera const* camera = cam_it->second;
+        auto [ci_it, inserted] =
+            camera_index.try_emplace(inst_id, static_cast<int>(result.cameras.size()));
+        if (inserted) {
+            KeypointChoiceCamera entry;
+            entry.camera_id = camera->id();
+            entry.camera_instance_id = inst_id;
+            result.cameras.push_back(std::move(entry));
+        }
+        int const ci = ci_it->second;
+        auto& frames = result.cameras[static_cast<size_t>(ci)].frames;
+        KeypointChoiceFrame frame;
+        frame.video_frame = sqlite3_column_int(stmt.ptr, 1);
+        frame.timestamp = sqlite3_column_double(stmt.ptr, 2);
+        frame.crop_scale = sqlite3_column_double(stmt.ptr, 4);
+        frames.push_back(frame);
+        int const fi = static_cast<int>(frames.size()) - 1;
+        for (auto const& c : db::decode_kp_candidates(sqlite3_column_blob(stmt.ptr, 3),
+                                                      sqlite3_column_bytes(stmt.ptr, 3))) {
+            if (c.keypoint_idx < 0 ||
+                static_cast<size_t>(c.keypoint_idx) >= result.keypoint_landmark.size())
+                continue;
+            KeypointChoiceRow row;
+            row.camera = ci;
+            row.frame = fi;
+            row.keypoint = c.keypoint_idx;
+            row.rank = c.rank;
+            row.tracklet_id = c.tracklet_id;
+            row.x = c.x;
+            row.y = c.y;
+            Eigen::Vector2d const distorted(c.x, c.y);
+            Eigen::Vector2d const undistorted =
+                pixels_are_undistorted ? distorted : camera->undistort(distorted);
+            row.ux = static_cast<float>(undistorted.x());
+            row.uy = static_cast<float>(undistorted.y());
+            row.peak = c.peak;
+            result.candidates.push_back(row);
         }
     }
     return result;

@@ -103,12 +103,14 @@ from posetrak.cli.marker_body import marker_body_group  # noqa: E402
 from posetrak.cli.config import config_group  # noqa: E402
 from posetrak.cli.pose import pose_group  # noqa: E402
 from posetrak.cli.detect import detect_group  # noqa: E402
+from posetrak.cli.seg import seg_group  # noqa: E402
 from posetrak.cli.track import track_group  # noqa: E402
 from posetrak.cli.trial import trial_group, cmd_export, cmd_import  # noqa: E402
 from posetrak.cli.video import video_group  # noqa: E402
 import posetrak.cli.extrinsics_rig  # noqa: E402,F401 -- registers anchor-rig/reanchor on extrinsics_group
 import posetrak.cli.capture_object  # noqa: E402,F401 -- registers the object group on capture_group
 from posetrak.cli.sequence import sequence_group  # noqa: E402
+from posetrak.cli.runs import runs_group  # noqa: E402
 
 main.add_command(registry_group, "registry")
 main.add_command(camera_model_group, "camera-model")
@@ -124,9 +126,11 @@ main.add_command(extrinsics_group, "extrinsics")
 main.add_command(sync_group, "sync")
 main.add_command(pose_group, "pose")
 main.add_command(detect_group, "detect")
+main.add_command(seg_group, "seg")
 main.add_command(track_group, "track")
 main.add_command(trial_group, "trial")
 main.add_command(cmd_export, "export")
 main.add_command(cmd_import, "import")
 main.add_command(video_group, "video")
 main.add_command(sequence_group, "sequence")
+main.add_command(runs_group, "runs")

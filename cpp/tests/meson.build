@@ -25,6 +25,8 @@ test_sources = files(
   # Phase 3: Kinematics
   'test_pinocchio_integration.cpp',
   'test_trajectory_stream.cpp',
+  'test_rts_smoother.cpp',
+  'test_hand_stage_warning.cpp',
   'test_relative_observations.cpp',
   'test_triangulation.cpp',
   'test_inverse_kinematics.cpp',
@@ -70,7 +72,12 @@ test_sources = files(
   'test_marker_prediction.cpp',
   'test_tracker_predict_update_split.cpp',
   'test_dot_assignment.cpp',
+  'test_tracklet_assignment.cpp',
   'test_streak_k_accumulator.cpp',
+  'test_seg_mask.cpp',
+
+  # Keypoint candidates chosen over a time window
+  'test_keypoint_window_choice.cpp',
 )
 
 test_exe = executable('test_posetrak',

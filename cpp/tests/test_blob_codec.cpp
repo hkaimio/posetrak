@@ -245,3 +245,75 @@ TEST_CASE(
     REQUIRE_THROWS_AS(decode_dot_candidates(blob.data(), static_cast<int>(blob.size())),
                       std::runtime_error);
 }
+
+// ---------------------------------------------------------------------------
+// decode_kp_candidates: the bytes below are the ones python/tests/detection/test_kp_candidates.py
+// builds with the Python encoder (FABRICATED_BLOB_HEX): three candidates, six fields each.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::vector<uint8_t> from_hex(std::string const& hex) {
+    std::vector<uint8_t> bytes;
+    for (size_t i = 0; i + 1 < hex.size(); i += 2)
+        bytes.push_back(static_cast<uint8_t>(std::stoi(hex.substr(i, 2), nullptr, 16)));
+    return bytes;
+}
+
+std::string const kFabricatedBlobHex =
+    "0300000006000000"
+    "000000000000803f000000400000003f0000000000000000"
+    "0000000000004040000080400000803e0000803f000080bf"
+    "0000984200102044"
+    "0040b4430000003e0000000000004041";
+
+}  // namespace
+
+TEST_CASE("decode_kp_candidates reads the bytes the Python encoder writes", "[blob_codec]") {
+    auto const bytes = from_hex(kFabricatedBlobHex);
+    auto const c = decode_kp_candidates(bytes.data(), static_cast<int>(bytes.size()));
+    REQUIRE(c.size() == 3);
+    CHECK(c[0].keypoint_idx == 0);
+    CHECK(c[0].x == Catch::Approx(1.0f));
+    CHECK(c[0].y == Catch::Approx(2.0f));
+    CHECK(c[0].peak == Catch::Approx(0.5f));
+    CHECK(c[0].rank == 0);
+    CHECK(c[0].tracklet_id == 0);
+    CHECK(c[1].keypoint_idx == 0);
+    CHECK(c[1].rank == 1);
+    CHECK(c[1].tracklet_id == -1);
+    CHECK(c[2].keypoint_idx == 76);
+    CHECK(c[2].x == Catch::Approx(640.25f));
+    CHECK(c[2].y == Catch::Approx(360.5f));
+    CHECK(c[2].peak == Catch::Approx(0.125f));
+    CHECK(c[2].tracklet_id == 12);
+}
+
+TEST_CASE("decode_kp_candidates ignores extra fields and refuses a short or inconsistent blob",
+          "[blob_codec]") {
+    // One candidate with seven fields: the seventh is not known to this reader and is skipped.
+    std::vector<uint8_t> wide(8 + 7 * 4, 0);
+    int32_t const header[2] = {1, 7};
+    std::memcpy(wide.data(), header, 8);
+    float const row[7] = {5.f, 10.f, 20.f, 0.5f, 2.f, 9.f, 123.f};
+    std::memcpy(wide.data() + 8, row, sizeof(row));
+    auto const c = decode_kp_candidates(wide.data(), static_cast<int>(wide.size()));
+    REQUIRE(c.size() == 1);
+    CHECK(c[0].keypoint_idx == 5);
+    CHECK(c[0].rank == 2);
+    CHECK(c[0].tracklet_id == 9);
+
+    std::vector<uint8_t> narrow(8 + 5 * 4, 0);
+    int32_t const narrow_header[2] = {1, 5};
+    std::memcpy(narrow.data(), narrow_header, 8);
+    CHECK_THROWS(decode_kp_candidates(narrow.data(), static_cast<int>(narrow.size())));
+
+    auto truncated = from_hex(kFabricatedBlobHex);
+    truncated.pop_back();
+    CHECK_THROWS(decode_kp_candidates(truncated.data(), static_cast<int>(truncated.size())));
+    CHECK_THROWS(decode_kp_candidates(truncated.data(), 4));
+
+    int32_t const empty_header[2] = {0, 6};
+    auto const empty = decode_kp_candidates(empty_header, 8);
+    CHECK(empty.empty());
+}

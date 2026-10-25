@@ -22,6 +22,9 @@ See:
 - [keypoint-editing-improvements-brief.md](keypoint-editing-improvements-brief.md) — improvement ideas
   brief that phases 11-14 (and the follow-up UX rounds below) implement
 - [keypoint-editing-user-guide.md](keypoint-editing-user-guide.md) — user-facing guide
+- [tracklet-editing-design.md](tracklet-editing-design.md) — planned: tracklets of keypoint
+  candidates as the editing unit (reject, other person, assign, force, split, group operations),
+  part of [the SOMA/GEM-X productization plan](../pose-model-spike/soma-gemx-productization-plan.md)
 
 ## Phase summary
 

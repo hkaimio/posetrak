@@ -52,13 +52,16 @@ _OLD_SLOT_PARENT_BASE = {
     "hip": "thigh",
     "knee_lat": "shin", "knee_med": "shin", "knee_front": "shin",
     "ankle_lat": "shin", "ankle_med": "shin",
-    "heel": "foot", "toe": "foot",
+    "heel": "foot", "toe": "foot", "toe_pinky": "foot",
 }
-# The slot list label_tracklet_groups_gui.py held.
+# The slot list label_tracklet_groups_gui.py held, plus toe_pinky_R/L (added
+# 2026-09-26 to match the operator's real 2026-09-25 capture marker set --
+# not part of that original hardcoded baseline, but the same foot rigid
+# body as heel/toe).
 _OLD_SLOT_NAMES = [
     "hip_R", "hip_L", "knee_lat_R", "knee_lat_L", "knee_med_R", "knee_med_L",
     "knee_front_R", "knee_front_L", "ankle_lat_R", "ankle_lat_L", "ankle_med_R", "ankle_med_L",
-    "heel_R", "heel_L", "toe_R", "toe_L",
+    "heel_R", "heel_L", "toe_R", "toe_L", "toe_pinky_R", "toe_pinky_L",
 ]
 
 
@@ -83,12 +86,56 @@ class TestLegModule:
         check_module_fits_skeleton(_leg_for(skeleton), skeleton)
 
     def test_an_unknown_module_lists_the_available_ones(self) -> None:
-        with pytest.raises(MarkerSetError, match=r"no catalog module 'arm'.*modules: leg"):
-            catalog_module("arm")
+        with pytest.raises(MarkerSetError, match=r"no catalog module 'spine'.*modules: arm, head, leg, torso"):
+            catalog_module("spine")
 
     def test_an_unknown_slot_is_a_key_error(self) -> None:
         with pytest.raises(KeyError):
             catalog_module("leg").parent_joint("nose_R")
+
+
+@pytest.fixture(params=["default_male", "default_female"])
+def real_skeleton_yaml(request) -> str:
+    """One of the catalog's two real skeletons (posetrak/data/skeletons/) --
+    upper-body modules were written against these, not the synthetic
+    3-joint-per-leg fixture the leg module's own tests use above."""
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "posetrak" / "data" / "skeletons" / f"{request.param}.yaml"
+    )
+    return path.read_text(encoding="utf-8")
+
+
+class TestUpperBodyModules:
+    """torso/arm/head, added 2026-09-26 to match the operator's real
+    2026-09-25 capture marker set -- unlike the leg module's tests above,
+    checked against the real skeletons rather than a synthetic fixture."""
+
+    @pytest.mark.parametrize(
+        ("module_name", "expected_slots"),
+        [
+            ("torso", 10),  # asis/sacrum x3, spine1/2 back x2, chest x2, neck x1, clavicle x2
+            ("arm", 14),    # shoulder/elbow x2/wrist x2/index/pinky x7, mirrored
+            ("head", 3),    # forehead, temple x2
+        ],
+    )
+    def test_module_fits_the_real_skeletons(
+        self, module_name: str, expected_slots: int, real_skeleton_yaml: str,
+    ) -> None:
+        module = catalog_module(module_name)
+        assert len(module.slots) == expected_slots
+        check_module_fits_skeleton(module, real_skeleton_yaml)
+
+    def test_arm_and_torso_shoulder_markers_ride_different_bones(self) -> None:
+        """shoulder_R (arm module, upper_arm.R) and clavicle_R (torso
+        module, shoulder.R) are two distinct physical markers -- easy to
+        conflate since one skeleton joint is literally named `shoulder`
+        while the other module's marker is *named* shoulder_R."""
+        arm, torso = catalog_module("arm"), catalog_module("torso")
+        assert arm.parent_joint("shoulder_R") == "upper_arm.R"
+        assert torso.parent_joint("clavicle_R") == "shoulder.R"
 
 
 class TestLoading:
@@ -129,7 +176,8 @@ markers:
             ("module: m\nmarkers: []", "no markers"),
             ("module: m\nmarkers: [{name: a}]", "needs a name and a parent_joint"),
             ("module: m\nmarkers: [{name: a, parent_joint: j}, {name: a, parent_joint: k}]", "duplicate marker names: a"),
-            ("module: m\nmarkers: [{name: a, parent_joint: j, along: 0.1}]", "gives along but needs all of"),
+            ("module: m\nmarkers: [{name: a, parent_joint: j, lateral: 0.1}]", "gives lateral but needs all of"),
+            ("module: m\nmarkers: [{name: a, parent_joint: j, along: 0.1, lateral: 0.1}]", "gives along, lateral but needs all of"),
             ("module: m\nmarkers: [{name: knee_L, parent_joint: shin.L, mirror: true}]", "must be written for the right side"),
             ("module: m\nmarkers: [{name: knee_R, parent_joint: shin, mirror: true}]", "must be written for the right side"),
             ("module: m\nmarkers: [{name: knee_R, parent_joint: shin.R, mirror: true}, {name: knee_L, parent_joint: x}]",
@@ -207,3 +255,8 @@ class TestSkeletonFit:
     def test_a_skeleton_without_joints_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="no joints"):
             skeleton_topology("name: x\n")
+
+
+def test_a_marker_may_give_how_far_from_its_place_on_the_bone_it_can_lie():
+    module = load_marker_module("module: m\nmarkers: [{name: a_R, parent_joint: j.R, along: 0.5, reach: 0.2, mirror: true}]")
+    assert [(s.name, s.along, s.reach) for s in module.slots] == [("a_R", 0.5, 0.2), ("a_L", 0.5, 0.2)]

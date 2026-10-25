@@ -417,6 +417,7 @@ def _execute_plan(
         by_parent("detection_track_assignments","detection_run_id", plan.detection_run_ids)
         by_ids("seg_quality_runs",             plan.seg_quality_ids)
         by_parent("keypoint_obs_quality",      "seg_run_id",       plan.seg_quality_ids)
+        by_parent("seg_mask_revisions",        "seg_quality_run_id", plan.seg_quality_ids)
         by_parent("seg_masks",                 "seg_quality_run_id", plan.seg_quality_ids)
         by_ids("pose_observation_sequences",   plan.sequence_ids)
         by_parent("sequence_persons",          "sequence_id",      plan.sequence_ids)
@@ -551,7 +552,7 @@ def import_trials(
                 "sync_configs", "sync_points", "sync_anchors", "sync_anchor_observations",
                 "trials", "detection_runs", "detection_keypoints", "person_detections",
                 "person_tracks", "detection_track_assignments",
-                "seg_quality_runs", "keypoint_obs_quality", "seg_masks",
+                "seg_quality_runs", "keypoint_obs_quality", "seg_mask_revisions", "seg_masks",
                 "pose_observation_sequences", "sequence_persons", "pose_observations",
                 "pose_observation_edits", "tracking_runs", "tracking_run_persons",
                 "tracking_results", "tracking_obs_results", "frame_cache_entries",

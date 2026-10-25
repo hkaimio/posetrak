@@ -202,6 +202,12 @@ consistent with `compute_state_error` in `ukf.cpp` (`q_ref⁻¹ * q_state`).
 
 ## Fixed
 
+- **FIXED (2026-10-20)**: Segmentation masks were mutable but tracking runs did not record which version they used
+  - Masks are now append-only by revision (`seg_mask_revisions`, `seg_masks.revision`, session schema 68, provisional number). Detection runs from masks and tracking runs with a mask gate read one revision, pinned when the run starts, and record it (`detection_runs.seg_revision`, `tracking_run_persons.seg_revision`); a run can be repeated on the same masks with `track run --seg-revision`. The person view overlay shows the current masks, or the revision of the tracking run being shown. See `docs/roadmap/features/segmentation-versioning/`.
+
+- **FIXED (2026-10-17)**: Tracker run aborted with "database is locked" when another process wrote the session DB
+  - The tracker's connections and the Python `_connect` now wait up to 60 s for the other writer's lock; the result writer commits in short batch transactions. A tracking run has a `status` ('running', 'complete', 'failed'); a run whose process stopped is shown as interrupted after 10 minutes without progress and `posetrak runs cleanup` marks it failed. The session tree shows the status and a run that is not complete opens read-only with a warning. See `docs/roadmap/features/session-db-concurrency/`.
+
 - **FIXED (2026-02-28)**: \`root_velocity_\` was \`VectorXd\` instead of \`Vector3d\`
   - Now \`Eigen::Vector3d\` in \`State\` with a matching typed accessor.
 

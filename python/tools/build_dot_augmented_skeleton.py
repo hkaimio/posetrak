@@ -69,14 +69,15 @@ def build_dot_augmented_skeleton(base_yaml_content: str, calibrated_doc: dict) -
                 f"base skeleton already has a marker named '{m['name']}' -- "
                 "refusing to silently shadow it"
             )
-        markers.append({
+        marker = {
             "name": m["name"],
             "parent": m["parent_joint"],
             "offset": m["offset"],
-            "normal": m["normal"],
-            "track": _DOTS_TRACK_ID,
-            "landmark": m["name"],
-        })
+        }
+        if m.get("normal"):          # a marker close to its bone's axis has no outward direction
+            marker["normal"] = m["normal"]
+        marker.update({"track": _DOTS_TRACK_ID, "landmark": m["name"]})
+        markers.append(marker)
 
     # REUSE-IgnoreStart -- this builds the *output* file's own SPDX header as a
     # string; written this way (concatenated pieces) so `reuse lint` doesn't

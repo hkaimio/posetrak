@@ -95,3 +95,18 @@ test("formatting", () => {
   assert.equal(formatStorage(300), "5 min");
   assert.equal(formatStorage(7500), "2 h 5 min");
 });
+
+test("the snapshot carries the setups and modes, and a plan event updates the checklist and the setup", () => {
+  const modes = { setups: ["a", "b"], default: "a", selected: null, cameras: { a: { modes: ["4K"] } } };
+  let s = reduce(initialState(), snapshot({ modes }));
+  assert.deepEqual(s.modes.setups, ["a", "b"]);
+  s = reduce(s, event(11, "plan", { setup: "b", checklist: [{ id: "mode:a", label: "set a", camera: "a", done: false }] }));
+  assert.equal(s.modes.selected, "b");
+  assert.deepEqual(s.modes.cameras, modes.cameras);
+  assert.deepEqual(s.checklist.map((i) => i.id), ["mode:a"]);
+});
+
+test("a snapshot without modes keeps the ones known", () => {
+  const withModes = reduce(initialState(), snapshot({ modes: { setups: ["a"], default: "a", selected: "a", cameras: {} } }));
+  assert.deepEqual(reduce(withModes, snapshot()).modes.setups, ["a"]);
+});

@@ -173,7 +173,7 @@ function useRecordingTimer(phase) {
 
 const STATE_CLASS = { recording: "rec", ready: "ok", armed: "ok", fault: "bad", offline: "bad", stopped: "", stopping: "warn" };
 
-function CameraTile({ cam, canControl, onAction }) {
+function CameraTile({ cam, options, override, canControl, onAction, onMode }) {
   const lowBattery = cam.battery_pct != null && cam.battery_pct < 15;
   const lowStorage = cam.storage_remaining_s != null && cam.storage_remaining_s < 300;
   const cls = `tile ${cam.state}${cam.enabled ? "" : " disabled"}`;
@@ -187,8 +187,15 @@ function CameraTile({ cam, canControl, onAction }) {
         <span>battery</span><span class=${lowBattery ? "low" : ""}>${cam.battery_pct == null ? "–" : `${cam.battery_pct} %`}</span>
         <span>storage</span><span class=${lowStorage ? "low" : ""}>${formatStorage(cam.storage_remaining_s)}</span>
         <span>control</span><span>${cam.confidence}</span>
+        ${cam.enabled && html`<span>mode</span><span>${cam.mode ?? "–"}${cam.settings_control === "manual" ? " (set by hand)" : ""}</span>`}
         ${cam.overheating && html`<span class="low">heat</span><span class="low">hot</span>`}
       </div>
+      ${canControl && cam.enabled && options?.modes?.length > 0 &&
+      html`
+        <select class="mode-select" value=${override ?? ""} onChange=${(e) => onMode(cam.label, e.target.value)}>
+          <option value="">mode from setup</option>
+          ${options.modes.map((m) => html`<option key=${m} value=${m}>${m}</option>`)}
+        </select>`}
       ${canControl &&
       html`
         <div class="actions">
@@ -257,6 +264,8 @@ function App() {
   const perms = permissions(state, clientId);
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [setup, setSetup] = useState(null);
+  const [overrides, setOverrides] = useState({});
   const elapsed = useRecordingTimer(state.phase);
   useLeaseKeeper(perms.mine);
   useWakeLock(state.phase === "recording");
@@ -280,7 +289,8 @@ function App() {
   const takeLease = (takeover) => run(() => call("POST", "/lease", { label: clientLabel, takeover }));
   const arm = () =>
     run(async () => {
-      const r = await call("POST", "/capture/arm");
+      const picked = Object.fromEntries(Object.entries(overrides).filter(([, m]) => m));
+      const r = await call("POST", "/capture/arm", { setup: chosenSetup, modes: picked });
       if (!r.ready) {
         const problems = Object.entries(r.problems).map(([cam, list]) => `${cam}: ${list.join(", ")}`);
         const open = r.open_checklist.length ? [`checklist open: ${r.open_checklist.join(", ")}`] : [];
@@ -307,6 +317,9 @@ function App() {
     });
   const onTick = (id, done) => run(() => call("POST", `/checklist/${encodeURIComponent(id)}`, { done }));
 
+  const chosenSetup = setup ?? state.modes.selected ?? state.modes.default;
+  const onMode = (label, mode) => setOverrides((o) => ({ ...o, [label]: mode }));
+
   const cameras = useMemo(() => Object.values(state.cameras).sort((a, b) => a.label.localeCompare(b.label)), [state.cameras]);
   const recording = state.phase === "recording";
 
@@ -332,12 +345,20 @@ function App() {
       ${perms.canStart && html`<button disabled=${busy} onClick=${arm}>Re-check cameras</button>`}
     </div>
 
+    ${state.modes.setups.length > 1 &&
+    html`
+      <label class="setup-pick">setup
+        <select value=${chosenSetup ?? ""} disabled=${!perms.canArm} onChange=${(e) => setSetup(e.target.value)}>
+          ${state.modes.setups.map((s) => html`<option key=${s} value=${s}>${s}</option>`)}
+        </select>
+      </label>`}
+
     <${Report} report=${state.report} />
     <${Checklist} items=${state.checklist} canControl=${perms.mine} onTick=${onTick} />
 
     <h2>Cameras</h2>
     <div class="wall">
-      ${cameras.map((cam) => html`<${CameraTile} key=${cam.label} cam=${cam} canControl=${perms.mine && !recording} onAction=${onAction} />`)}
+      ${cameras.map((cam) => html`<${CameraTile} key=${cam.label} cam=${cam} options=${state.modes.cameras[cam.label]} override=${overrides[cam.label]} canControl=${perms.mine && !recording} onAction=${onAction} onMode=${onMode} />`)}
     </div>
     ${!cameras.length && html`<p class="muted">No cameras configured.</p>`}
 

@@ -17,6 +17,8 @@ export const initialState = () => ({
   captureId: null,
   cameras: {},
   checklist: [],
+  // Setups and capture modes the operator can choose from; `selected` is the setup of the last arm.
+  modes: { setups: [], default: null, cameras: {}, selected: null },
   alerts: [],
   lease: { holder: null, label: null, expires_in_s: null },
   // Outcome of the last start/stop command, per camera, for the confirmation wall.
@@ -35,6 +37,7 @@ export function applySnapshot(state, snap) {
     captureId: snap.capture_id,
     cameras: snap.cameras,
     checklist: snap.checklist,
+    modes: snap.modes ?? state.modes,
     alerts: snap.alerts,
     lease: snap.lease ?? state.lease,
     stale: false,
@@ -62,6 +65,8 @@ export function reduce(state, msg) {
         ...next,
         checklist: next.checklist.map((i) => (i.id === d.item ? { ...i, done: d.done } : i)),
       };
+    case "plan":
+      return { ...next, checklist: d.checklist, modes: { ...next.modes, selected: d.setup } };
     case "alert": {
       const { active, ...alert } = d;
       const rest = next.alerts.filter((a) => alertKey(a) !== alertKey(alert));

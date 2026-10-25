@@ -121,6 +121,26 @@ def _check_setups(cfg: CaptureConfig, cameras: list[PlannedCamera]) -> None:
                 raise ConfigError(f"setup {setup.name!r} names camera {label!r}, which has no [[camera]] block")
 
 
+def demo_planner(slots: Sequence[CameraSlot]) -> ModePlanner:
+    """Modes and setups for simulated cameras; the last of three or more is set by hand."""
+    from pipeline.capture.config import SetupConfig
+    from pipeline.capture.devices import ModeSpec
+
+    modes = (
+        ModeSpec("demo-4k", "4K 120 linear", 3840, 2160, 120, {"resolution": "4K", "fps": 120, "lens": "linear"}),
+        ModeSpec("demo-2k", "2.7K 240 linear", 2704, 1520, 240, {"resolution": "2.7K", "fps": 240, "lens": "linear"}),
+        ModeSpec("demo-hd", "1080 60", 1920, 1080, 60, {"resolution": "1080", "fps": 60}),
+    )
+    if len(slots) >= 3:
+        slots[-1].driver.settings_control = "manual"
+    cameras = [PlannedCamera(s.label, model_keys("", "Demo camera"), "Demo camera", modes, s.driver) for s in slots]
+    setups = (
+        SetupConfig("default", {"Demo camera": "4K 120 linear"}),
+        SetupConfig("slow motion", {"Demo camera": "2.7K 240 linear"}),
+    )
+    return ModePlanner(cameras, setups, "default")
+
+
 def resolve_camera_instances(registry: sqlite3.Connection, labels: list[str]) -> dict[str, str]:
     """Map camera labels to ``camera_instances.id``; every label must be registered."""
     ids: dict[str, str] = {}
@@ -149,6 +169,7 @@ def controller_factory(cfg: CaptureConfig, *, demo_cameras: int = 0) -> Callable
                 CameraSlot(f"demo-{i + 1:02d}", f"demo-instance-{i + 1:02d}", SimulatedDriver(f"demo-{i + 1:02d}"))
                 for i in range(demo_cameras)
             ]
+            planner = demo_planner(slots)
         else:
             if cfg.daemon.session_db is None:
                 raise ConfigError("daemon.session_db is not set in the configuration")

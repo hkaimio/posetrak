@@ -160,3 +160,6 @@ h2 { font-size: 0.95rem; margin: 18px 0 8px; color: var(--muted); text-transform
 .outcome.bad { color: var(--bad); }
 .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; background: var(--bad); }
 .dot.on { background: var(--ok); }
+
+.tile .mode-select, .setup-pick select { margin-top: 6px; max-width: 100%; font: inherit; padding: 6px; background: var(--panel); color: inherit; border: 1px solid var(--line); border-radius: 6px; }
+.setup-pick { display: flex; align-items: center; gap: 8px; margin: 8px 0; }

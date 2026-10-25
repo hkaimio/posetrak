@@ -9,7 +9,7 @@ calibration items; keypoint candidates and mask versioning; tracklet editing.
 """
 categories = ["detection-pipeline", "tracker-core", "data-model"]
 target_release = "TBD"
-last_updated = 2026-10-24
+last_updated = 2026-10-25
 ```
 
 # SOMA/GEM-X Productization — Implementation Status
@@ -75,8 +75,10 @@ The plan's "Known limits of the first release" lists them. The ones to settle by
 - **Jitter of the arms and hands.** With the windowed choice it is 1.5-2 times that of the edited runs. Lowering the
   process noise of the pose from 0.3 to 0.15 brings arms and hands to the per-step assignment's level (arms plus hands
   50 to 40 mm, feet 23 to 16 mm) at the same accuracy; the sticky choice adds about 3 mm more. 15 jitter episodes
-  remain against 8 with the per-step assignment, mostly jumps of the pick within a tracklet. The tracker default stays
-  0.3 until a second capture confirms 0.15 (keypoint-candidates design section 10.10).
+  remain against 8 with the per-step assignment, mostly jumps of the pick within a tracklet. Retargeted in iClone, the
+  recommended setting looks clearly better than earlier runs on the same capture. The defaults stay open (tracker
+  process noise 0.3, sticky choice off) until more captures have been tracked
+  ([jitter study report](../keypoint-candidates/jitter-study-report.md)).
 - **Foot twist about the long axis.** The three SOMA-77 foot keypoints are collinear, so this twist cannot be
   observed. An open design question (keypoint-candidates design section 10.9).
 - **Mask edits in place.** Edits do not create a new revision, so a box or tracking run cannot record which masks

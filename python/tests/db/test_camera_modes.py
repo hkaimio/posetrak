@@ -139,3 +139,20 @@ def test_cli_adds_and_edits_modes(tmp_path: Path) -> None:
     duplicate = run("camera-mode", "add", "--model-id", model, "--name", "4K 120 wide")
     assert duplicate.exit_code != 0
     assert run("camera-mode", "set", mode_id).exit_code != 0
+
+
+def test_cli_accepts_a_model_id_prefix_and_rejects_an_unknown_model(tmp_path: Path) -> None:
+    path = tmp_path / "registry.db"
+    reg = create_registry(path)
+    model = create_camera_model(reg, manufacturer="GoPro", model_name="Hero13")
+    reg.close()
+
+    def run(*args: str):
+        return CliRunner().invoke(main, ["--registry", str(path), *args])
+
+    assert run("camera-mode", "add", "--model-id", model[:4], "--name", "by prefix").exit_code == 0
+    reg = open_registry(path)
+    assert list_camera_modes(reg, model)[0]["name"] == "by prefix"
+    reg.close()
+    unknown = run("camera-mode", "add", "--model-id", "zzzz", "--name", "x")
+    assert unknown.exit_code != 0 and "FOREIGN KEY" not in unknown.output

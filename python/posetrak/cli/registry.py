@@ -314,6 +314,7 @@ def camera_mode_add(
     capture_settings = _parse_settings(settings)
     registry = _open_registry(obj["registry"])
     try:
+        model_id = _resolve(registry, "camera_models", model_id)
         mode_id = create_camera_mode(
             registry,
             model_id,

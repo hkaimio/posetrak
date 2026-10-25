@@ -15,6 +15,7 @@ from pathlib import Path
 from pipeline.capture.config import CameraConfig, CaptureConfig, ConfigError
 from pipeline.capture.credentials import CredentialStore
 from pipeline.capture.devices import CameraDriver, ManualDriver
+from pipeline.capture.modes import ModePlanner, PlannedCamera, load_modes, model_keys
 from pipeline.capture.registry_link import LinkError, find_camera
 from pipeline.capture.service import CameraSlot, CaptureController
 from pipeline.capture.simulated import SimulatedDriver
@@ -90,6 +91,36 @@ def resolve_registry_cameras(registry: sqlite3.Connection, cameras: Sequence[Cam
     return resolved
 
 
+def build_planner(
+    registry: sqlite3.Connection, slots: Sequence[CameraSlot], cfg: CaptureConfig
+) -> ModePlanner:
+    """The mode planner for these cameras: their models' registry modes and the configured setups."""
+    cameras = []
+    for slot in slots:
+        row = registry.execute(
+            "SELECT m.id, m.manufacturer, m.model_name FROM camera_instances i "
+            "JOIN camera_models m ON m.id = i.camera_model_id WHERE i.id = ?",
+            (slot.camera_instance_id,),
+        ).fetchone()
+        if row is None:
+            raise ConfigError(f"camera {slot.label!r} has no camera model in the registry")
+        model = f"{row[1] or ''} {row[2] or ''}".strip() or "unknown model"
+        cameras.append(
+            PlannedCamera(slot.label, model_keys(row[1], row[2]), model, load_modes(registry, row[0]), slot.driver)
+        )
+    _check_setups(cfg, cameras)
+    return ModePlanner(cameras, cfg.setups, cfg.daemon.default_setup, cfg.profile.settings)
+
+
+def _check_setups(cfg: CaptureConfig, cameras: list[PlannedCamera]) -> None:
+    """Refuse setups that mention cameras that are not configured."""
+    labels = {c.label for c in cameras}
+    for setup in cfg.setups:
+        for label in setup.cameras:
+            if label not in labels:
+                raise ConfigError(f"setup {setup.name!r} names camera {label!r}, which has no [[camera]] block")
+
+
 def resolve_camera_instances(registry: sqlite3.Connection, labels: list[str]) -> dict[str, str]:
     """Map camera labels to ``camera_instances.id``; every label must be registered."""
     ids: dict[str, str] = {}
@@ -110,6 +141,7 @@ def controller_factory(cfg: CaptureConfig, *, demo_cameras: int = 0) -> Callable
     """Return a function that builds the controller on the server's event loop thread."""
 
     def factory() -> CaptureController:
+        planner: ModePlanner | None = None
         if demo_cameras:
             session = create_session(Path(tempfile.mkdtemp(prefix="posetrak-capture-demo-")) / "demo.db")
             sid = create_mocap_session(session, location="demo")
@@ -125,11 +157,12 @@ def controller_factory(cfg: CaptureConfig, *, demo_cameras: int = 0) -> Callable
             registry = open_registry(cfg.daemon.registry_db or DEFAULT_REGISTRY_PATH)
             try:
                 resolved = resolve_registry_cameras(registry, cfg.cameras)
+                slots = [CameraSlot(c.label, instance_id, build_driver(c, cfg)) for c, instance_id in resolved]
+                planner = build_planner(registry, slots, cfg)
             finally:
                 registry.close()
             session = open_session(cfg.daemon.session_db)
             sid = latest_or_new_session(session)
-            slots = [CameraSlot(c.label, instance_id, build_driver(c, cfg)) for c, instance_id in resolved]
-        return CaptureController(slots, session, sid, settings=cfg.profile.settings)
+        return CaptureController(slots, session, sid, settings=cfg.profile.settings, planner=planner)
 
     return factory

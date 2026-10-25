@@ -89,6 +89,29 @@ class ArmResult:
     mismatches: dict[str, tuple[Any, Any]] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ModeSpec:
+    """A registry capture mode as a driver sees it."""
+
+    id: str
+    name: str | None
+    width_px: int
+    height_px: int
+    fps: float
+    #: the mode's ``capture_settings``: the driver's own settings vocabulary
+    capture_settings: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SettingSpec:
+    """One setting a driver understands, for building settings editors."""
+
+    name: str
+    #: allowed values; None when any value of the kind is accepted
+    choices: tuple[Any, ...] | None = None
+    description: str = ""
+
+
 StatusCallback = Callable[[str, DeviceStatus], None]
 
 
@@ -104,6 +127,9 @@ class CameraDriver(ABC):
 
     #: ``"confirmed"``, ``"commanded"`` or ``"manual"``; see capture_events.confidence
     confidence: str = "commanded"
+    #: ``"driver"``: :meth:`arm` applies the settings and reads them back. ``"manual"``: the
+    #: camera cannot be configured remotely, the operator sets it by hand and confirms it.
+    settings_control: str = "driver"
 
     def __init__(self, label: str) -> None:
         self.label = label
@@ -127,6 +153,22 @@ class CameraDriver(ABC):
                 self._callback(self.label, status)
             except Exception:  # noqa: BLE001  (a bad listener must not break the driver)
                 logger.exception("%s: status callback failed", self.label)
+
+    def supported_settings(self) -> dict[str, SettingSpec]:
+        """The settings this driver understands, by name (empty if it takes none)."""
+        return {}
+
+    def mode_settings(self, mode: ModeSpec) -> dict[str, Any]:
+        """The settings that make the camera record in *mode*.
+
+        The default is the mode's own ``capture_settings``. A driver that can derive
+        settings from the mode's size and frame rate does so when they are empty.
+        """
+        return dict(mode.capture_settings)
+
+    def describe_settings(self, settings: dict[str, Any]) -> list[str]:
+        """Instructions for setting the camera by hand (for ``settings_control == "manual"``)."""
+        return [f"{name}: {value}" for name, value in settings.items()]
 
     @abstractmethod
     async def connect(self) -> None:
@@ -159,6 +201,7 @@ class ManualDriver(CameraDriver):
     """
 
     confidence = "manual"
+    settings_control = "manual"
 
     async def connect(self) -> None:
         self._set_status(DeviceStatus(state=DeviceState.READY, link=LinkState.UP))

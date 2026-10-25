@@ -39,6 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from pipeline.capture.lease import DEFAULT_TIMEOUT_S, ControlLease
+from pipeline.capture.modes import ModeError
 from pipeline.capture.service import ArmReport, CaptureController, CaptureReport, CaptureStateError
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,13 @@ WEB_DIR = Path(__file__).parent / "web"
 class LeaseRequest(BaseModel):
     label: str | None = None
     takeover: bool = False
+
+
+class ArmRequest(BaseModel):
+    #: setup that chooses the capture modes; None takes the default one
+    setup: str | None = None
+    #: camera label -> mode name, overriding the setup for this capture
+    modes: dict[str, str] | None = None
 
 
 class StartRequest(BaseModel):
@@ -179,6 +187,8 @@ def create_app(
                 return await fn(*args, **kwargs)
             except CaptureStateError as exc:
                 raise HTTPException(409, {"error": str(exc)}) from exc
+            except ModeError as exc:
+                raise HTTPException(400, {"error": str(exc)}) from exc
             except KeyError as exc:
                 raise HTTPException(404, f"unknown {exc}") from exc
 
@@ -186,8 +196,9 @@ def create_app(
 
     @commands.post("/capture/arm")
     @_guard
-    async def arm(request: Request) -> dict[str, Any]:
-        return _arm_report(await controller_of(request).arm())
+    async def arm(request: Request, body: ArmRequest | None = None) -> dict[str, Any]:
+        body = body or ArmRequest()
+        return _arm_report(await controller_of(request).arm(body.setup, body.modes))
 
     @commands.post("/capture/start")
     @_guard

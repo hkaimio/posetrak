@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import json
 import logging
 import sqlite3
 from collections.abc import Callable
@@ -35,6 +36,7 @@ from pipeline.capture.devices import (
     ManualDriver,
 )
 from pipeline.capture.events import EventBus
+from pipeline.capture.modes import ModeChoice, ModePlanner
 from posetrak.db.capture_control import CaptureEvent, upsert_capture_event, utc_now_iso
 from posetrak.db.db import create_capture
 
@@ -52,6 +54,10 @@ class CapturePhase(enum.StrEnum):
     RECORDING = "recording"
     STOPPING = "stopping"
     STOPPED = "stopped"
+
+
+#: prefix of the checklist items that ask the operator to set a camera by hand
+_MODE_ITEM = "mode:"
 
 
 class CaptureStateError(RuntimeError):
@@ -124,6 +130,8 @@ class _Camera:
     enabled: bool = True
     in_capture: bool = False
     overridden: bool = False
+    #: the mode chosen at the last arm; None before any arm or without a planner
+    mode: ModeChoice | None = None
     start: CameraOutcome | None = None
     stop: CameraOutcome | None = None
 
@@ -149,7 +157,10 @@ class CaptureController:
     session_id:
         ``mocap_sessions.id`` new captures are created under.
     settings:
-        Profile settings handed to every driver at arm time.
+        Profile settings handed to every driver at arm time when no mode is chosen for it.
+    planner:
+        Chooses a capture mode for every camera at arm time; without one every
+        camera gets the profile settings.
     checklist:
         Items the operator must tick before the controller reports ready.
     command_timeout_s:
@@ -164,6 +175,7 @@ class CaptureController:
         session_id: str,
         *,
         settings: dict[str, Any] | None = None,
+        planner: ModePlanner | None = None,
         checklist: list[ChecklistItem] | None = None,
         command_timeout_s: float = 5.0,
         arm_timeout_s: float = 30.0,
@@ -177,8 +189,13 @@ class CaptureController:
         self._session = session
         self._session_id = session_id
         self._settings = dict(settings or {})
+        self._planner = planner
+        #: setup used by the last arm
+        self.setup: str | None = None
         self._checklist = {c.id: c for c in checklist or []}
         self._ticked: set[str] = set()
+        #: text of the mode checklist items as last shown, to keep a tick across arms
+        self._mode_ticks: dict[str, str] = {}
         self._timeout = command_timeout_s
         self._arm_timeout = arm_timeout_s
         self.bus = bus or EventBus()
@@ -255,17 +272,32 @@ class CaptureController:
 
     # -- commands ----------------------------------------------------------
 
-    async def arm(self) -> ArmReport:
-        """Pre-flight every enabled camera and report whether the group is ready."""
+    async def arm(self, setup: str | None = None, modes: dict[str, str] | None = None) -> ArmReport:
+        """Pre-flight every enabled camera and report whether the group is ready.
+
+        Parameters
+        ----------
+        setup:
+            Name of the setup that chooses the cameras' capture modes; None takes the
+            default one.
+        modes:
+            Per-camera mode names that override the setup for this capture.
+
+        Raises
+        ------
+        ModeError
+            If the setup or an overriding camera is unknown; nothing has been armed then.
+        """
         self._require_phase("arm", CapturePhase.IDLE, CapturePhase.ARMED, CapturePhase.STOPPED)
         self._enter_busy()
         try:
+            cams = [c for c in self._cameras.values() if c.enabled]
+            self._plan_modes(cams, setup, modes)
             self._set_phase(CapturePhase.ARMING)
             self.capture_id = None
             for cam in self._cameras.values():
                 cam.in_capture = cam.overridden = False
                 cam.start = cam.stop = None
-            cams = [c for c in self._cameras.values() if c.enabled]
             results = await asyncio.gather(*(self._arm_one(c) for c in cams))
             arm_results = {c.label: r for c, r in zip(cams, results)}
             problems: dict[str, tuple[str, ...]] = {}
@@ -389,12 +421,14 @@ class CaptureController:
             "phase": str(self.phase),
             "capture_id": self.capture_id,
             "cameras": {c.label: self._camera_view(c) for c in self._cameras.values()},
-            "checklist": [
-                {"id": i.id, "label": i.label, "camera": i.camera, "done": i.id in self._ticked}
-                for i in self._checklist.values()
-            ],
+            "checklist": self._checklist_view(),
             "alerts": [vars(a) for a in self._alerts.values()],
+            "modes": {**self.mode_options(), "selected": self.setup},
         }
+
+    def mode_options(self) -> dict[str, Any]:
+        """The setups and modes an operator can choose from, JSON-serializable."""
+        return self._planner.describe() if self._planner else {"setups": [], "default": None, "cameras": {}}
 
     def camera_state(self, label: str) -> DeviceState:
         return self._cameras[label].state
@@ -435,11 +469,47 @@ class CaptureController:
             "storage_remaining_s": st.storage_remaining_s,
             "overheating": st.overheating,
             "recording": st.recording,
+            "mode": cam.mode.name if cam.mode else None,
+            "settings_control": cam.driver.settings_control,
         }
 
+    def _plan_modes(self, cams: list[_Camera], setup: str | None, modes: dict[str, str] | None) -> None:
+        """Choose the modes of the cameras about to be armed, and add the checklist items they need."""
+        for item_id in [i for i in self._checklist if i.startswith(_MODE_ITEM)]:
+            del self._checklist[item_id]
+        if self._planner is None:
+            return
+        plan = self._planner.plan([c.label for c in cams], setup, modes)
+        self.setup = setup or self._planner.default_setup
+        for cam in cams:
+            cam.mode = plan[cam.label]
+            choice = cam.mode
+            if cam.driver.settings_control == "manual" and choice.mode_id and not choice.problem:
+                steps = "; ".join(cam.driver.describe_settings(choice.settings)) or "no settings"
+                text = f"{cam.label}: set the camera to {choice.name} ({steps})"
+                item_id = _MODE_ITEM + cam.label
+                self._checklist[item_id] = ChecklistItem(item_id, text, cam.label)
+                if self._mode_ticks.get(item_id) != text:
+                    self._ticked.discard(item_id)
+                self._mode_ticks[item_id] = text
+        for cam in self._cameras.values():
+            self.bus.publish("camera", **self._camera_view(cam))
+        self.bus.publish("plan", setup=self.setup, checklist=self._checklist_view())
+
+    def _checklist_view(self) -> list[dict[str, Any]]:
+        return [
+            {"id": i.id, "label": i.label, "camera": i.camera, "done": i.id in self._ticked}
+            for i in self._checklist.values()
+        ]
+
+    def _camera_settings(self, cam: _Camera) -> dict[str, Any]:
+        return cam.mode.settings if cam.mode is not None else self._settings
+
     async def _arm_one(self, cam: _Camera) -> ArmResult:
+        if cam.mode is not None and cam.mode.problem:
+            return ArmResult(False, (cam.mode.problem,))
         try:
-            return await asyncio.wait_for(cam.driver.arm(self._settings), self._arm_timeout)
+            return await asyncio.wait_for(cam.driver.arm(self._camera_settings(cam)), self._arm_timeout)
         except Exception as exc:  # noqa: BLE001
             return ArmResult(False, (f"arm failed: {exc!r}",))
 
@@ -495,6 +565,8 @@ class CaptureController:
                 confidence or cam.driver.confidence,
                 status,
                 notes=notes,
+                camera_mode_id=cam.mode.mode_id if cam.mode else None,
+                settings_json=json.dumps(self._camera_settings(cam), sort_keys=True),
                 **timestamps,
             ),
         )

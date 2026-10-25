@@ -111,6 +111,37 @@ def translate(settings: dict[str, Any]) -> dict[int, int]:
     return wanted
 
 
+_SIZE_NAMES: Final[dict[tuple[int, int], str]] = {
+    (5312, 2988): "5.3K",
+    (5120, 2880): "5K",
+    (3840, 2160): "4K",
+    (2704, 1520): "2.7K",
+    (1920, 1080): "1080",
+    (1280, 720): "720",
+}
+
+
+def derive(width_px: int, height_px: int, fps: float) -> dict[str, Any]:
+    """Profile settings for a mode known only by its size and frame rate.
+
+    Resolution and frame rate only: the lens (which the mode's intrinsics depend
+    on) cannot be told from them and must be given in the mode's capture settings.
+
+    Raises
+    ------
+    ProfileError
+        If the size is not a Hero13 resolution or the frame rate is unknown.
+    """
+    size = _SIZE_NAMES.get((width_px, height_px))
+    if size is None or int(round(fps)) not in _FPS:
+        raise ProfileError(f"cannot derive Hero13 settings from {width_px}x{height_px} at {fps:g} fps")
+    return {"resolution": size, "fps": int(round(fps))}
+
+
+#: names and allowed values of the symbolic settings, for settings editors
+SUPPORTED: Final[dict[str, tuple[Any, ...]]] = {name: tuple(options) for name, (_, options) in _SYMBOLIC.items()}
+
+
 def label(setting_id: int, option: Any) -> tuple[str, str]:
     """Human-readable ``(name, value)`` of a setting id and option, for messages."""
     for name, (sid, options) in _SYMBOLIC.items():

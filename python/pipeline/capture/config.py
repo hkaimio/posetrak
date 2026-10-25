@@ -65,6 +65,8 @@ class DaemonConfig:
     registry_db: Path | None = None
     #: where camera COHN credentials are kept; None means the default directory
     credentials_dir: Path | None = None
+    #: setup used when a capture is armed without choosing one; None means the only setup
+    default_setup: str | None = None
 
 
 @dataclass(frozen=True)
@@ -97,11 +99,39 @@ class CameraConfig:
 
 
 @dataclass(frozen=True)
+class SetupCameraConfig:
+    """What a setup says about one camera, over what it says about the camera's model."""
+
+    #: name of the registry capture mode the camera uses; None defers to the model entry
+    mode: str | None = None
+    #: settings applied on top of the mode's (driver vocabulary), for example an exposure time
+    settings: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SetupConfig:
+    """A named choice of capture mode for each camera that may take part in a capture."""
+
+    name: str
+    #: camera model ("Hero13" or "GoPro Hero13") -> name of the mode its cameras use
+    models: dict[str, str] = field(default_factory=dict)
+    #: camera label -> per-camera mode and settings
+    cameras: dict[str, SetupCameraConfig] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class CaptureConfig:
     daemon: DaemonConfig = field(default_factory=DaemonConfig)
     profile: ProfileConfig = field(default_factory=ProfileConfig)
     networks: tuple[NetworkConfig, ...] = ()
     cameras: tuple[CameraConfig, ...] = ()
+    setups: tuple[SetupConfig, ...] = ()
+
+    def setup(self, name: str) -> SetupConfig:
+        for setup in self.setups:
+            if setup.name == name:
+                return setup
+        raise ConfigError(f"unknown setup {name!r} (known: {', '.join(s.name for s in self.setups) or 'none'})")
 
     def network(self, name: str) -> NetworkConfig:
         for net in self.networks:
@@ -156,6 +186,7 @@ def parse_config(data: dict[str, Any]) -> CaptureConfig:
         session_db=_path(d, "session_db"),
         registry_db=_path(d, "registry_db"),
         credentials_dir=_path(d, "credentials_dir"),
+        default_setup=str(d["default_setup"]).strip() if d.get("default_setup") else None,
     )
 
     p = data.get("profile", {})
@@ -196,7 +227,27 @@ def parse_config(data: dict[str, Any]) -> CaptureConfig:
         cameras.append(cam)
     _check_unique([c.label for c in cameras], "camera label")
 
-    return CaptureConfig(daemon, profile, tuple(networks), tuple(cameras))
+    setups = [_parse_setup(str(name), table) for name, table in data.get("setup", {}).items()]
+    if daemon.default_setup is not None and daemon.default_setup not in [x.name for x in setups]:
+        raise ConfigError(f"daemon.default_setup {daemon.default_setup!r} is not a [setup.*] block")
+
+    return CaptureConfig(daemon, profile, tuple(networks), tuple(cameras), tuple(setups))
+
+
+def _parse_setup(name: str, table: dict[str, Any]) -> SetupConfig:
+    where = f"setup.{name}"
+    models = table.get("mode", {})
+    if not isinstance(models, dict):
+        raise ConfigError(f"{where}.mode must be a table of camera model = mode name")
+    cameras = {}
+    for label, entry in table.get("camera", {}).items():
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{where}.camera.{label} must be a table")
+        cameras[str(label)] = SetupCameraConfig(
+            mode=str(entry["mode"]) if entry.get("mode") else None,
+            settings=dict(entry.get("settings", {})),
+        )
+    return SetupConfig(name, {str(k): str(v) for k, v in models.items()}, cameras)
 
 
 def _check_unique(values: list[str], what: str) -> None:
@@ -258,6 +309,18 @@ name = "default"
 # discovery = "dhcp_reservation"
 # [network.addresses]
 # gopro-13_01 = "192.168.8.101"
+
+# A setup says which capture mode (a name from the camera registry's modes of
+# the camera model) each camera uses. Per-model entries cover every camera of a
+# model; a [setup.NAME.camera.LABEL] table overrides one camera and may add
+# driver settings on top of the mode's. With several setups, the operator picks
+# one when arming; default_setup (under [daemon]) names the one preselected.
+# [setup.default]
+# mode = {{ "GoPro Hero13" = "4K 120 linear" }}
+# [setup.default.camera.gopro-13_02]
+# mode = "2.7K 120 linear"
+# [setup.default.camera.gopro-13_02.settings]
+# bit_rate = "high"
 
 # One block per camera taking part in captures. The label is the camera's
 # label in the camera registry; the control method and the device it is linked

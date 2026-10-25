@@ -260,3 +260,39 @@ def test_lease_changes_are_broadcast(client: TestClient) -> None:
         lease(client, A, label="phone")
         msg = drain_until(ws, lambda m: m.get("kind") == "lease")[-1]
         assert msg["data"]["holder"] == "phone-a"
+
+
+# -- capture modes ----------------------------------------------------------------------------
+
+
+def test_arm_takes_a_setup_and_mode_overrides(tmp_path: Path) -> None:
+    from pipeline.capture.config import SetupConfig
+    from pipeline.capture.devices import ModeSpec
+    from pipeline.capture.modes import ModePlanner, PlannedCamera, model_keys
+
+    modes = (
+        ModeSpec("m1", "4K", 3840, 2160, 120, {"resolution": "4K"}),
+        ModeSpec("m2", "1080", 1920, 1080, 30, {"resolution": "1080"}),
+    )
+    driver = ScriptedDriver("cam0")
+    planner = ModePlanner(
+        [PlannedCamera("cam0", model_keys("GoPro", "Hero13"), "GoPro Hero13", modes, driver)],
+        (SetupConfig("s", {"Hero13": "4K"}),),
+    )
+
+    def factory() -> CaptureController:
+        session = create_session(tmp_path / "s.db")
+        sid = create_mocap_session(session, location="test")
+        return CaptureController([CameraSlot("cam0", "inst-cam0", driver)], session, sid, planner=planner)
+
+    app = create_app(factory, TOKEN, web_dir=None)
+    with TestClient(app) as client:
+        lease(client)
+        state = client.get("/api/state", headers=A).json()
+        assert state["modes"]["setups"] == ["s"] and state["modes"]["cameras"]["cam0"]["modes"] == ["4K", "1080"]
+        assert client.post("/api/capture/arm", json={"setup": "nope"}, headers=A).status_code == 400
+        armed = client.post("/api/capture/arm", json={"modes": {"cam0": "1080"}}, headers=A)
+        assert armed.status_code == 200 and armed.json()["ready"]
+        assert driver.armed_with == {"resolution": "1080"}
+        assert client.post("/api/capture/arm", headers=A).json()["ready"]  # no body at all
+        assert driver.armed_with == {"resolution": "4K"}

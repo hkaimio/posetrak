@@ -50,6 +50,8 @@ from pipeline.capture.devices import (
     DeviceState,
     DeviceStatus,
     LinkState,
+    ModeSpec,
+    SettingSpec,
 )
 from pipeline.capture.gopro_profile import (
     FLAT_MODE_VIDEO,
@@ -59,7 +61,9 @@ from pipeline.capture.gopro_profile import (
     ST_FLAT_MODE,
     ST_OVERHEATING,
     ST_REMAINING_VIDEO_S,
+    SUPPORTED,
     ProfileError,
+    derive,
     label,
     translate,
 )
@@ -137,6 +141,19 @@ class GoProCohnDriver(CameraDriver):
     """
 
     confidence = "confirmed"
+    settings_control = "driver"
+
+    def supported_settings(self) -> dict[str, SettingSpec]:
+        return {
+            name: SettingSpec(name, choices, "or a numeric setting id for any other setting")
+            for name, choices in SUPPORTED.items()
+        }
+
+    def mode_settings(self, mode: ModeSpec) -> dict[str, Any]:
+        """The mode's own settings, or resolution and frame rate derived from its size."""
+        if mode.capture_settings:
+            return dict(mode.capture_settings)
+        return derive(mode.width_px, mode.height_px, mode.fps)
 
     def __init__(
         self,

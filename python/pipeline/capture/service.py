@@ -23,6 +23,7 @@ import json
 import logging
 import sqlite3
 from collections.abc import Callable
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,9 +35,11 @@ from pipeline.capture.devices import (
     DeviceStatus,
     LinkState,
     ManualDriver,
+    OffloadError,
 )
 from pipeline.capture.events import EventBus
 from pipeline.capture.modes import ModeChoice, ModePlanner
+from pipeline.capture.offload_flow import CaptureOffloader, OffloadTarget
 from posetrak.db.capture_control import CaptureEvent, upsert_capture_event, utc_now_iso
 from posetrak.db.db import create_capture
 
@@ -161,6 +164,12 @@ class CaptureController:
     planner:
         Chooses a capture mode for every camera at arm time; without one every
         camera gets the profile settings.
+    offload_dir:
+        Where the recordings of a capture are copied to; None disables copying them.
+    registry_path:
+        Camera registry used to register copied videos; None means the default registry.
+    auto_offload:
+        Copy the recordings automatically when a capture has stopped.
     checklist:
         Items the operator must tick before the controller reports ready.
     command_timeout_s:
@@ -176,6 +185,9 @@ class CaptureController:
         *,
         settings: dict[str, Any] | None = None,
         planner: ModePlanner | None = None,
+        offload_dir: Path | None = None,
+        registry_path: Path | None = None,
+        auto_offload: bool = False,
         checklist: list[ChecklistItem] | None = None,
         command_timeout_s: float = 5.0,
         arm_timeout_s: float = 30.0,
@@ -204,6 +216,15 @@ class CaptureController:
         self.capture_id: str | None = None
         self._busy = False
         self._alerts: dict[tuple[str | None, str], Alert] = {}
+        self._offloader = CaptureOffloader(
+            session,
+            session_id,
+            self.bus,
+            destination=offload_dir,
+            registry_path=registry_path,
+            auto=auto_offload and offload_dir is not None,
+            on_alert=lambda camera, kind, message, active: self._toggle_alert(camera, kind, active, message),
+        )
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -222,6 +243,8 @@ class CaptureController:
         await asyncio.gather(*(one(c) for c in self._cameras.values()))
 
     async def close(self) -> None:
+        self._offloader.cancel()
+        await self._offloader.wait()
         await asyncio.gather(
             *(c.driver.close() for c in self._cameras.values()), return_exceptions=True
         )
@@ -289,6 +312,7 @@ class CaptureController:
             If the setup or an overriding camera is unknown; nothing has been armed then.
         """
         self._require_phase("arm", CapturePhase.IDLE, CapturePhase.ARMED, CapturePhase.STOPPED)
+        self._require_no_offload()
         self._enter_busy()
         try:
             cams = [c for c in self._cameras.values() if c.enabled]
@@ -299,6 +323,7 @@ class CaptureController:
                 cam.in_capture = cam.overridden = False
                 cam.start = cam.stop = None
             results = await asyncio.gather(*(self._arm_one(c) for c in cams))
+            await self._offloader.take_baseline([self._offload_target(c) for c in cams])
             arm_results = {c.label: r for c, r in zip(cams, results)}
             problems: dict[str, tuple[str, ...]] = {}
             for label, res in arm_results.items():
@@ -404,9 +429,48 @@ class CaptureController:
                 if cam.overridden and cam.state == DeviceState.RECORDING:
                     self._set_state(cam, DeviceState.STOPPED)
             self._set_phase(CapturePhase.STOPPED)
+            if self._offloader.auto:
+                self._start_offload()
             return CaptureReport(self.capture_id, outcomes)
         finally:
             self._busy = False
+
+    # -- offload -----------------------------------------------------------
+
+    def offload_now(self) -> None:
+        """Copy the recordings of the capture that has just stopped.
+
+        Raises
+        ------
+        CaptureStateError
+            If no capture has stopped, or copying is not possible.
+        """
+        self._require_phase("offload", CapturePhase.STOPPED)
+        self._start_offload()
+
+    def set_auto_offload(self, enabled: bool) -> None:
+        try:
+            self._offloader.set_auto(enabled)
+        except OffloadError as exc:
+            raise CaptureStateError(str(exc)) from exc
+
+    def cancel_offload(self) -> None:
+        self._offloader.cancel()
+
+    def _start_offload(self) -> None:
+        assert self.capture_id is not None
+        targets = [self._offload_target(c) for c in self._cameras.values() if c.in_capture]
+        try:
+            self._offloader.start(self.capture_id, targets)
+        except OffloadError as exc:
+            raise CaptureStateError(str(exc)) from exc
+
+    def _offload_target(self, cam: _Camera) -> OffloadTarget:
+        return OffloadTarget(cam.label, cam.driver, cam.slot.camera_instance_id, cam.mode.mode_id if cam.mode else None)
+
+    def _require_no_offload(self) -> None:
+        if self._offloader.busy:
+            raise CaptureStateError("the videos are being copied from the cameras; wait for it to finish or cancel it")
 
     # -- state -------------------------------------------------------------
 
@@ -424,6 +488,7 @@ class CaptureController:
             "checklist": self._checklist_view(),
             "alerts": [vars(a) for a in self._alerts.values()],
             "modes": {**self.mode_options(), "selected": self.setup},
+            "offload": self._offloader.view(),
         }
 
     def mode_options(self) -> dict[str, Any]:

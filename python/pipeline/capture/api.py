@@ -72,6 +72,10 @@ class ArmRequest(BaseModel):
     modes: dict[str, str] | None = None
 
 
+class AutoOffloadRequest(BaseModel):
+    enabled: bool
+
+
 class StartRequest(BaseModel):
     label: str | None = None
     force: bool = False
@@ -217,6 +221,24 @@ def create_app(
     @_guard
     async def start(body: StartRequest, request: Request) -> dict[str, Any]:
         return _capture_report(await controller_of(request).start_capture(body.label, force=body.force))
+
+    @commands.post("/capture/offload")
+    @_guard
+    async def offload(request: Request) -> dict[str, Any]:
+        controller_of(request).offload_now()
+        return {"ok": True}
+
+    @commands.post("/offload/cancel")
+    @_guard
+    async def cancel_offload(request: Request) -> dict[str, Any]:
+        controller_of(request).cancel_offload()
+        return {"ok": True}
+
+    @commands.post("/offload/auto")
+    @_guard
+    async def auto_offload(body: AutoOffloadRequest, request: Request) -> dict[str, Any]:
+        controller_of(request).set_auto_offload(body.enabled)
+        return {"ok": True}
 
     @commands.post("/capture/stop")
     @_guard

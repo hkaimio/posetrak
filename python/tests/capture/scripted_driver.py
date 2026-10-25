@@ -10,13 +10,18 @@ import asyncio
 from dataclasses import replace
 from typing import Any
 
+from pathlib import Path
+
 from pipeline.capture.devices import (
     ArmResult,
     CameraDriver,
     CommandResult,
     DeviceState,
     DeviceStatus,
+    Downloaded,
     LinkState,
+    MediaFile,
+    OffloadError,
 )
 from posetrak.db.capture_control import utc_now_iso
 
@@ -44,6 +49,12 @@ class ScriptedDriver(CameraDriver):
         self.calls: list[str] = []
         self.armed_with: dict[str, Any] | None = None
         self.closed = False
+        # recordings: ``media`` is what is on the card, ``recorded`` is written to it on stop
+        self.supports_offload = False
+        self.media: dict[str, bytes] = {}
+        self.recorded: dict[str, bytes] = {}
+        self.fail_download: str | None = None
+        self.download_delay_s = 0.0
 
     # -- test controls -----------------------------------------------------
 
@@ -90,9 +101,28 @@ class ScriptedDriver(CameraDriver):
         if self.stop_error:
             return CommandResult(False, cmd, error=self.stop_error)
         self.recording = False
+        self.media.update(self.recorded)
         self.push_status(recording=False)
         ts = utc_now_iso()
         return CommandResult(True, cmd, ack_ts=ts, confirm_ts=ts if self.confirm else None)
+
+    async def list_media(self) -> list[MediaFile]:
+        if not self.supports_offload:
+            return await super().list_media()
+        return [MediaFile(p, len(c), 1_700_000_000 + i) for i, (p, c) in enumerate(self.media.items())]
+
+    async def download(self, file: MediaFile, dest: Path, progress=None) -> Downloaded:
+        await asyncio.sleep(self.download_delay_s)
+        if self.fail_download:
+            raise OffloadError(f"{self.label}: {self.fail_download}")
+        import hashlib
+
+        content = self.media[file.path]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(content)
+        if progress is not None:
+            progress(len(content), file.size)
+        return Downloaded(dest, len(content), hashlib.sha256(content).hexdigest())
 
     async def close(self) -> None:
         self.closed = True

@@ -189,6 +189,18 @@ def controller_factory(cfg: CaptureConfig, *, demo_cameras: int = 0) -> Callable
                 registry.close()
             session = open_session(cfg.daemon.session_db)
             sid = latest_or_new_session(session)
-        return CaptureController(slots, session, sid, settings=cfg.profile.settings, planner=planner)
+        offload_dir = None
+        if not demo_cameras:
+            offload_dir = cfg.daemon.offload_dir or (cfg.daemon.session_db.parent / "videos" if cfg.daemon.session_db else None)
+        return CaptureController(
+            slots,
+            session,
+            sid,
+            settings=cfg.profile.settings,
+            planner=planner,
+            offload_dir=offload_dir,
+            registry_path=cfg.daemon.registry_db,
+            auto_offload=cfg.daemon.auto_offload,
+        )
 
     return factory

@@ -67,6 +67,10 @@ class DaemonConfig:
     credentials_dir: Path | None = None
     #: setup used when a capture is armed without choosing one; None means the only setup
     default_setup: str | None = None
+    #: where the recordings of captures are copied to; None means a videos directory beside the session database
+    offload_dir: Path | None = None
+    #: copy the recordings automatically when a capture has stopped
+    auto_offload: bool = False
 
 
 @dataclass(frozen=True)
@@ -187,6 +191,8 @@ def parse_config(data: dict[str, Any]) -> CaptureConfig:
         registry_db=_path(d, "registry_db"),
         credentials_dir=_path(d, "credentials_dir"),
         default_setup=str(d["default_setup"]).strip() if d.get("default_setup") else None,
+        offload_dir=_path(d, "offload_dir"),
+        auto_offload=bool(d.get("auto_offload", False)),
     )
 
     p = data.get("profile", {})

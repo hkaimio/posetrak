@@ -401,6 +401,13 @@ certainty for a mode that states a lens. The result is used in three places:
    presented as a choice with the evidence.
 3. Calibration import: the matched mode selects its default intrinsics calibration.
 
+Registration (`pipeline.capture.register`) applies the same rules when a file is added to a
+capture. The mode recorded for the file is the one the file agrees with, and the mode the
+camera was armed with only fills in when the file cannot decide between modes that include
+it. A file that contradicts the armed mode is recorded with the mode it is, and flagged
+(`verify_status = 'mode_mismatch'`); a file that fits no registered mode gets no mode. The
+registry rows of the camera and the mode are copied into the session on the way.
+
 **Credentials.** COHN credentials belong to the camera, not to the PC, and any machine
 on the WLAN can use them, so they live in the registry with the rest of the machine
 setup, but in a table of their own:

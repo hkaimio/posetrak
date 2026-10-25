@@ -32,7 +32,7 @@ REGISTRY_SCHEMA_VERSION: Final[int] = 23
 #: Seconds a connection waits for another writer's lock before failing. The C++
 #: tracker's connections use the same value.
 BUSY_TIMEOUT_S: Final[float] = 60.0
-SESSION_SCHEMA_VERSION: Final[int] = 73
+SESSION_SCHEMA_VERSION: Final[int] = 74
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -2344,6 +2344,27 @@ def _migrate_session_v68_to_v69(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v73_to_v74(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 73 to 74.
+
+    v74 gives capture_videos the provenance of files copied off a camera (when, from where,
+    SHA-256) and the result of checking them against the capture.
+    """
+    _add_missing_columns(
+        conn,
+        "capture_videos",
+        [
+            ("collected_at", "TEXT"),
+            ("source_path", "TEXT"),
+            ("sha256", "TEXT"),
+            ("verify_status", "TEXT"),
+            ("verify_notes", "TEXT"),
+        ],
+    )
+    _set_schema_version(conn, 74)
+    conn.commit()
+
+
 def _migrate_session_v72_to_v73(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 72 to 73.
 
@@ -2807,6 +2828,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 72
     if actual == 72:
         _migrate_session_v72_to_v73(conn)
+        actual = 73
+    if actual == 73:
+        _migrate_session_v73_to_v74(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 
@@ -3271,6 +3295,55 @@ def add_session_camera(
             "INSERT INTO session_cameras (session_id, camera_instance_id, label) "
             "VALUES (?, ?, ?)",
             (session_id, camera_instance_id, label),
+        )
+
+
+def copy_camera_rows(
+    session: sqlite3.Connection,
+    registry: sqlite3.Connection,
+    session_id: str,
+    camera_instance_id: str,
+    camera_mode_id: str | None = None,
+    *,
+    label: str = "",
+) -> None:
+    """Make a session self-contained for a camera and, optionally, a capture mode.
+
+    Copies the registry rows of the camera, its model, the mode and the mode's default
+    intrinsic calibration into the session, and lists the camera among the session's
+    cameras. Rows that are already there are left alone, so it can be called for every
+    video. Unlike :func:`add_session_camera` it does not need a calibration.
+
+    Raises
+    ------
+    ValueError
+        If the camera or the mode is not in *registry*.
+    """
+    instance = registry.execute(
+        "SELECT camera_model_id FROM camera_instances WHERE id = ?", (camera_instance_id,)
+    ).fetchone()
+    if instance is None:
+        raise ValueError(f"camera_instance '{camera_instance_id}' not found in registry")
+    calibration_id = None
+    if camera_mode_id is not None:
+        mode = registry.execute(
+            "SELECT default_intrinsics_calibration_id FROM camera_modes WHERE id = ?", (camera_mode_id,)
+        ).fetchone()
+        if mode is None:
+            raise ValueError(f"camera_mode '{camera_mode_id}' not found in registry")
+        calibration_id = mode[0]
+    with session:
+        # A mode and its calibration refer to each other; see add_session_camera.
+        session.execute("PRAGMA defer_foreign_keys = ON")
+        _copy_rows_if_missing(registry, session, "camera_models", [instance["camera_model_id"]])
+        _copy_rows_if_missing(registry, session, "camera_instances", [camera_instance_id])
+        if camera_mode_id is not None:
+            _copy_rows_if_missing(registry, session, "camera_modes", [camera_mode_id])
+            if calibration_id is not None:
+                _copy_rows_if_missing(registry, session, "intrinsics_calibrations", [calibration_id])
+        session.execute(
+            "INSERT OR IGNORE INTO session_cameras (session_id, camera_instance_id, label) VALUES (?, ?, ?)",
+            (session_id, camera_instance_id, label or None),
         )
 
 

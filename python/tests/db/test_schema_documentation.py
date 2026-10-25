@@ -28,6 +28,7 @@ DOCUMENTED_TABLES = [
     ("registry_private_schema.sql", "control_credentials"),
     ("registry_schema.sql", "control_endpoints"),
     ("session_schema.sql", "capture_events"),
+    ("session_schema.sql", "capture_videos"),
     ("session_schema.sql", "capture_subjects"),
     ("session_schema.sql", "detection_runs"),
     ("session_schema.sql", "dot_assignment_edits"),

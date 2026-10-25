@@ -183,21 +183,25 @@ CREATE TABLE IF NOT EXISTS capture_objects (
     created_at                 TEXT NOT NULL
 );
 
--- Video files associated with a capture, one per camera.
--- camera_instance_id     -- references registry: camera_instances(id)
--- camera_mode_id         -- references registry: camera_modes(id); nullable until wizard sets it
--- intrinsics_calibration_id -- references registry: intrinsics_calibrations(id); nullable
--- shot_video_id FK columns in other tables reference capture_videos(id) (historical naming).
+-- A video file of a capture, one or more per camera (a long recording may be split into chapters).
+-- Written by the setup wizard when videos are added by hand and by the capture daemon when it
+-- registers files copied off the cameras. Other tables' shot_video_id columns reference
+-- capture_videos(id) (historical naming).
 CREATE TABLE IF NOT EXISTS capture_videos (
-    id                        TEXT PRIMARY KEY,
-    shot_id                   TEXT NOT NULL REFERENCES captures(id),
-    camera_instance_id        TEXT NOT NULL, -- references registry: camera_instances(id)
-    file_path                 TEXT NOT NULL,
-    first_video_frame         INTEGER NOT NULL,
-    last_video_frame          INTEGER NOT NULL,
-    actual_fps                REAL NOT NULL,
-    camera_mode_id            TEXT,          -- references registry: camera_modes(id)
-    intrinsics_calibration_id TEXT           -- references registry: intrinsics_calibrations(id)
+    id                        TEXT PRIMARY KEY, -- UUID; other tables refer to it as shot_video_id
+    shot_id                   TEXT NOT NULL REFERENCES captures(id), -- the capture the video belongs to (historical column name)
+    camera_instance_id        TEXT NOT NULL, -- references registry: camera_instances(id); the camera that recorded the video
+    file_path                 TEXT NOT NULL, -- path of the file; relative paths are resolved against the registry's project_root
+    first_video_frame         INTEGER NOT NULL, -- index of the first frame of the file that belongs to the capture, 0-based
+    last_video_frame          INTEGER NOT NULL, -- index of the last frame that belongs to the capture, inclusive
+    actual_fps                REAL NOT NULL, -- frames per second the video was recorded at (119.88 for a nominal 120)
+    camera_mode_id            TEXT,          -- references registry: camera_modes(id); the mode the video was recorded in; NULL if not known
+    intrinsics_calibration_id TEXT,          -- references registry: intrinsics_calibrations(id); calibration used for this video; NULL if none chosen
+    collected_at              TEXT,          -- ISO 8601 UTC time the file was copied from the camera; NULL for files added by hand
+    source_path               TEXT,          -- where the file was on the camera ('100GOPRO/GX010038.MP4'); NULL if it was not copied from a camera
+    sha256                    TEXT,          -- SHA-256 of the copied file as received from the camera; NULL if not computed
+    verify_status             TEXT,          -- what the check of the file against the capture found: 'ok', 'mode_mismatch', 'mode_assumed', 'mode_unknown' or 'unreadable'; NULL if not checked
+    verify_notes              TEXT           -- explanation of verify_status for a person; NULL if none
 );
 
 -- Synchronisation configuration: maps each camera to a common time axis

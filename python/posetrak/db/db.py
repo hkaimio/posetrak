@@ -19,7 +19,7 @@ import logging
 import sqlite3
 import uuid
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 _log = logging.getLogger(__name__)
 
@@ -27,12 +27,12 @@ _log = logging.getLogger(__name__)
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 21
+REGISTRY_SCHEMA_VERSION: Final[int] = 22
 
 #: Seconds a connection waits for another writer's lock before failing. The C++
 #: tracker's connections use the same value.
 BUSY_TIMEOUT_S: Final[float] = 60.0
-SESSION_SCHEMA_VERSION: Final[int] = 72
+SESSION_SCHEMA_VERSION: Final[int] = 73
 
 #: Default registry database location — shared across all projects on the machine.
 DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
@@ -358,6 +358,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 20
     if actual == 20:
         _migrate_registry_v20_to_v21(conn)
+        actual = 21
+    if actual == 21:
+        _migrate_registry_v21_to_v22(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -908,6 +911,31 @@ def _add_kp_sticky_config_columns(conn: sqlite3.Connection) -> None:
     for column, sql_type in _KP_STICKY_CONFIG_COLUMNS:
         if column not in existing:
             conn.execute(f"ALTER TABLE tracker_configs ADD COLUMN {column} {sql_type}")
+
+
+def _add_missing_columns(conn: sqlite3.Connection, table: str, columns: list[tuple[str, str]]) -> None:
+    """Add the columns *table* does not have yet; *columns* are ``(name, sql type)`` pairs."""
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for name, sql_type in columns:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+
+
+def _add_camera_mode_columns(conn: sqlite3.Connection) -> None:
+    """Give camera_modes its name and capture settings, and the index that keeps a model's names unique."""
+    _add_missing_columns(conn, "camera_modes", [("name", "TEXT"), ("capture_settings", "TEXT")])
+    conn.executescript((_DB_DIR / "migrations" / "034_camera_mode_capture_settings.sql").read_text(encoding="utf-8"))
+
+
+def _migrate_registry_v21_to_v22(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 21 to 22.
+
+    v22 gives camera_modes a name and the driver-specific capture settings
+    (docs/roadmap/features/camera-control).
+    """
+    _add_camera_mode_columns(conn)
+    _set_schema_version(conn, 22)
+    conn.commit()
 
 
 def _migrate_registry_v20_to_v21(conn: sqlite3.Connection) -> None:
@@ -2299,6 +2327,23 @@ def _migrate_session_v68_to_v69(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_v72_to_v73(conn: sqlite3.Connection) -> None:
+    """Migrate a session database from schema version 72 to 73.
+
+    v73 mirrors the registry v21->v22 change in the session-local copy of
+    camera_modes (absent in very old hand-made sessions) and records the mode
+    and settings a camera was armed with in capture_events.
+    """
+    has_camera_modes = (
+        conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='camera_modes'").fetchone() is not None
+    )
+    if has_camera_modes:
+        _add_camera_mode_columns(conn)
+    _add_missing_columns(conn, "capture_events", [("camera_mode_id", "TEXT"), ("settings_json", "TEXT")])
+    _set_schema_version(conn, 73)
+    conn.commit()
+
+
 def _migrate_session_v71_to_v72(conn: sqlite3.Connection) -> None:
     """Migrate a session database from schema version 71 to 72.
 
@@ -2742,6 +2787,9 @@ def open_session(path: Path) -> sqlite3.Connection:
         actual = 71
     if actual == 71:
         _migrate_session_v71_to_v72(conn)
+        actual = 72
+    if actual == 72:
+        _migrate_session_v72_to_v73(conn)
     _check_schema_version(conn, SESSION_SCHEMA_VERSION, "session")
     return conn
 
@@ -2841,6 +2889,8 @@ def create_camera_mode(
     nominal_fps: float = 0.0,
     codec: str | None = None,
     notes: str | None = None,
+    name: str | None = None,
+    capture_settings: dict[str, Any] | None = None,
 ) -> str:
     """Insert a new camera_modes row and return its ID.
 
@@ -2860,6 +2910,12 @@ def create_camera_mode(
         Optional codec identifier string (e.g. ``"h264"``).
     notes:
         Optional free-text notes.
+    name:
+        Name the mode is picked by, unique among the modes of the model.
+    capture_settings:
+        Settings the camera's driver applies to record in this mode (a JSON
+        object whose keys the driver defines); None leaves them to be derived
+        from the resolution and frame rate.
 
     Returns
     -------
@@ -2869,17 +2925,47 @@ def create_camera_mode(
     Raises
     ------
     sqlite3.IntegrityError
-        If *camera_model_id* does not refer to an existing camera_models row.
+        If *camera_model_id* does not refer to an existing camera_models row, or
+        the model already has a mode with this name.
     """
     mode_id = generate_id()
+    settings_json = json.dumps(capture_settings, sort_keys=True) if capture_settings else None
     with registry:
         registry.execute(
             "INSERT INTO camera_modes "
-            "(id, camera_model_id, width_px, height_px, nominal_fps, codec, notes) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (mode_id, camera_model_id, width_px, height_px, nominal_fps, codec, notes),
+            "(id, camera_model_id, width_px, height_px, nominal_fps, codec, notes, name, capture_settings) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (mode_id, camera_model_id, width_px, height_px, nominal_fps, codec, notes, name, settings_json),
         )
     return mode_id
+
+
+def update_camera_mode(
+    registry: sqlite3.Connection,
+    mode_id: str,
+    *,
+    name: str | None = None,
+    capture_settings: dict[str, Any] | None = None,
+) -> None:
+    """Set the name and/or the capture settings of a camera mode; an argument left None is kept.
+
+    Raises
+    ------
+    KeyError
+        If there is no mode with this id.
+    sqlite3.IntegrityError
+        If the model already has another mode with this name.
+    """
+    if registry.execute("SELECT 1 FROM camera_modes WHERE id = ?", (mode_id,)).fetchone() is None:
+        raise KeyError(mode_id)
+    with registry:
+        if name is not None:
+            registry.execute("UPDATE camera_modes SET name = ? WHERE id = ?", (name, mode_id))
+        if capture_settings is not None:
+            registry.execute(
+                "UPDATE camera_modes SET capture_settings = ? WHERE id = ?",
+                (json.dumps(capture_settings, sort_keys=True) if capture_settings else None, mode_id),
+            )
 
 
 def create_camera_instance(

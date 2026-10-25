@@ -83,6 +83,10 @@ class CaptureEvent:
     stop_ack_ts: str | None = None
     stop_confirm_ts: str | None = None
     notes: str | None = None
+    #: registry camera_modes.id the camera was armed with; None if no registry mode was used
+    camera_mode_id: str | None = None
+    #: JSON object of the settings the camera ended up with (or was asked to have)
+    settings_json: str | None = None
 
 
 def set_control_endpoint(conn: sqlite3.Connection, endpoint: ControlEndpoint) -> None:
@@ -150,8 +154,9 @@ def upsert_capture_event(conn: sqlite3.Connection, event: CaptureEvent) -> None:
         conn.execute(
             "INSERT INTO capture_events "
             "(capture_id, camera_instance_id, start_cmd_ts, start_ack_ts, start_confirm_ts, "
-            " stop_cmd_ts, stop_ack_ts, stop_confirm_ts, confidence, status, notes) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            " stop_cmd_ts, stop_ack_ts, stop_confirm_ts, confidence, status, notes, "
+            " camera_mode_id, settings_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (capture_id, camera_instance_id) DO UPDATE SET "
             " start_cmd_ts = COALESCE(excluded.start_cmd_ts, start_cmd_ts), "
             " start_ack_ts = COALESCE(excluded.start_ack_ts, start_ack_ts), "
@@ -161,7 +166,9 @@ def upsert_capture_event(conn: sqlite3.Connection, event: CaptureEvent) -> None:
             " stop_confirm_ts = COALESCE(excluded.stop_confirm_ts, stop_confirm_ts), "
             " confidence = excluded.confidence, "
             " status = excluded.status, "
-            " notes = COALESCE(excluded.notes, notes)",
+            " notes = COALESCE(excluded.notes, notes), "
+            " camera_mode_id = COALESCE(excluded.camera_mode_id, camera_mode_id), "
+            " settings_json = COALESCE(excluded.settings_json, settings_json)",
             (
                 event.capture_id,
                 event.camera_instance_id,
@@ -174,6 +181,8 @@ def upsert_capture_event(conn: sqlite3.Connection, event: CaptureEvent) -> None:
                 event.confidence,
                 event.status,
                 event.notes,
+                event.camera_mode_id,
+                event.settings_json,
             ),
         )
 
@@ -209,7 +218,7 @@ def get_capture_events(conn: sqlite3.Connection, capture_id: str) -> list[Captur
     """Return the control events of a capture, ordered by camera instance id."""
     rows = conn.execute(
         "SELECT capture_id, camera_instance_id, confidence, status, start_cmd_ts, start_ack_ts, "
-        "start_confirm_ts, stop_cmd_ts, stop_ack_ts, stop_confirm_ts, notes "
+        "start_confirm_ts, stop_cmd_ts, stop_ack_ts, stop_confirm_ts, notes, camera_mode_id, settings_json "
         "FROM capture_events WHERE capture_id = ? ORDER BY camera_instance_id",
         (capture_id,),
     ).fetchall()

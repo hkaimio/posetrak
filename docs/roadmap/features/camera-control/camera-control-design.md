@@ -313,9 +313,13 @@ camera's model. `camera_modes` has no lens, performance or exposure fields and t
 parameters differs per model, so a mode also carries the settings its driver applies:
 
 ```sql
+ALTER TABLE camera_modes ADD COLUMN name TEXT;               -- unique within the model
 ALTER TABLE camera_modes ADD COLUMN capture_settings TEXT;   -- JSON object, driver-specific
-ALTER TABLE camera_modes ADD COLUMN settings_control TEXT;   -- 'driver' | 'manual'
 ```
+
+The name is what setups and the operator refer to (`4K 120 linear`). Whether a camera's
+settings can be set remotely is a property of its driver (below), not of the mode, so the
+same mode row serves a camera that is configured over the link and one that is set by hand.
 
 `capture_settings` holds the keys of the driver's settings vocabulary (for the Hero13
 those of `gopro_profile.translate`: resolution, fps, lens, bit_rate, performance, or a raw

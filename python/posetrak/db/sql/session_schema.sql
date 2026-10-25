@@ -1023,5 +1023,7 @@ CREATE TABLE IF NOT EXISTS capture_events (
     confidence         TEXT NOT NULL CHECK (confidence IN ('confirmed', 'commanded', 'manual')), -- how far the times can be trusted: confirmed by the camera, only commanded, or operated by hand
     status             TEXT NOT NULL CHECK (status IN ('ok', 'failed', 'operator_override')), -- outcome for this camera
     notes              TEXT,  -- free text, for example the reason of a failure; NULL if none
+    camera_mode_id     TEXT,  -- registry camera_modes.id the camera was armed with; NULL if it was not armed with a registry mode
+    settings_json      TEXT,  -- JSON object of the settings the camera ended up with (read back), or was asked to have for a camera whose settings are set by hand; NULL if none were applied
     PRIMARY KEY (capture_id, camera_instance_id)
 );

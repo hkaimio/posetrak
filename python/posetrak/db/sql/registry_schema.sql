@@ -20,19 +20,25 @@ CREATE TABLE IF NOT EXISTS camera_models (
     sensor_size   TEXT
 );
 
--- Capture modes associated with a camera model (resolution, fps, codec)
--- default_intrinsics_calibration_id: the preferred calibration for this mode,
--- auto-offered by the shot wizard; NULL if no default has been set.
+-- Capture modes of a camera model: the way the camera records (resolution, frame rate, lens, ...).
+-- Intrinsic calibrations belong to a mode. Written by the registry commands and the desktop app;
+-- read by the capture daemon, which offers a model's modes when a capture is set up.
 CREATE TABLE IF NOT EXISTS camera_modes (
-    id                                TEXT PRIMARY KEY,
-    camera_model_id                   TEXT    NOT NULL REFERENCES camera_models(id),
-    width_px                          INTEGER NOT NULL DEFAULT 0,
-    height_px                         INTEGER NOT NULL DEFAULT 0,
-    nominal_fps                       REAL    NOT NULL DEFAULT 0.0,
-    codec                             TEXT,
-    notes                             TEXT,
-    default_intrinsics_calibration_id TEXT    REFERENCES intrinsics_calibrations(id)
+    id                                TEXT PRIMARY KEY,   -- UUID
+    camera_model_id                   TEXT    NOT NULL REFERENCES camera_models(id), -- the model this mode belongs to
+    width_px                          INTEGER NOT NULL DEFAULT 0,   -- image width in pixels; 0 = unknown
+    height_px                         INTEGER NOT NULL DEFAULT 0,   -- image height in pixels; 0 = unknown
+    nominal_fps                       REAL    NOT NULL DEFAULT 0.0, -- frames per second the camera records at; 0 = unknown
+    codec                             TEXT,               -- codec identifier such as 'h264'; NULL if unknown
+    notes                             TEXT,               -- free text; NULL if none
+    default_intrinsics_calibration_id TEXT    REFERENCES intrinsics_calibrations(id), -- calibration the shot wizard offers for this mode; NULL if none set
+    name                              TEXT,               -- name the operator picks the mode by, unique within the model; NULL for modes made before names existed
+    capture_settings                  TEXT                -- JSON object of the settings the camera's driver applies to record in this mode (keys defined by the driver); NULL = derive them from width, height and fps
 );
+
+-- A model's modes are told apart by name; unnamed modes are not constrained.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_camera_modes_model_name
+    ON camera_modes (camera_model_id, name) WHERE name IS NOT NULL;
 
 -- Individual physical camera units (serial number, user label)
 CREATE TABLE IF NOT EXISTS camera_instances (

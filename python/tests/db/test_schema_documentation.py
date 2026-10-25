@@ -24,6 +24,7 @@ SQL_DIR = Path(__file__).resolve().parents[2] / "posetrak" / "db" / "sql"
 
 # (schema file, table). Tables that are fully column-documented.
 DOCUMENTED_TABLES = [
+    ("registry_schema.sql", "camera_modes"),
     ("registry_schema.sql", "control_endpoints"),
     ("session_schema.sql", "capture_events"),
     ("session_schema.sql", "capture_subjects"),

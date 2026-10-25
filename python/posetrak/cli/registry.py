@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -17,6 +18,7 @@ from posetrak.db.db import (
     create_camera_instance,
     create_camera_model,
     create_camera_mode,
+    update_camera_mode,
     create_registry,
     get_project_root,
     get_schema_version,
@@ -293,6 +295,9 @@ def camera_mode_group() -> None:
               help="Nominal frames per second (default: 0 = unknown)")
 @click.option("--codec", default="", metavar="S")
 @click.option("--notes", default="", metavar="S")
+@click.option("--name", default="", metavar="S", help="Name the mode is picked by (unique within the model)")
+@click.option("--settings", default="", metavar="JSON",
+              help="Capture settings the camera's driver applies, as a JSON object")
 @click.pass_obj
 def camera_mode_add(
     obj: dict,
@@ -302,8 +307,11 @@ def camera_mode_add(
     fps: float,
     codec: str,
     notes: str,
+    name: str,
+    settings: str,
 ) -> None:
     """Register a capture mode (resolution/fps) for a camera model."""
+    capture_settings = _parse_settings(settings)
     registry = _open_registry(obj["registry"])
     try:
         mode_id = create_camera_mode(
@@ -314,6 +322,8 @@ def camera_mode_add(
             nominal_fps=fps,
             codec=codec or None,
             notes=notes or None,
+            name=name or None,
+            capture_settings=capture_settings,
         )
     except sqlite3.IntegrityError as exc:
         registry.close()
@@ -321,6 +331,44 @@ def camera_mode_add(
     finally:
         registry.close()
     click.echo(f"camera_mode_id: {mode_id}")
+
+
+def _parse_settings(text: str) -> dict | None:
+    """The JSON object given with --settings; empty text means none."""
+    if not text.strip():
+        return None
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise click.UsageError(f"--settings is not valid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise click.UsageError("--settings must be a JSON object")
+    return value
+
+
+@camera_mode_group.command("set")
+@click.argument("mode_id", metavar="MODE")
+@click.option("--name", default=None, metavar="S", help="New name of the mode")
+@click.option("--settings", default=None, metavar="JSON",
+              help="New capture settings as a JSON object ('{}' clears them)")
+@click.pass_obj
+def camera_mode_set(obj: dict, mode_id: str, name: str | None, settings: str | None) -> None:
+    """Change the name or capture settings of a camera mode (id or unique prefix)."""
+    if name is None and settings is None:
+        raise click.UsageError("give --name and/or --settings")
+    new_settings = {} if settings is not None and not settings.strip() else (
+        _parse_settings(settings) if settings is not None else None
+    )
+    registry = _open_registry(obj["registry"])
+    try:
+        resolved = _resolve(registry, "camera_modes", mode_id)
+        try:
+            update_camera_mode(registry, resolved, name=name, capture_settings=new_settings)
+        except sqlite3.IntegrityError as exc:
+            raise click.ClickException(str(exc)) from exc
+    finally:
+        registry.close()
+    click.echo(f"updated {resolved}")
 
 
 @camera_mode_group.command("list")
@@ -343,7 +391,7 @@ def camera_mode_list(obj: dict, model_id: str) -> None:
 
     print_table(
         [dict(r) for r in rows],
-        columns=["id", "camera_model_id", "width_px", "height_px", "nominal_fps", "codec"],
+        columns=["id", "camera_model_id", "name", "width_px", "height_px", "nominal_fps", "codec", "capture_settings"],
         json_mode=obj["json_mode"],
     )
 

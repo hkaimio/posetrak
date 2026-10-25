@@ -183,6 +183,36 @@ def _device_serial(registry: sqlite3.Connection, camera: RegistryCamera, serial:
 _SERIAL_HELP = "Device serial (the digits in the camera's Bluetooth name) when the camera is not linked yet."
 
 
+@main.command("import-credentials")
+@click.option("--delete-files", is_flag=True, help="Delete each credential file once its entries are in the registry.")
+@click.pass_obj
+def import_credentials(config_path: Path, delete_files: bool) -> None:
+    """Copy camera credentials saved in files by older versions into the registry.
+
+    A file belongs to a camera by its device serial, so the camera must already be linked
+    to a registry camera (`provision <label>` links it); files of other cameras are left alone.
+    """
+    from pipeline.capture.credentials import CredentialStore, RegistryCredentialStore
+
+    cfg = _load_optional_config(config_path)
+    registry = _open_registry(cfg)
+    try:
+        legacy = CredentialStore(cfg.daemon.credentials_dir if cfg else None)
+        store = RegistryCredentialStore(registry, legacy)
+        imported = store.import_legacy()
+        for serial, count in imported.items():
+            if count:
+                click.echo(f"  camera {serial}: {count} WLAN entries imported")
+                if delete_files:
+                    legacy._path(serial).unlink()
+            else:
+                click.echo(f"  camera {serial}: not linked to a registry camera, left alone")
+        if not imported:
+            click.echo(f"no credential files in {legacy.directory}")
+    finally:
+        registry.close()
+
+
 @main.command("settings")
 def settings() -> None:
     """List the settings a capture mode can specify for a Hero13, with their allowed values.
@@ -281,7 +311,7 @@ def provision(
     """
     import asyncio
 
-    from pipeline.capture.credentials import CredentialStore
+    from pipeline.capture.credentials import CredentialStore, RegistryCredentialStore
     from pipeline.capture.gopro_ble import ProvisioningError
     from pipeline.capture.gopro_ble import provision as run_provision
     from pipeline.capture.registry_link import (
@@ -304,8 +334,8 @@ def provision(
             raise click.ClickException(str(exc)) from exc
     if not ssid:
         raise click.ClickException("give --network or --ssid")
-    store = CredentialStore(cfg.daemon.credentials_dir if cfg else None)
     registry = _open_registry(cfg)
+    store = RegistryCredentialStore(registry, CredentialStore(cfg.daemon.credentials_dir if cfg else None))
     try:
         try:
             camera = find_camera(registry, label)
@@ -331,15 +361,15 @@ def provision(
                 )
             if outcome is SerialCheck.FILLED:
                 fill = click.confirm(f"Record serial number {full} for {label} in the registry?", default=True)
-        store.save(device, result.credentials)
         link_gopro(registry, camera, device)
+        store.save(device, result.credentials)
         if fill and full is not None:
             reconcile_serial(registry, camera, full)
     except LinkError as exc:
         raise click.ClickException(str(exc)) from exc
     finally:
         registry.close()
-    click.echo(f"done: {label} is at {result.credentials.ip_address} on {ssid!r}; credentials saved in {store.directory}")
+    click.echo(f"done: {label} is at {result.credentials.ip_address} on {ssid!r}; credentials saved in the registry")
     click.echo("Give the camera a fixed address in the router and list it under [network.addresses] if the address changes.")
 
 

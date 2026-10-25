@@ -27,7 +27,7 @@ _log = logging.getLogger(__name__)
 # Schema version constants
 # ---------------------------------------------------------------------------
 
-REGISTRY_SCHEMA_VERSION: Final[int] = 22
+REGISTRY_SCHEMA_VERSION: Final[int] = 23
 
 #: Seconds a connection waits for another writer's lock before failing. The C++
 #: tracker's connections use the same value.
@@ -53,6 +53,8 @@ DEFAULT_REGISTRY_PATH: Final[Path] = Path.home() / ".posetrak" / "registry.db"
 # manage_skeleton.py already uses for its own bundled YAML data.
 _DB_DIR: Final = importlib.resources.files("posetrak.db.sql")
 _REGISTRY_SCHEMA_SQL: Final = _DB_DIR / "registry_schema.sql"
+#: tables only the registry has; session databases never get them
+_REGISTRY_PRIVATE_SQL: Final = _DB_DIR / "registry_private_schema.sql"
 _SESSION_SCHEMA_SQL: Final = _DB_DIR / "session_schema.sql"
 
 
@@ -250,6 +252,7 @@ def create_registry(path: Path) -> sqlite3.Connection:
     conn = _connect(path)
     try:
         _apply_schema(conn, _REGISTRY_SCHEMA_SQL, REGISTRY_SCHEMA_VERSION)
+        conn.executescript(_REGISTRY_PRIVATE_SQL.read_text(encoding="utf-8"))
         seed_bundled_defaults(conn)
     except Exception:
         _discard_partial_db(conn, path)
@@ -361,6 +364,9 @@ def open_registry(path: Path) -> sqlite3.Connection:
         actual = 21
     if actual == 21:
         _migrate_registry_v21_to_v22(conn)
+        actual = 22
+    if actual == 22:
+        _migrate_registry_v22_to_v23(conn)
     _check_schema_version(conn, REGISTRY_SCHEMA_VERSION, "registry")
     return conn
 
@@ -925,6 +931,17 @@ def _add_camera_mode_columns(conn: sqlite3.Connection) -> None:
     """Give camera_modes its name and capture settings, and the index that keeps a model's names unique."""
     _add_missing_columns(conn, "camera_modes", [("name", "TEXT"), ("capture_settings", "TEXT")])
     conn.executescript((_DB_DIR / "migrations" / "034_camera_mode_capture_settings.sql").read_text(encoding="utf-8"))
+
+
+def _migrate_registry_v22_to_v23(conn: sqlite3.Connection) -> None:
+    """Migrate a registry database from schema version 22 to 23.
+
+    v23 adds control_credentials, the COHN credentials of the cameras, which only the
+    registry holds (sessions never get registry_private_schema.sql).
+    """
+    conn.executescript(_REGISTRY_PRIVATE_SQL.read_text(encoding="utf-8"))
+    _set_schema_version(conn, 23)
+    conn.commit()
 
 
 def _migrate_registry_v21_to_v22(conn: sqlite3.Connection) -> None:

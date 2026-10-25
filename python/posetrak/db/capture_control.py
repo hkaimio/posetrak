@@ -69,6 +69,18 @@ class ControlEndpoint:
 
 
 @dataclass(frozen=True)
+class ControlCredential:
+    """How to reach one camera over COHN on one WLAN (registry only; see registry_private_schema.sql)."""
+
+    camera_instance_id: str
+    ssid: str
+    ip_address: str
+    username: str
+    password: str
+    certificate: str
+
+
+@dataclass(frozen=True)
 class CaptureEvent:
     """Control-event log for one camera in one capture."""
 
@@ -133,6 +145,42 @@ def list_control_endpoints(conn: sqlite3.Connection) -> list[ControlEndpoint]:
         "FROM control_endpoints ORDER BY camera_instance_id"
     ).fetchall()
     return [ControlEndpoint(*tuple(r)) for r in rows]
+
+
+def set_control_credential(conn: sqlite3.Connection, credential: ControlCredential) -> None:
+    """Insert or replace the credentials of a camera on one WLAN."""
+    with conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO control_credentials "
+            "(camera_instance_id, ssid, ip_address, username, password, certificate) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                credential.camera_instance_id,
+                credential.ssid,
+                credential.ip_address,
+                credential.username,
+                credential.password,
+                credential.certificate,
+            ),
+        )
+
+
+def list_control_credentials(conn: sqlite3.Connection, camera_instance_id: str) -> list[ControlCredential]:
+    """The credentials of a camera, one per WLAN, ordered by SSID."""
+    rows = conn.execute(
+        "SELECT camera_instance_id, ssid, ip_address, username, password, certificate "
+        "FROM control_credentials WHERE camera_instance_id = ? ORDER BY ssid",
+        (camera_instance_id,),
+    ).fetchall()
+    return [ControlCredential(*tuple(r)) for r in rows]
+
+
+def delete_control_credential(conn: sqlite3.Connection, camera_instance_id: str, ssid: str) -> bool:
+    """Remove the credentials of a camera on one WLAN; return whether there were any."""
+    with conn:
+        cur = conn.execute(
+            "DELETE FROM control_credentials WHERE camera_instance_id = ? AND ssid = ?", (camera_instance_id, ssid)
+        )
+    return cur.rowcount > 0
 
 
 def upsert_capture_event(conn: sqlite3.Connection, event: CaptureEvent) -> None:

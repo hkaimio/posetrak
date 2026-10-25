@@ -14,7 +14,7 @@ from click.testing import CliRunner
 from pipeline.capture import gopro_ble
 from pipeline.capture.cli import main
 from pipeline.capture.config import CameraConfig, ConfigError, parse_config
-from pipeline.capture.credentials import CohnCredentials, CredentialStore
+from pipeline.capture.credentials import CohnCredentials, CredentialStore, RegistryCredentialStore
 from pipeline.capture.daemon import resolve_registry_cameras
 from pipeline.capture.registry_link import (
     LinkError,
@@ -26,7 +26,14 @@ from pipeline.capture.registry_link import (
     reconcile_serial,
 )
 from posetrak.db.capture_control import ControlEndpoint, get_control_endpoint, set_control_endpoint
-from posetrak.db.db import create_camera_instance, create_camera_model, create_registry, list_camera_models
+from posetrak.db.db import (
+    create_camera_instance,
+    create_camera_model,
+    create_registry,
+    create_session,
+    list_camera_models,
+    open_registry,
+)
 
 FULL_SERIAL = "C3501324514609"
 
@@ -101,6 +108,20 @@ def test_reconcile_serial_fills_an_empty_field_and_never_overwrites(registry) ->
 # -- provision command ------------------------------------------------------------------------------
 
 
+class StoredCredentials:
+    """What the registry holds, read through a fresh connection after a command has run."""
+
+    def __init__(self, registry_path: Path) -> None:
+        self._path = registry_path
+
+    def load(self, serial: str):
+        reg = open_registry(self._path)
+        try:
+            return RegistryCredentialStore(reg).load(serial)
+        finally:
+            reg.close()
+
+
 @pytest.fixture
 def cli_env(tmp_path: Path, registry, monkeypatch):
     config = tmp_path / "config.toml"
@@ -122,7 +143,7 @@ def cli_env(tmp_path: Path, registry, monkeypatch):
     def invoke(*args: str, input: str | None = None):
         return CliRunner().invoke(main, ["--config", str(config), *args], input=input)
 
-    return invoke, seen, reported, CredentialStore(tmp_path / "creds")
+    return invoke, seen, reported, StoredCredentials(tmp_path / "registry.db")
 
 
 def test_provision_links_the_camera_stores_credentials_and_fills_the_serial(registry, cli_env) -> None:
@@ -249,3 +270,89 @@ def test_serial_is_read_from_the_hardware_info_response() -> None:
     info = SimpleNamespace(data=SimpleNamespace(serial_number=f" {FULL_SERIAL} "))
     assert asyncio.run(gopro_ble._read_serial(camera(info))) == FULL_SERIAL
     assert asyncio.run(gopro_ble._read_serial(camera(RuntimeError("no answer")))) is None
+
+
+# -- credentials in the registry --------------------------------------------------------------------
+
+
+CREDS = CohnCredentials("site-ap", "192.168.8.60", "gopro", "pw", "CERT")
+
+
+def test_credentials_are_kept_per_camera_and_wlan(registry) -> None:
+    add_camera(registry, "gopro13_01")
+    link_gopro(registry, find_camera(registry, "gopro13_01"), "4609")
+    store = RegistryCredentialStore(registry)
+    assert store.load("4609") == []
+    store.save("4609", CREDS)
+    store.save("4609", CohnCredentials("home", "10.0.0.5", "gopro", "pw2", "CERT2"))
+    store.save("4609", CohnCredentials("site-ap", "192.168.8.61", "gopro", "pw3", "CERT3"))  # replaces
+    loaded = {c.ssid: c for c in store.load("4609")}
+    assert set(loaded) == {"home", "site-ap"} and loaded["site-ap"].password == "pw3"
+    assert store.forget("4609", "home") and not store.forget("4609", "home")
+    assert [c.ssid for c in store.load("4609")] == ["site-ap"]
+    with pytest.raises(LookupError, match="not linked"):
+        store.save("9999", CREDS)
+    assert store.load("9999") == []
+
+
+def test_the_registry_store_falls_back_to_files_until_they_are_imported(registry, tmp_path: Path) -> None:
+    add_camera(registry, "gopro13_01")
+    add_camera(registry, "gopro13_02")
+    link_gopro(registry, find_camera(registry, "gopro13_01"), "4609")
+    legacy = CredentialStore(tmp_path / "creds")
+    legacy.save("4609", CREDS)
+    legacy.save("4243", CohnCredentials("site-ap", "192.168.8.62", "gopro", "x", "C"))  # not linked
+    store = RegistryCredentialStore(registry, legacy)
+    assert [c.ip_address for c in store.load("4609")] == ["192.168.8.60"]
+    assert store.import_legacy() == {"4243": 0, "4609": 1}
+    legacy._path("4609").unlink()
+    assert [c.ssid for c in store.load("4609")] == ["site-ap"]
+    assert store.instance_id("4243") is None
+
+
+def test_import_credentials_command(registry, tmp_path: Path, cli_env) -> None:
+    invoke, _, _, stored = cli_env
+    add_camera(registry, "gopro13_01")
+    link_gopro(registry, find_camera(registry, "gopro13_01"), "4609")
+    CredentialStore(tmp_path / "creds").save("4609", CREDS)
+    CredentialStore(tmp_path / "creds").save("4243", CREDS)
+    result = invoke("import-credentials", "--delete-files")
+    assert result.exit_code == 0, result.output
+    assert "camera 4609: 1 WLAN entries imported" in result.output and "4243: not linked" in result.output
+    assert [c.ssid for c in stored.load("4609")] == ["site-ap"]
+    assert not (tmp_path / "creds" / "4609.json").exists() and (tmp_path / "creds" / "4243.json").exists()
+
+
+def test_credentials_exist_only_in_the_registry(tmp_path: Path) -> None:
+    session = create_session(tmp_path / "session.db")
+    tables = {r[0] for r in session.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert "control_credentials" not in tables and "control_endpoints" in tables
+    session.close()
+    registry = create_registry(tmp_path / "registry.db")
+    assert registry.execute("SELECT COUNT(*) FROM control_credentials").fetchone()[0] == 0
+    registry.close()
+
+
+def test_an_older_registry_gains_the_credentials_table(tmp_path: Path) -> None:
+    path = tmp_path / "registry.db"
+    reg = create_registry(path)
+    reg.execute("DROP TABLE control_credentials")
+    reg.execute("PRAGMA user_version = 22")
+    reg.commit()
+    reg.close()
+    reg = open_registry(path)
+    assert reg.execute("SELECT COUNT(*) FROM control_credentials").fetchone()[0] == 0
+    reg.close()
+
+
+def test_the_daemon_builds_a_driver_from_registry_credentials(registry) -> None:
+    pytest.importorskip("httpx")
+    from pipeline.capture.daemon import build_driver
+
+    add_camera(registry, "gopro13_01")
+    link_gopro(registry, find_camera(registry, "gopro13_01"), "4609")
+    store = RegistryCredentialStore(registry)
+    with pytest.raises(ConfigError, match="no COHN credentials"):
+        build_driver(CameraConfig("gopro13_01", "gopro_cohn", "4609"), parse_config({}), store)
+    store.save("4609", CREDS)
+    assert build_driver(CameraConfig("gopro13_01", "gopro_cohn", "4609"), parse_config({}), store).label == "gopro13_01"

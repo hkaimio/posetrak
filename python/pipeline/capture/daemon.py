@@ -13,7 +13,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from pipeline.capture.config import CameraConfig, CaptureConfig, ConfigError
-from pipeline.capture.credentials import CredentialStore
+from pipeline.capture.credentials import CredentialStore, RegistryCredentialStore
 from pipeline.capture.devices import CameraDriver, ManualDriver
 from pipeline.capture.modes import ModePlanner, PlannedCamera, load_modes, model_keys
 from pipeline.capture.registry_link import LinkError, find_camera
@@ -28,7 +28,11 @@ from posetrak.db.db import (
 )
 
 
-def build_driver(cam: CameraConfig, cfg: CaptureConfig | None = None, store: CredentialStore | None = None) -> CameraDriver:
+def build_driver(
+    cam: CameraConfig,
+    cfg: CaptureConfig | None = None,
+    store: CredentialStore | RegistryCredentialStore | None = None,
+) -> CameraDriver:
     """Create the driver a camera's configuration asks for.
 
     A COHN camera gets one endpoint per WLAN it was provisioned on. They are
@@ -178,7 +182,8 @@ def controller_factory(cfg: CaptureConfig, *, demo_cameras: int = 0) -> Callable
             registry = open_registry(cfg.daemon.registry_db or DEFAULT_REGISTRY_PATH)
             try:
                 resolved = resolve_registry_cameras(registry, cfg.cameras)
-                slots = [CameraSlot(c.label, instance_id, build_driver(c, cfg)) for c, instance_id in resolved]
+                store = RegistryCredentialStore(registry, CredentialStore(cfg.daemon.credentials_dir))
+                slots = [CameraSlot(c.label, instance_id, build_driver(c, cfg, store)) for c, instance_id in resolved]
                 planner = build_planner(registry, slots, cfg)
             finally:
                 registry.close()

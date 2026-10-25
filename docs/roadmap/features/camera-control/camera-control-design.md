@@ -411,10 +411,12 @@ CREATE TABLE control_credentials (
 
 The password gives full control of the camera. This table exists only in the registry
 and is never copied into session databases or into registry exports, which differs from
-`control_endpoints`, `camera_models` and `camera_instances`, whose rows sessions embed.
-Session creation is tested to leave it out. The registry file's permissions are
-restricted where the platform supports it. The existing per-camera JSON credential files
-are imported once and then ignored.
+`control_endpoints`, `camera_models` and `camera_instances`, whose rows sessions embed. It
+is defined in `registry_private_schema.sql`, which only the registry applies, and a test
+checks that a new session lacks it. The password is stored as plain text, so the registry
+file is as sensitive as the cameras; its protection is that of the user's profile directory.
+Credentials saved in files by older versions are read as a fallback until
+`posetrak-capture import-credentials` copies them into the registry.
 
 **Operator flow.**
 

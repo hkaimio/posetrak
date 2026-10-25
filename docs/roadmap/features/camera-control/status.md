@@ -42,8 +42,9 @@ Implemented on the controller side (`python/pipeline/capture/`, run as `posetrak
   `capture_events`. Cameras whose settings cannot be set remotely get a checklist item.
   Design: section 3.6 of the design document.
 
-Not built yet: the credentials table in the registry (credentials are still local files),
-mode detection from video files, collection and verify-on-collect, the other camera drivers
+Credentials are kept in a registry table that sessions never get (`control_credentials`).
+
+Not built yet: mode detection from video files, collection and verify-on-collect, the other camera drivers
 (Hero11, Insta360, Android, iPhone), node peripherals (LED rings, sync beacon) and the Qt
 integration. The beacon and node firmware are developed separately in Rust.
 

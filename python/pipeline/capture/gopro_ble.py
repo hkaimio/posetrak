@@ -6,9 +6,10 @@
 
 COHN credentials come from the camera, over Bluetooth, once per camera and
 WLAN: the camera is told to join the WLAN, then to create COHN credentials
-(user name, password, certificate) on it, which are read back and stored with
-:class:`~pipeline.capture.credentials.CredentialStore`. A camera can be
-provisioned on several WLANs; it then joins whichever it finds.
+(user name, password, certificate) on it, which are read back for the caller to
+store. A camera can be provisioned on several WLANs; it then joins whichever it
+finds. The same connection reads the camera's full serial number, which the
+registry link checks against the registry.
 
 The Open GoPro SDK is imported lazily; it is only needed for this step.
 
@@ -30,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.capture.config import DEFAULT_CONFIG_DIR
-from pipeline.capture.credentials import CohnCredentials, CredentialStore
+from pipeline.capture.credentials import CohnCredentials
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,21 @@ class ProvisioningError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class ProvisionResult:
+    credentials: CohnCredentials
+    #: full manufacturer serial number reported by the camera; None if it did not answer
+    serial_number: str | None
+
+
+@dataclass(frozen=True)
+class NearbyCamera:
+    #: device identity: the digits in the Bluetooth name "GoPro <serial>"
+    serial: str
+    address: str
+    rssi: int | None
+
+
+@dataclass(frozen=True)
 class VisibleNetwork:
     ssid: str
     frequency_mhz: int
@@ -50,6 +66,19 @@ class VisibleNetwork:
     #: the camera already holds credentials for this network
     configured: bool
     associated: bool
+
+
+async def scan_cameras(timeout_s: float = 6.0) -> list[NearbyCamera]:
+    """GoPro cameras advertising over Bluetooth, strongest signal first."""
+    from bleak import BleakScanner
+
+    found = await BleakScanner.discover(timeout=timeout_s, return_adv=True)
+    cameras = []
+    for address, (device, adv) in found.items():
+        name = adv.local_name or device.name or ""
+        if name.startswith("GoPro "):
+            cameras.append(NearbyCamera(name[len("GoPro ") :].strip(), address, adv.rssi))
+    return sorted(cameras, key=lambda c: -(c.rssi if c.rssi is not None else -999))
 
 
 def null_wifi_adapter() -> Any:
@@ -119,12 +148,14 @@ async def provision(
     serial: str,
     ssid: str,
     password: str,
-    store: CredentialStore,
     *,
     force: bool = False,
     state_dir: Path | None = None,
-) -> CohnCredentials:
-    """Join *ssid*, create COHN credentials on it and store them.
+) -> ProvisionResult:
+    """Join *ssid*, create COHN credentials on it and read the camera's serial.
+
+    The caller stores the credentials, once it has checked that this is the
+    camera it meant to provision.
 
     Parameters
     ----------
@@ -144,6 +175,15 @@ async def provision(
         creds = gopro.cohn.credentials
         if creds is None or not creds.is_complete:
             raise ProvisioningError(f"camera {serial} did not return complete COHN credentials on {ssid!r}")
-        result = CohnCredentials(ssid, creds.ip_address, creds.username, creds.password, creds.certificate)
-    store.save(serial, result)
-    return result
+        full_serial = await _read_serial(gopro)
+        return ProvisionResult(
+            CohnCredentials(ssid, creds.ip_address, creds.username, creds.password, creds.certificate), full_serial
+        )
+
+
+async def _read_serial(gopro: Any) -> str | None:
+    try:
+        return str((await gopro.ble_command.get_hardware_info()).unwrap().serial_number).strip() or None
+    except Exception:  # the serial is a cross-check; provisioning does not depend on it
+        logger.warning("could not read the camera's serial number", exc_info=True)
+        return None

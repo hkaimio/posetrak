@@ -6,14 +6,16 @@
 
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from pipeline.capture.config import CameraConfig, CaptureConfig, ConfigError
 from pipeline.capture.credentials import CredentialStore
 from pipeline.capture.devices import CameraDriver, ManualDriver
+from pipeline.capture.registry_link import LinkError, find_camera
 from pipeline.capture.service import CameraSlot, CaptureController
 from pipeline.capture.simulated import SimulatedDriver
 from posetrak.db.db import (
@@ -60,6 +62,34 @@ def build_driver(cam: CameraConfig, cfg: CaptureConfig | None = None, store: Cre
     raise ConfigError(f"camera {cam.label!r}: the {cam.method} driver is not available")
 
 
+def resolve_registry_cameras(registry: sqlite3.Connection, cameras: Sequence[CameraConfig]) -> list[tuple[CameraConfig, str]]:
+    """Complete the configured cameras from the registry; returns each with its ``camera_instances.id``.
+
+    The control method and the COHN device serial come from the camera's
+    ``control_endpoints`` row unless the configuration states them (an explicit
+    value that contradicts the registry is an error). A camera without an
+    endpoint is operated manually.
+    """
+    resolved = []
+    for cam in cameras:
+        try:
+            reg = find_camera(registry, cam.label)
+        except LinkError as exc:
+            raise ConfigError(str(exc)) from exc
+        method = cam.method or (reg.endpoint.method if reg.endpoint else "manual")
+        serial = cam.gopro_serial
+        if method == "gopro_cohn":
+            if serial and reg.gopro_serial and serial != reg.gopro_serial:
+                raise ConfigError(
+                    f"camera {cam.label!r}: the configuration says camera {serial}, the registry says {reg.gopro_serial}"
+                )
+            serial = serial or reg.gopro_serial
+            if not serial:
+                raise ConfigError(f"camera {cam.label!r} is not linked to a Hero13; run `posetrak-capture provision {cam.label}`")
+        resolved.append((dataclasses.replace(cam, method=method, gopro_serial=serial), reg.instance_id))
+    return resolved
+
+
 def resolve_camera_instances(registry: sqlite3.Connection, labels: list[str]) -> dict[str, str]:
     """Map camera labels to ``camera_instances.id``; every label must be registered."""
     ids: dict[str, str] = {}
@@ -94,12 +124,12 @@ def controller_factory(cfg: CaptureConfig, *, demo_cameras: int = 0) -> Callable
                 raise ConfigError("no [[camera]] entries in the configuration")
             registry = open_registry(cfg.daemon.registry_db or DEFAULT_REGISTRY_PATH)
             try:
-                ids = resolve_camera_instances(registry, [c.label for c in cfg.cameras])
+                resolved = resolve_registry_cameras(registry, cfg.cameras)
             finally:
                 registry.close()
             session = open_session(cfg.daemon.session_db)
             sid = latest_or_new_session(session)
-            slots = [CameraSlot(c.label, ids[c.label], build_driver(c, cfg)) for c in cfg.cameras]
+            slots = [CameraSlot(c.label, instance_id, build_driver(c, cfg)) for c, instance_id in resolved]
         return CaptureController(slots, session, sid, settings=cfg.profile.settings)
 
     return factory

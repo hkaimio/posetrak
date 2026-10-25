@@ -59,7 +59,6 @@ def test_empty_config_has_defaults() -> None:
         (lambda d: d["network"][1].update(name="home"), "duplicate network name"),
         (lambda d: d["network"][1].update(ssid="HomeNet"), "duplicate network ssid"),
         (lambda d: d["camera"][0].update(method="vhs"), "unknown method"),
-        (lambda d: d["camera"][0].pop("gopro_serial"), "gopro_serial"),
         (lambda d: d["camera"][1].update(label="gopro-13_01"), "duplicate camera label"),
         (lambda d: d["camera"][1].pop("label"), "label"),
     ],

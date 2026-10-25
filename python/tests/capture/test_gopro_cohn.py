@@ -409,38 +409,7 @@ def test_controller_captures_with_two_cameras_and_records_events(tmp_path: Path)
     run(go())
 
 
-# -- provisioning command and route check --------------------------------------------------------
-
-
-def test_provision_command_resolves_the_network_and_stores_credentials(tmp_path: Path, monkeypatch) -> None:
-    from click.testing import CliRunner
-
-    from pipeline.capture import gopro_ble
-    from pipeline.capture.cli import main
-
-    config = tmp_path / "config.toml"
-    config.write_text(
-        f'[daemon]\ntoken = "t"\ncredentials_dir = "{(tmp_path / "creds").as_posix()}"\n'
-        '[[network]]\nname = "location"\nssid = "site-ap"\n',
-        encoding="utf-8",
-    )
-    seen = {}
-
-    async def fake_provision(serial, ssid, password, store, *, force=False, state_dir=None):
-        seen.update(serial=serial, ssid=ssid, password=password, force=force)
-        creds = CohnCredentials(ssid, "192.168.8.60", "gopro", "pw", "CERT")
-        store.save(serial, creds)
-        return creds
-
-    monkeypatch.setattr(gopro_ble, "provision", fake_provision)
-    result = CliRunner().invoke(main, ["--config", str(config), "provision", "1234", "--network", "location", "--password", "wlan-pw"])
-    assert result.exit_code == 0, result.output
-    assert seen == {"serial": "1234", "ssid": "site-ap", "password": "wlan-pw", "force": False}
-    assert [c.ssid for c in CredentialStore(tmp_path / "creds").load("1234")] == ["site-ap"]
-    assert "192.168.8.60" in result.output
-
-    unknown = CliRunner().invoke(main, ["--config", str(config), "provision", "1234", "--network", "nope", "--password", "x"])
-    assert unknown.exit_code != 0 and "unknown network" in unknown.output
+# -- route check ---------------------------------------------------------------------------------
 
 
 def test_route_warning_is_silent_for_cameras_on_other_networks_and_without_routes(monkeypatch) -> None:

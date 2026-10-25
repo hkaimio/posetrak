@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import sqlite3
 from pathlib import Path
 
 import click
@@ -21,6 +22,7 @@ from pipeline.capture.config import (
     new_token,
     render_default_config,
 )
+from pipeline.capture.registry_link import RegistryCamera
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
@@ -91,7 +93,7 @@ def show_config(config_path: Path) -> None:
     for net in cfg.networks:
         click.echo(f"network:  {net.name} (ssid {net.ssid!r}, discovery {net.discovery})")
     for cam in cfg.cameras:
-        click.echo(f"camera:   {cam.label} ({cam.method})")
+        click.echo(f"camera:   {cam.label} ({cam.method or 'from the registry'})")
 
 
 @main.command("run")
@@ -137,50 +139,144 @@ def run(config_path: Path, demo: int, host: str | None, port: int | None, verbos
     uvicorn.run(app, host=listen_host, port=listen_port, log_level="debug" if verbose else "info")
 
 
+def _load_optional_config(config_path: Path) -> CaptureConfig | None:
+    if not config_path.exists():
+        return None
+    try:
+        return load_config(config_path)
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _open_registry(cfg: CaptureConfig | None) -> sqlite3.Connection:
+    from posetrak.db.db import DEFAULT_REGISTRY_PATH, open_registry
+
+    return open_registry((cfg.daemon.registry_db if cfg else None) or DEFAULT_REGISTRY_PATH)
+
+
+def _choose_nearby_camera(registry: sqlite3.Connection, label: str, *, scan_s: float) -> str:
+    """Scan over Bluetooth and let the operator pick which camera is *label*; return its device serial."""
+    import asyncio
+
+    from pipeline.capture.gopro_ble import scan_cameras
+    from pipeline.capture.registry_link import cameras_by_gopro_serial
+
+    linked = cameras_by_gopro_serial(registry)
+    click.echo(f"{label} is not linked to a camera yet; scanning for cameras ({scan_s:g} s) ...")
+    nearby = asyncio.run(scan_cameras(scan_s))
+    if not nearby:
+        raise click.ClickException("no GoPro cameras found; switch the camera on, or give its serial with --serial")
+    for i, cam in enumerate(nearby, 1):
+        owner = f"  (already {linked[cam.serial]})" if cam.serial in linked else ""
+        click.echo(f"  {i}. GoPro {cam.serial}  signal {cam.rssi if cam.rssi is not None else '?'}{owner}")
+    pick = click.prompt(f"Which one is {label}?", type=click.IntRange(1, len(nearby)))
+    return nearby[pick - 1].serial
+
+
+def _device_serial(registry: sqlite3.Connection, camera: RegistryCamera, serial: str | None, *, scan_s: float) -> str:
+    """Device serial of a registry camera: the one it is linked to, the one given, or a scanned pick."""
+    if camera.gopro_serial and serial and camera.gopro_serial != serial:
+        raise click.ClickException(f"{camera.label} is linked to camera {camera.gopro_serial}, not {serial}")
+    return serial or camera.gopro_serial or _choose_nearby_camera(registry, camera.label, scan_s=scan_s)
+
+
+_SERIAL_HELP = "Device serial (the digits in the camera's Bluetooth name) when the camera is not linked yet."
+
+
+@main.command("cameras")
+@click.option("--scan", "scan_s", type=float, default=6.0, show_default=True, help="Seconds to scan over Bluetooth.")
+@click.pass_obj
+def cameras(config_path: Path, scan_s: float) -> None:
+    """List the GoPro cameras in Bluetooth range and the registry camera each is linked to."""
+    import asyncio
+
+    from pipeline.capture.gopro_ble import scan_cameras
+    from pipeline.capture.registry_link import cameras_by_gopro_serial
+
+    registry = _open_registry(_load_optional_config(config_path))
+    try:
+        linked = cameras_by_gopro_serial(registry)
+    finally:
+        registry.close()
+    for cam in asyncio.run(scan_cameras(scan_s)):
+        rssi = cam.rssi if cam.rssi is not None else "?"
+        click.echo(f"  GoPro {cam.serial}  signal {rssi}  {linked.get(cam.serial, '(not linked)')}")
+
+
 @main.command("networks")
-@click.argument("serial")
-def networks(serial: str) -> None:
+@click.argument("label")
+@click.option("--serial", default=None, help=_SERIAL_HELP)
+@click.option("--scan", "scan_s", type=float, default=6.0, show_default=True, help="Seconds to scan over Bluetooth.")
+@click.pass_obj
+def networks(config_path: Path, label: str, serial: str | None, scan_s: float) -> None:
     """List the WLANs a Hero13 sees over Bluetooth and which it is provisioned on.
 
-    SERIAL is the last four digits of the camera's serial number (its Bluetooth
-    name is "GoPro <SERIAL>").
+    LABEL is the camera's label in the camera registry.
     """
     import asyncio
 
     from pipeline.capture.gopro_ble import list_networks
+    from pipeline.capture.registry_link import LinkError, find_camera
 
-    for net in asyncio.run(list_networks(serial)):
+    registry = _open_registry(_load_optional_config(config_path))
+    try:
+        try:
+            camera = find_camera(registry, label)
+        except LinkError as exc:
+            raise click.ClickException(str(exc)) from exc
+        device = _device_serial(registry, camera, serial, scan_s=scan_s)
+    finally:
+        registry.close()
+    for net in asyncio.run(list_networks(device)):
         marks = ",".join(m for m, on in (("provisioned", net.configured), ("joined", net.associated)) if on)
         click.echo(f"  {net.ssid:<28} {net.frequency_mhz} MHz  bars {net.signal_bars}  {marks}")
 
 
 @main.command("provision")
-@click.argument("serial")
+@click.argument("label")
+@click.option("--serial", default=None, help=_SERIAL_HELP)
+@click.option("--scan", "scan_s", type=float, default=6.0, show_default=True, help="Seconds to scan over Bluetooth.")
 @click.option("--network", "network_name", default=None, help="Name of a [[network]] block in the configuration.")
 @click.option("--ssid", default=None, help="SSID to join, when no configured network is named.")
 @click.option("--password", prompt=True, hide_input=True, help="WLAN password (prompted if omitted).")
 @click.option("--force", is_flag=True, help="Create new COHN credentials even if the camera has some.")
 @click.pass_obj
-def provision(config_path: Path, serial: str, network_name: str | None, ssid: str | None, password: str, force: bool) -> None:
-    """Set a Hero13 up for control over a WLAN, over Bluetooth.
+def provision(
+    config_path: Path,
+    label: str,
+    serial: str | None,
+    scan_s: float,
+    network_name: str | None,
+    ssid: str | None,
+    password: str,
+    force: bool,
+) -> None:
+    """Set a registry camera up for control over a WLAN, over Bluetooth.
 
-    The camera joins the WLAN, creates COHN credentials there, and they are
-    stored under the user configuration directory. Repeat for every WLAN the
-    camera will be used on (home, location access point). A camera that was
-    never paired with this computer must be in pairing mode.
+    LABEL is the camera's label in the camera registry. A camera not linked to a
+    physical Hero13 yet is picked from a Bluetooth scan (or given with --serial)
+    and the link is stored in the registry. The camera joins the WLAN, creates
+    COHN credentials there, and they are stored under the user configuration
+    directory. Repeat for every WLAN the camera will be used on (home, location
+    access point). A camera that was never paired with this computer must be in
+    pairing mode.
     """
     import asyncio
 
     from pipeline.capture.credentials import CredentialStore
     from pipeline.capture.gopro_ble import ProvisioningError
     from pipeline.capture.gopro_ble import provision as run_provision
+    from pipeline.capture.registry_link import (
+        LinkError,
+        SerialCheck,
+        check_link,
+        find_camera,
+        link_gopro,
+        reconcile_serial,
+        serial_matches,
+    )
 
-    cfg = None
-    if config_path.exists():
-        try:
-            cfg = load_config(config_path)
-        except ConfigError as exc:
-            raise click.ClickException(str(exc)) from exc
+    cfg = _load_optional_config(config_path)
     if network_name:
         if cfg is None:
             raise click.ClickException(f"--network needs a configuration file ({config_path})")
@@ -191,12 +287,41 @@ def provision(config_path: Path, serial: str, network_name: str | None, ssid: st
     if not ssid:
         raise click.ClickException("give --network or --ssid")
     store = CredentialStore(cfg.daemon.credentials_dir if cfg else None)
-    click.echo(f"provisioning camera {serial} on {ssid!r} ...")
+    registry = _open_registry(cfg)
     try:
-        creds = asyncio.run(run_provision(serial, ssid, password, store, force=force))
-    except ProvisioningError as exc:
+        try:
+            camera = find_camera(registry, label)
+            device = _device_serial(registry, camera, serial, scan_s=scan_s)
+            check_link(registry, camera, device)
+        except LinkError as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"provisioning {label} (camera {device}) on {ssid!r} ...")
+        try:
+            result = asyncio.run(run_provision(device, ssid, password, force=force))
+        except ProvisioningError as exc:
+            raise click.ClickException(str(exc)) from exc
+        full = result.serial_number
+        fill = False
+        if full is not None:
+            if not serial_matches(full, device):
+                raise click.ClickException(f"the camera reports serial {full}, which does not end in {device}; nothing was stored")
+            outcome = reconcile_serial(registry, camera, full, fill=False)
+            if outcome is SerialCheck.DIFFERS:
+                raise click.ClickException(
+                    f"the camera's serial {full} differs from {camera.serial_number} in the registry for {label}; "
+                    "this is probably a different camera. Nothing was stored."
+                )
+            if outcome is SerialCheck.FILLED:
+                fill = click.confirm(f"Record serial number {full} for {label} in the registry?", default=True)
+        store.save(device, result.credentials)
+        link_gopro(registry, camera, device)
+        if fill and full is not None:
+            reconcile_serial(registry, camera, full)
+    except LinkError as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(f"done: the camera is at {creds.ip_address} on {ssid!r}; credentials saved in {store.directory}")
+    finally:
+        registry.close()
+    click.echo(f"done: {label} is at {result.credentials.ip_address} on {ssid!r}; credentials saved in {store.directory}")
     click.echo("Give the camera a fixed address in the router and list it under [network.addresses] if the address changes.")
 
 

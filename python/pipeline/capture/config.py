@@ -30,9 +30,8 @@ arm time, the WLANs the cameras may be on, and the cameras themselves::
     discovery = "dhcp_reservation"
 
     [[camera]]
-    label = "gopro-13_01"             # camera_instances.label
-    method = "gopro_cohn"
-    gopro_serial = "1234"
+    label = "gopro-13_01"             # camera_instances.label; how it is controlled
+                                      # comes from the registry (`provision` links it)
 """
 
 from __future__ import annotations
@@ -91,7 +90,9 @@ class NetworkConfig:
 @dataclass(frozen=True)
 class CameraConfig:
     label: str
-    method: str
+    #: control method; None takes it from the registry (manual if the camera has no endpoint)
+    method: str | None = None
+    #: device identity of a COHN camera; None takes it from the registry
     gopro_serial: str | None = None
 
 
@@ -179,16 +180,14 @@ def parse_config(data: dict[str, Any]) -> CaptureConfig:
     cameras = []
     for i, c in enumerate(data.get("camera", [])):
         where = f"camera[{i}]"
-        method = str(_require(c, "method", where))
-        if method not in CAMERA_METHODS:
+        method = c.get("method")
+        if method is not None and method not in CAMERA_METHODS:
             raise ConfigError(f"{where}: unknown method {method!r} (expected one of {CAMERA_METHODS})")
         cam = CameraConfig(
             label=str(_require(c, "label", where)),
             method=method,
             gopro_serial=c.get("gopro_serial"),
         )
-        if method == "gopro_cohn" and not cam.gopro_serial:
-            raise ConfigError(f"{where}: method gopro_cohn requires gopro_serial")
         cameras.append(cam)
     _check_unique([c.label for c in cameras], "camera label")
 
@@ -255,9 +254,9 @@ name = "default"
 # [network.addresses]
 # gopro-13_01 = "192.168.8.101"
 
-# One block per camera.
+# One block per camera taking part in captures. The label is the camera's
+# label in the camera registry; the control method and the device it is linked
+# to come from the registry (`posetrak-capture provision <label>` links it).
 # [[camera]]
 # label = "gopro-13_01"
-# method = "gopro_cohn"
-# gopro_serial = "1234"
 """

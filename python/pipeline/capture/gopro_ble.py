@@ -183,7 +183,7 @@ async def provision(
 
 async def _read_serial(gopro: Any) -> str | None:
     try:
-        return str((await gopro.ble_command.get_hardware_info()).unwrap().serial_number).strip() or None
+        return str((await gopro.ble_command.get_hardware_info()).data.serial_number).strip() or None
     except Exception:  # the serial is a cross-check; provisioning does not depend on it
         logger.warning("could not read the camera's serial number", exc_info=True)
         return None

@@ -229,3 +229,23 @@ def test_daemon_refuses_cameras_that_are_not_linked_or_contradict_the_registry(r
         resolve_registry_cameras(registry, [CameraConfig("gopro13_01", "gopro_cohn", "4243")])
     with pytest.raises(ConfigError, match="not in the camera registry"):
         resolve_registry_cameras(registry, [CameraConfig("missing")])
+
+
+# -- reading the serial over Bluetooth --------------------------------------------------------------
+
+
+def test_serial_is_read_from_the_hardware_info_response() -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    def camera(response):
+        async def get_hardware_info():
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        return SimpleNamespace(ble_command=SimpleNamespace(get_hardware_info=get_hardware_info))
+
+    info = SimpleNamespace(data=SimpleNamespace(serial_number=f" {FULL_SERIAL} "))
+    assert asyncio.run(gopro_ble._read_serial(camera(info))) == FULL_SERIAL
+    assert asyncio.run(gopro_ble._read_serial(camera(RuntimeError("no answer")))) is None

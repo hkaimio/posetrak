@@ -60,14 +60,17 @@ def test_hero13_driver_prefers_the_modes_own_settings() -> None:
     from pipeline.capture.gopro_cohn import GoProCohnDriver
 
     driver = object.__new__(GoProCohnDriver)
-    assert driver.mode_settings(M4K) == M4K.capture_settings
-    assert driver.mode_settings(BARE) == {"resolution": "4K", "fps": 60}
+    off = {"hypersmooth": "off"}
+    assert driver.mode_settings(M4K) == {**M4K.capture_settings, **off}
+    assert driver.mode_settings(BARE) == {"resolution": "4K", "fps": 60, **off}
+    stabilized = ModeSpec("x", "s", 3840, 2160, 120, {"hypersmooth": "high"})
+    assert driver.mode_settings(stabilized)["hypersmooth"] == "high"
     lens_only = ModeSpec("x", "lens", 3840, 2160, 120, {"lens": "linear"})
-    assert driver.mode_settings(lens_only) == {"resolution": "4K", "fps": 120, "lens": "linear"}
+    assert driver.mode_settings(lens_only) == {"resolution": "4K", "fps": 120, "lens": "linear", **off}
     overridden = ModeSpec("x", "o", 3840, 2160, 120, {"fps": 100})
-    assert driver.mode_settings(overridden) == {"resolution": "4K", "fps": 100}
+    assert driver.mode_settings(overridden) == {"resolution": "4K", "fps": 100, **off}
     unknown_size = ModeSpec("x", "u", 0, 0, 0, {"resolution": "5K", "fps": 30, "lens": "wide"})
-    assert driver.mode_settings(unknown_size) == unknown_size.capture_settings
+    assert driver.mode_settings(unknown_size) == {**unknown_size.capture_settings, **off}
     with pytest.raises(ProfileError):
         driver.mode_settings(ModeSpec("x", "u", 0, 0, 0, {"lens": "wide"}))
     assert driver.settings_control == "driver" and "lens" in driver.supported_settings()
@@ -303,5 +306,14 @@ def test_the_settings_command_lists_the_hero13_vocabulary() -> None:
 
     result = CliRunner().invoke(main, ["settings"])
     assert result.exit_code == 0, result.output
-    for expected in ("resolution", "5.3K", "fps", "240", "lens", "linear", "bit_rate", "performance", "raw Open GoPro"):
+    for expected in ("resolution", "5.3K", "fps", "240", "lens", "linear", "hypersmooth", "bit_rate", "performance", "raw Open GoPro"):
         assert expected in result.output
+
+
+def test_hypersmooth_is_a_setting_applied_after_the_image_settings() -> None:
+    from pipeline.capture.gopro_profile import translate
+
+    assert list(translate({"hypersmooth": "off", "lens": "linear", "fps": 120})) == [3, 121, 135]
+    assert translate({"hypersmooth": "boost"}) == {135: 3}
+    with pytest.raises(ProfileError, match="hypersmooth"):
+        translate({"hypersmooth": "sometimes"})

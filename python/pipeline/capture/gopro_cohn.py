@@ -170,14 +170,16 @@ class GoProCohnDriver(CameraDriver):
         The derived values are the base, so a mode only has to add what its size cannot
         tell (the lens, the bit rate) and may state resolution or frame rate to override
         the derivation. A size that maps to no Hero13 resolution is an error unless the
-        mode's settings state the resolution and frame rate themselves.
+        mode's settings state the resolution and frame rate themselves. Image stabilization
+        is off unless the mode asks for it: it makes the image geometry change from frame to
+        frame, which an intrinsic calibration of the mode cannot describe.
         """
+        settings: dict[str, Any] = {"hypersmooth": "off"}
         try:
-            settings = derive(mode.width_px, mode.height_px, mode.fps)
+            settings.update(derive(mode.width_px, mode.height_px, mode.fps))
         except ProfileError:
             if not {"resolution", "fps"} <= mode.capture_settings.keys():
                 raise
-            settings = {}
         settings.update(mode.capture_settings)
         return settings
 

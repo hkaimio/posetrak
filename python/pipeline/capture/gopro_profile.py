@@ -63,12 +63,16 @@ _LENS: Final[dict[str, int]] = {
 }
 _BIT_RATE: Final[dict[str, int]] = {"standard": 0, "high": 1}
 _PERFORMANCE: Final[dict[str, int]] = {"max": 0, "extended_battery": 1, "tripod": 2}
+# Electronic image stabilization warps every frame differently, which no fixed lens calibration
+# describes; capture modes switch it off.
+_HYPERSMOOTH: Final[dict[str, int]] = {"off": 0, "low": 1, "high": 2, "boost": 3, "auto_boost": 4, "standard": 100}
 
 #: symbolic name -> (setting id, option lookup), in the order the settings are applied
 _SYMBOLIC: Final[dict[str, tuple[int, dict[Any, int]]]] = {
     "resolution": (2, _RESOLUTION),
     "fps": (3, _FPS),
     "lens": (121, _LENS),
+    "hypersmooth": (135, _HYPERSMOOTH),
     "bit_rate": (182, _BIT_RATE),
     "performance": (173, _PERFORMANCE),
 }

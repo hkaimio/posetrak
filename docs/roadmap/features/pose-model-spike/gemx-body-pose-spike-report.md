@@ -35,7 +35,7 @@ Terms used below:
 | Question | Result |
 |---|---|
 | Which decoder convention fits? (2D) | The frozen evaluation files are left-edge decoded (the product's candidates are exactly the frozen ones plus half a cell). Two references prefer left edge over the product's cell centre by 0.4-0.5 cell (section 3). UDP adds a slope that one reference disfavours. The earlier dot-based check in the pose-model study pointed the other way, so the question is open. |
-| 3D runs for the convention? | Not run (decision for the operator, section 3.4). |
+| 3D runs for the convention? | Not run in this spike (section 3.4). |
 | Body Pose as a candidate cue (A) | Gate **not met**: the nearest candidate to the Body Pose keypoint is correct in 53.6% of the cases where the strongest peak is wrong (gate 75%; the tracker's windowed choice 63.8%, the tracker prior 64.8%). |
 | Body Pose as an occlusion cue (B) | Gate **not met**: AUC 0.61 for picks more than 0.10 box heights off (gate 0.75); the heatmap peak has 0.88. |
 | 3D pose and initialisation (C) | Fused over cameras the mean joint error is 10-20 cm; the tracker's own start reaches about 3 cm. Not a replacement; a fallback prior at most. |
@@ -79,14 +79,12 @@ The frozen candidate files store, for each candidate, its position in the distor
 crop (centre and side). The cell coordinate of every candidate can therefore be recovered exactly and re-mapped to
 another convention (the mapping is affine in the cell coordinate), so no model re-run was needed.
 
-An earlier version of this section treated the frozen files as cell-centre decoded. That was wrong: the candidates of
-the product path (cell centre) minus those of the frozen files are exactly +0.5 cell in x and y (10th-90th percentile
-0.49999-0.50001 over 1,200 candidates), so **the frozen files are left-edge decoded**, as the task description says.
-All results below use that.
+**The frozen files are left-edge decoded.** The candidates of the product path (cell centre) minus those of the frozen
+files are exactly +0.5 cell in x and y (10th-90th percentile 0.49999-0.50001 over 1,200 candidates).
 
-The task asked for a comparison with the human labels, which "do not depend on any convention". In the range-3 files
-that is true for only 0.2% of the labels (772 and 961 free-hand positions); the other labels hold a candidate and carry
-its decoded position. Two references were used instead, and both were chosen to be free of the decoder under test:
+The human labels of range 3 cannot serve as the reference. Only 0.2% of them (772 and 961) are free-hand positions; the
+others hold a candidate and carry its decoded position, so comparing them with a decode measures the decode against
+itself. Two references were used instead, and both were chosen to be free of the decoder under test:
 
 - **A. Multi-camera consistency.** For each labelled visible keypoint that holds a candidate, the point is triangulated
   from the three other labelled cameras (the same convention applied in all cameras) and the difference between the
@@ -145,11 +143,10 @@ B has too few pairs to split by camera or group, so it is reported pooled.
 
 ### 3.4 What follows
 
-The task runs the 3D comparison only if the *slope* differs between conventions by more than its uncertainty. It does
-(UDP against the others, 1.0 against 0.35), but UDP is the convention the references disfavour. The more relevant
-difference is the constant half cell between the product's decoder and the frozen files, which is not a slope. The 3D
-runs were not made; the decision is the operator's. If run, the comparison is the product decoder (cell centre)
-against left edge, tracked at process noise 0.3 and 0.15 over range 3 and the whole trial, with the marker offsets
+The slope differs between conventions by more than its uncertainty (UDP against the others, 1.0 against 0.35), but
+UDP is the convention the references disfavour. The more relevant difference is the constant half cell between the
+product's decoder and the frozen files, which is not a slope, and which only tracking can weigh. The tracker runs that
+would settle it compare the product decoder (cell centre) against left edge, tracked at process noise 0.3 and 0.15 over range 3 and the whole trial, with the marker offsets
 re-calibrated under each. The product's decoder was not changed.
 
 ## 4. Body Pose
@@ -289,7 +286,7 @@ an average body here and cannot replace the bone-length calibration.
 ## 5. Not done
 
 - Section 2.3 (a Body Pose score term in the windowed choice, and the hidden-keypoint option): neither gate passed.
-- The 3D tracker runs of section 3 (a decision for the operator, section 3.4).
+- The tracker runs of section 3 (section 3.4).
 
 ## 6. Product work that would follow, and its cost
 

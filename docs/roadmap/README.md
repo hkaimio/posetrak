@@ -119,12 +119,13 @@ Documents:
 
 #### SOMA/GEM-X Productization
 
-**Status:** 🚧 In progress (70%) · **Categories:** `detection-pipeline`, `tracker-core`, `data-model` · **Last updated:** 2026-10-25
+**Status:** 🚧 In progress (70%) · **Categories:** `detection-pipeline`, `tracker-core`, `data-model` · **Last updated:** 2026-10-27
 
 SOMA-77 (GEM-X) as the recommended pose model in the main code line, in three releases: SOMA recommended with the detection pipeline, person assignment, skeleton binding, tracker cost and calibration items; keypoint candidates and mask versioning; tracklet editing.
 
 Documents:
 - [status.md](features/pose-model-spike/status.md)
+- [gemx-body-pose-spike-report.md](features/pose-model-spike/gemx-body-pose-spike-report.md)
 - [soma-gemx-architecture-and-schema.md](features/pose-model-spike/soma-gemx-architecture-and-schema.md)
 - [soma-gemx-productization-brief.md](features/pose-model-spike/soma-gemx-productization-brief.md)
 - [soma-gemx-productization-plan.md](features/pose-model-spike/soma-gemx-productization-plan.md)

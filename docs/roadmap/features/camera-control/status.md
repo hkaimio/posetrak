@@ -9,7 +9,7 @@ marker-lighting LEDs, automatic video offload, and a mobile web UI for field ope
 """
 categories = ["capture-hardware"]
 target_release = "TBD"
-last_updated = 2026-10-25
+last_updated = 2026-11-02
 ```
 
 # Camera Control — Implementation Status
@@ -60,10 +60,36 @@ camera) become one registered video per file.
 file was recorded in, from what the file states about itself (needs `exiftool`). It is
 checked on Hero13 files only, and is not yet wired into the setup wizard or the offload.
 
-Not built yet: matching and registering offloaded files, the other camera drivers (Hero11, Insta360, Android, iPhone), node peripherals (LED rings, sync
-beacon) and the Qt integration. The beacon and node firmware are developed separately in Rust.
+Measured on one real Hero13: a 30 s 4K 120 recording (284 MB, about 76 Mbit/s) copied in a
+little over 30 s over the WLAN, i.e. about real time. Copying a 10 minute take therefore takes
+about 10 minutes per camera. With the default of two cameras copying at once, whether the
+rate holds per camera is not yet measured.
+
+Not built yet: registering files that were recorded without the daemon, the other camera
+drivers (Hero11, Insta360, Android, iPhone), node peripherals (LED rings, sync beacon) and the
+Qt integration. The beacon and node firmware are developed separately in Rust.
 
 Camera priority: Hero13, then Hero11 and Insta360 Ace Pro 2, then Android, then iPhone.
+
+## Next steps
+
+1. **Multi-camera run on real cameras** with automatic copying on: time from stop to every
+   camera done, per-camera rate with two copies at once, cost of reading the media list when
+   arming with a full card (it grows with the number of files on the card, not with how full
+   it is), behaviour of chaptered recordings.
+2. **Fixes from that run**: copy concurrency from the measured rates; join the chapters of a
+   long recording or link them to each other; an arm-time warning when a card has less free
+   space than the planned take needs.
+3. **Setup wizard integration**: make the wizard's video probe call exiftool directly, pre-fill
+   the mode of videos added by hand, and a `register` command for files recorded without the
+   daemon (needs a tolerance for clock differences and a camera clock check).
+4. **Usability**: reload modes and setups without a restart; try the web UI on a phone; keep
+   registry credentials in the OS keystore or encrypted.
+5. **Minimal desktop integration** (Qt): capture state and starting a capture.
+6. **Field setup guide and acceptance run** with 2 or 3 cameras, including more than one WLAN.
+7. **More camera drivers**, in the priority order above, once the Hero13 acceptance run passes.
+
+More sample footage in other lenses and resolutions would complete the format detection.
 
 ## Known issues / open questions
 
@@ -73,6 +99,8 @@ Camera priority: Hero13, then Hero11 and Insta360 Ace Pro 2, then Android, then 
   and aggregate download throughput are untested (spikes S7–S9 in the design doc).
 - Whether a Hero13 can hold credentials for several WLANs and pick the one it finds is untested.
 - Setups and modes are read when the daemon starts; editing modes in the registry needs a restart.
+- Chaptered recordings (the camera splits files at about 4 GB, roughly 7 minutes at 4K 120)
+  register as one video per file.
 - Insta360 Ace Pro 2 control is based on a reverse-engineered protocol (GPS Action Remote
   emulation) and is untested against the actual hardware (S1/S2).
 - Rust BLE on ESP32 needs to cover both central (GoPro) and peripheral (Insta360 remote)

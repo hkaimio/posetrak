@@ -83,9 +83,26 @@ logger = logging.getLogger(__name__)
 #: A state older than this is read again before a command relies on it.
 STATE_MAX_AGE_S = 3.0
 
+#: How long an offload request is retried when the connection to the camera fails, and the pause
+#: between attempts (grows with every attempt up to the maximum). A camera on a marginal WLAN
+#: link is unreachable for several seconds at a time; a copy only gives up when it gets no
+#: further for the whole window.
+TRANSIENT_WINDOW_S = 60.0
+TRANSIENT_PAUSE_S = 1.0
+TRANSIENT_PAUSE_MAX_S = 5.0
+
 
 class NotProvisionedError(RuntimeError):
     """No COHN credentials are stored for the camera."""
+
+
+class _CopyInterrupted(Exception):
+    """A download stopped after *done* bytes because of *cause*."""
+
+    def __init__(self, done: int, cause: Exception) -> None:
+        super().__init__(f"{done} bytes copied; {cause!r}")
+        self.done = done
+        self.cause = cause
 
 
 @dataclass(frozen=True)
@@ -265,6 +282,26 @@ class GoProCohnDriver(CameraDriver):
         response.raise_for_status()
         return response
 
+    async def _get_retrying(self, path: str, params: dict[str, Any] | None = None) -> httpx.Response:
+        """Like :meth:`_get`, but tries again when the connection is dropped.
+
+        A camera closes a connection it has not used for a while, and a request sent over
+        such a connection fails without the camera having seen it. Offload requests are
+        read-only, so repeating one is safe.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + TRANSIENT_WINDOW_S
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return await self._get(path, params)
+            except httpx.TransportError as exc:
+                if loop.time() >= deadline:
+                    raise
+                logger.info("%s: %s failed (%s); trying again", self.label, path, type(exc).__name__)
+                await asyncio.sleep(min(TRANSIENT_PAUSE_S * attempt, TRANSIENT_PAUSE_MAX_S))
+
     async def _refresh(self, index: int | None = None) -> dict[str, Any]:
         """Read ``camera/state``, publish it as the status, and return it."""
         data = (await self._get("/gopro/camera/state", index=index)).json()
@@ -389,7 +426,7 @@ class GoProCohnDriver(CameraDriver):
 
     async def list_media(self) -> list[MediaFile]:
         try:
-            listing = (await self._get("/gopro/media/list")).json()
+            listing = (await self._get_retrying("/gopro/media/list")).json()
         except httpx.HTTPError as exc:
             raise OffloadError(f"{self.label}: could not list the media ({self._unreachable(exc)})") from exc
         files = []
@@ -414,13 +451,32 @@ class GoProCohnDriver(CameraDriver):
         error: Exception | None = None
         for url, params in attempts:
             try:
-                return (await self._get(url, params)).json()
+                return (await self._get_retrying(url, params)).json()
             except (httpx.HTTPError, ValueError) as exc:
                 error = exc
         logger.warning("%s: no metadata for %s (%s)", self.label, file.path, _describe(error))
         return {}
 
     async def download(self, file: MediaFile, dest: Path, progress: ProgressCallback | None = None) -> Downloaded:
+        # A dropped connection resumes from what has been copied. The window and the pauses start
+        # again whenever an attempt got further than the one before it.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + TRANSIENT_WINDOW_S
+        attempt, furthest = 0, -1
+        while True:
+            attempt += 1
+            try:
+                return await self._download_once(file, dest, progress)
+            except _CopyInterrupted as exc:
+                message = f"{self.label}: copying {file.path} failed after {exc.done} bytes ({type(exc.cause).__name__})"
+                if exc.done > furthest:
+                    furthest, attempt, deadline = exc.done, 1, loop.time() + TRANSIENT_WINDOW_S
+                if loop.time() >= deadline or not isinstance(exc.cause, httpx.TransportError):
+                    raise OffloadError(message) from exc.cause
+                logger.info("%s; resuming", message)
+                await asyncio.sleep(min(TRANSIENT_PAUSE_S * attempt, TRANSIENT_PAUSE_MAX_S))
+
+    async def _download_once(self, file: MediaFile, dest: Path, progress: ProgressCallback | None) -> Downloaded:
         part = dest.with_name(dest.name + ".part")
         dest.parent.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256()
@@ -446,7 +502,7 @@ class GoProCohnDriver(CameraDriver):
                         if progress is not None:
                             progress(done, file.size)
         except httpx.HTTPError as exc:
-            raise OffloadError(f"{self.label}: copying {file.path} failed after {done} bytes ({type(exc).__name__})") from exc
+            raise _CopyInterrupted(done, exc) from exc
         if file.size is not None and done != file.size:
             raise OffloadError(f"{self.label}: {file.path} is {done} bytes, the camera announced {file.size}")
         part.replace(dest)

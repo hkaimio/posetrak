@@ -249,3 +249,20 @@ def test_a_missing_registry_is_reported_and_does_not_leave_the_copy_running(make
     view = rig.ctl.snapshot()["offload"]
     assert not view["busy"] and {c["state"] for c in view["cameras"].values()} == {"failed"}
     assert [(a.camera, a.kind) for a in rig.ctl.alerts] == [(None, "offload_failed")]
+
+
+def test_a_camera_waiting_for_its_turn_has_already_listed_its_recordings(make) -> None:
+    rig = make()
+    rig.ctl._offloader._concurrency = 1
+    rig.drivers[0].download_delay_s = 0.3
+
+    async def go():
+        await rig.take()
+        await asyncio.sleep(0.1)
+        cams = rig.ctl.snapshot()["offload"]["cameras"]
+        states = {label: (c["state"], c["files"]) for label, c in cams.items()}
+        await rig.ctl._offloader.wait()
+        return states
+
+    states = run(go())
+    assert sorted(states.values()) == [("copying", 1), ("waiting", 1)]

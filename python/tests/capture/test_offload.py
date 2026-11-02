@@ -134,20 +134,50 @@ def test_selecting_recordings(fake: FakeGoPro, tmp_path: Path) -> None:
     assert nothing == []
 
 
-def test_an_interrupted_copy_resumes(fake: FakeGoPro, tmp_path: Path) -> None:
+@pytest.fixture()
+def no_pause(monkeypatch):
+    monkeypatch.setattr("pipeline.capture.gopro_cohn.TRANSIENT_PAUSE_S", 0.0)
+    monkeypatch.setattr("pipeline.capture.gopro_cohn.TRANSIENT_WINDOW_S", 0.5)
+
+
+def test_an_interrupted_copy_resumes_by_itself(fake: FakeGoPro, tmp_path: Path, no_pause) -> None:
     fake.cut_download_at = 300_000
 
     async def go():
         async with driver_for(fake) as d:
-            with pytest.raises(OffloadError, match="GX010001.MP4 failed after"):
-                await offload_camera(d, tmp_path)
-            part = target_path(tmp_path, "cam", (await d.list_media())[0]).with_name("GX010001.MP4.part")
-            assert 0 < part.stat().st_size < len(CLIP_A)
             return await offload_camera(d, tmp_path)
 
-    results = run(go())
-    first = results[0]
+    first = run(go())[0]
     assert first.path.read_bytes() == CLIP_A and first.sha256 == hashlib.sha256(CLIP_A).hexdigest()
+
+
+def test_a_copy_that_keeps_failing_gives_up_and_resumes_next_time(fake: FakeGoPro, tmp_path: Path, no_pause) -> None:
+    fake.cut_download_at = 300_000
+
+    async def go():
+        async with driver_for(fake) as d:
+            file = (await d.list_media())[0]
+            dest = target_path(tmp_path, "cam", file)
+            fake.link_up = False  # nothing gets through for longer than the retry window
+            with pytest.raises(OffloadError, match="GX010001.MP4 failed after"):
+                await d.download(file, dest)
+            fake.link_up = True
+            return await d.download(file, dest)
+
+    assert run(go()).path.read_bytes() == CLIP_A
+
+
+def test_a_dropped_connection_does_not_fail_the_media_list(fake: FakeGoPro, no_pause) -> None:
+    async def go():
+        async with driver_for(fake) as d:
+            fake.drop_requests = 2
+            files = await d.list_media()
+            fake.link_up = False
+            with pytest.raises(OffloadError, match="could not list the media"):
+                await d.list_media()
+            return files
+
+    assert {f.path for f in run(go())} == set(fake.media)
 
 
 def test_a_copy_of_the_wrong_size_is_rejected(fake: FakeGoPro, tmp_path: Path) -> None:

@@ -21,6 +21,7 @@ Behaviour knobs, all settable while the server runs:
 ``encoding_delay_s``   time between a start command and the encoding flag rising
 ``response_delay_s``   added to every response
 ``link_up``            False: connections are accepted and dropped without a reply
+``drop_requests``      number of upcoming requests whose connection is dropped without a reply
 ``fail_commands``      number of upcoming shutter commands answered with HTTP 500
 ``never_encodes``      shutter/start is acknowledged but the camera never records
 ``stop_after_s``       the camera stops recording by itself this long after start
@@ -64,6 +65,7 @@ class FakeGoPro:
         self.encoding_delay_s = 0.0
         self.response_delay_s = 0.0
         self.link_up = True
+        self.drop_requests = 0
         self.fail_commands = 0
         self.never_encodes = False
         self.stop_after_s: float | None = None
@@ -149,6 +151,11 @@ class FakeGoPro:
     # -- HTTP --------------------------------------------------------------
 
     def _handle(self, handler: BaseHTTPRequestHandler) -> None:
+        if self.drop_requests > 0:
+            self.drop_requests -= 1
+            handler.close_connection = True
+            handler.connection.close()
+            return
         if not self.link_up:
             handler.close_connection = True
             handler.connection.close()

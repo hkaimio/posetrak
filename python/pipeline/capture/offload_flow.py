@@ -217,11 +217,7 @@ class CaptureOffloader:
                 registry = open_registry(self._registry_path or DEFAULT_REGISTRY_PATH)
             opened = registry
 
-            async def guarded(target: OffloadTarget) -> None:
-                async with gate:
-                    await self._one(capture_id, target, root, opened)
-
-            await asyncio.gather(*(guarded(t) for t in targets))
+            await asyncio.gather(*(self._one(capture_id, t, root, opened, gate) for t in targets))
         except asyncio.CancelledError:
             for p in self._progress.values():
                 if p.state in ("waiting", "copying", "registering"):
@@ -239,7 +235,9 @@ class CaptureOffloader:
             self._running = False
             self._publish()
 
-    async def _one(self, capture_id: str, target: OffloadTarget, root: Path, registry: sqlite3.Connection | None) -> None:
+    async def _one(
+        self, capture_id: str, target: OffloadTarget, root: Path, registry: sqlite3.Connection | None, gate: asyncio.Semaphore
+    ) -> None:
         progress = self._progress[target.label]
         try:
             files = await self._new_recordings(target)
@@ -248,7 +246,7 @@ class CaptureOffloader:
                 progress.error = "the recordings from before the capture were not listed, so the new ones cannot be told"
                 self._on_alert(target.label, "offload_failed", f"{target.label}: {progress.error}", True)
                 return
-            progress.files, progress.state = len(files), "copying"
+            progress.files = len(files)
             progress.bytes_total = sum(f.size or 0 for f in files)
             self._publish()
             offsets: dict[str, int] = {}
@@ -262,12 +260,15 @@ class CaptureOffloader:
                 if time.monotonic() - self._last_publish >= PROGRESS_INTERVAL_S:
                     self._publish()
 
-            results = await offload_camera(target.driver, root, files=files, progress=on_progress)
-            progress.state = "registering"
-            self._publish()
-            for result in results:
-                await self._register(capture_id, target, result, registry, progress)
-                progress.files_done += 1
+            async with gate:
+                progress.state = "copying"
+                self._publish()
+                results = await offload_camera(target.driver, root, files=files, progress=on_progress)
+                progress.state = "registering"
+                self._publish()
+                for result in results:
+                    await self._register(capture_id, target, result, registry, progress)
+                    progress.files_done += 1
             progress.bytes_done = progress.bytes_total
             progress.state = "done"
         except asyncio.CancelledError:

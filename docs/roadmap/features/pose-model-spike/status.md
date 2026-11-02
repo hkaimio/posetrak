@@ -9,7 +9,7 @@ calibration items; keypoint candidates and mask versioning; tracklet editing.
 """
 categories = ["detection-pipeline", "tracker-core", "data-model"]
 target_release = "TBD"
-last_updated = 2026-10-25
+last_updated = 2026-10-27
 ```
 
 # SOMA/GEM-X Productization — Implementation Status
@@ -81,5 +81,15 @@ The plan's "Known limits of the first release" lists them. The ones to settle by
   ([jitter study report](../keypoint-candidates/jitter-study-report.md)).
 - **Foot twist about the long axis.** The three SOMA-77 foot keypoints are collinear, so this twist cannot be
   observed. An open design question (keypoint-candidates design section 10.9).
+- **Keypoint decoder convention.** The product decodes a heatmap cell at its centre; the frozen evaluation files and
+  GEM-X before its 2026-10-21 release used the cell's left edge, and the release uses `i / (W - 1)`. Two references
+  (multi-camera consistency, free-hand labels) prefer left edge by about half a cell (about 2 cm on a person); an
+  earlier single-camera check pointed the other way. Tracker runs with the candidates shifted by half a cell are to
+  settle it ([GEM-X spike report](gemx-body-pose-spike-report.md) section 3).
+- **GEM-X Body Pose is not used.** As a candidate cue it finds the right candidate in 54% of the cases where the
+  strongest peak is wrong (the tracker's prior 65%); as an occlusion cue its AUC is 0.61 (the heatmap peak 0.88); its
+  3D pose fused over cameras is 10-14 cm from the edited runs. A single-camera mode for simple captures (with GEM-X
+  Body Motion rather than Body Pose) is an idea for later, not planned
+  ([GEM-X spike report](gemx-body-pose-spike-report.md)).
 - **Mask edits in place.** Edits do not create a new revision, so a box or tracking run cannot record which masks
   it read.

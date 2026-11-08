@@ -9,7 +9,7 @@ marker-lighting LEDs, automatic video offload, and a mobile web UI for field ope
 """
 categories = ["capture-hardware"]
 target_release = "TBD"
-last_updated = 2026-11-02
+last_updated = 2026-11-08
 ```
 
 # Camera Control — Implementation Status
@@ -88,6 +88,13 @@ Camera priority: Hero13, then Hero11 and Insta360 Ace Pro 2, then Android, then 
 5. **Minimal desktop integration** (Qt): capture state and starting a capture.
 6. **Field setup guide and acceptance run** with 2 or 3 cameras, including more than one WLAN.
 7. **More camera drivers**, in the priority order above, once the Hero13 acceptance run passes.
+
+8. **Synchronization wand integration.** The wand (developed separately: mechanics, algorithm,
+   firmware) produces sync data between cameras; it is not yet connected to Posetrak. Three
+   steps, in this order: store a capture's sync result with the capture (needs a data model
+   decision shared with the wand work, before either side adds schema versions); run the sync
+   analysis automatically on the videos once they are copied and registered; and let the
+   capture daemon start the wand's sync mechanism as part of a capture, like the marker LEDs.
 
 More sample footage in other lenses and resolutions would complete the format detection.
 

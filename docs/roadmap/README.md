@@ -27,7 +27,7 @@ Documents:
 
 #### Camera Control
 
-**Status:** 📝 Proposal · **Categories:** `capture-hardware` · **Last updated:** 2026-11-02
+**Status:** 📝 Proposal · **Categories:** `capture-hardware` · **Last updated:** 2026-11-08
 
 A system to start/stop and confirm a heterogeneous set of capture cameras (GoPro Hero13 first, then Hero11, Insta360, Android phones, eventually iPhone) from a single controller PC over a wireless capture LAN, with per-camera start-time accuracy, remote control of the marker-lighting LEDs, automatic video offload, and a mobile web UI for field operation.
 

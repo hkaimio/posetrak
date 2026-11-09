@@ -139,8 +139,8 @@ class ArucoDetector:
         detections: list[FiducialDetection] = []
         if ids is None:
             return detections
-        for marker_corners, marker_id_arr in zip(corners, ids):
-            marker_id = str(int(marker_id_arr[0]))
+        for marker_corners, marker_id_value in zip(corners, np.asarray(ids).reshape(-1)):
+            marker_id = str(int(marker_id_value))
             pts = marker_corners.reshape(4, 2)
             corner_obs = [
                 MarkerCornerObs(
